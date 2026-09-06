@@ -1,6 +1,6 @@
 # Inline text editing by readers
 
-Research for the `architecture-docs` documentation platform. Feature area: a reader with permission
+Research for the `archon` documentation platform. Feature area: a reader with permission
 edits text in place, and the change persists.
 
 **Recommendation: Model 1, write back to git as a pull request, with a bounded pending-edit overlay in
@@ -566,7 +566,7 @@ import { getStore } from "@netlify/blobs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 
-const REPO  = process.env.DOCS_REPO!;                    // "aiur-team/architecture-docs"
+const REPO  = process.env.DOCS_REPO!;                    // "aiur-team/archon"
 const BASE  = process.env.DOCS_BASE_BRANCH ?? "main";
 const TOKEN = process.env.DOCS_GITHUB_TOKEN!;
 
@@ -794,7 +794,7 @@ Checked 2 September 2026; document 01 section 2 carries the citations and the fa
 
 | Variable | Value | Scope |
 |---|---|---|
-| `DOCS_REPO` | `aiur-team/architecture-docs` | Functions |
+| `DOCS_REPO` | `aiur-team/archon` | Functions |
 | `DOCS_BASE_BRANCH` | `main` | Functions |
 | `DOCS_GITHUB_TOKEN` | fine-grained PAT, **secret** | **Functions only, not Builds** |
 | `DOCS_BOT_EMAIL` | the bot's commit email | Functions |

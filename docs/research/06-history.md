@@ -1,6 +1,6 @@
 # History of changes
 
-Research for the architecture-docs documentation platform. All external facts were checked on
+Research for the archon documentation platform. All external facts were checked on
 **1 September 2026**. Where a fact was not confirmed, this document says so.
 
 **Written when the builder was Python. Converted to Rust on 2 September 2026.** Every command, module
@@ -34,7 +34,7 @@ Annotation history is a second, later layer. It is an event log, not a mutable c
 
 ## 2. What git already gives, free
 
-The repository is `aiur-team/architecture-docs`. A document is an instance directory:
+The repository is `aiur-team/archon`. A document is an instance directory:
 
 ```
 example/
@@ -49,7 +49,7 @@ build one. You need to **surface** it.
 
 Three facts decide how.
 
-**Fact 1. The repository is private.** An unauthenticated `GET https://api.github.com/repos/aiur-team/architecture-docs`
+**Fact 1. The repository is private.** An unauthenticated `GET https://api.github.com/repos/aiur-team/archon`
 returned HTTP 404 on 1 September 2026. A 404 is how GitHub hides a private repository. So the page cannot
 call the GitHub API from the browser. Any live history read needs a server-side token.
 
@@ -114,7 +114,7 @@ Here is the proxy function, if you build it. It caches into Blobs so the token i
 // Tier 2 only. The recommended design does not need this.
 import { getStore } from "@netlify/blobs"
 
-const REPO = "aiur-team/architecture-docs"
+const REPO = "aiur-team/archon"
 const SRC = ["sections", "doc.json", "extra.css"]
 const TTL_MS = 10 * 60 * 1000
 
@@ -257,7 +257,7 @@ use crate::Section;
 use std::path::Path;
 use std::process::Command;
 
-const REPO_URL: &str = "https://github.com/aiur-team/architecture-docs";
+const REPO_URL: &str = "https://github.com/aiur-team/archon";
 const SRC_PATHS: [&str; 3] = ["sections", "doc.json", "extra.css"];
 const HISTORY_LIMIT: usize = 12;          // versions carried in the page
 const PATCH_CAP: usize = 1200;            // bytes of diff kept per changed file
@@ -698,7 +698,7 @@ Do not store old renders, and do not build a version picker that re-renders them
 committed, so every past render already exists in git. One link per version is enough:
 
 ```
-https://github.com/aiur-team/architecture-docs/blob/<sha>/example/dist/example.html
+https://github.com/aiur-team/archon/blob/<sha>/example/dist/example.html
 ```
 
 GitHub will not render it, but a reader can use the **Raw** button, and a writer can
@@ -1123,7 +1123,7 @@ Everything below was checked on **1 September 2026**.
 | `GET /repos/{owner}/{repo}/commits` supports `path`, `since`, `until`, `per_page` (max 100), `page` | GitHub REST docs, Commits |
 | Contents endpoint takes `ref`; `application/vnd.github.raw+json`; all features ≤1 MB, raw/object 1–100 MB | GitHub REST docs, Repository contents |
 | Rate limits: 60/hr unauthenticated, 5,000/hr PAT, 5,000–12,500/hr GitHub App | GitHub REST rate-limits page |
-| `aiur-team/architecture-docs` is private | `curl` returned HTTP 404 unauthenticated |
+| `aiur-team/archon` is private | `curl` returned HTTP 404 unauthenticated |
 | Netlify Functions v2: default export `(req, context)`, `export const config = { path }`, `netlify/functions/` | Netlify Functions get-started |
 | Function limits: 60s synchronous, 30s scheduled, 15min background, not configurable | Netlify Functions optional configuration |
 | Node runtime follows the build's Node version; fallback Node 24; override with `AWS_LAMBDA_JS_RUNTIME`, UI/CLI/API only | Netlify Functions optional configuration |
