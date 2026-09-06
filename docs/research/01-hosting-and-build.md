@@ -85,7 +85,7 @@ self-contained file.
 ## 3. Directory layout
 
 ```
-architecture-docs/
+archon/
 ├── netlify.toml                     # new. see section 4
 ├── rust-toolchain                   # new. the build image installs no toolchain by itself
 ├── .gitignore                       # new line: _site/
@@ -136,7 +136,7 @@ Rules that keep this simple.
 Put this at the repository root.
 
 ```toml
-# Netlify configuration for architecture-docs.
+# Netlify configuration for archon.
 # The build is one command and one compiled binary. There is no package.json
 # and none is needed. Verified against Netlify file-based configuration docs on
 # 2026-09-01; the Rust build-image facts re-checked 2026-09-02.

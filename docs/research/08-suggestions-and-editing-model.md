@@ -1,6 +1,6 @@
 # Suggestions and the editing model
 
-Research for the `architecture-docs` documentation platform. Written 2026-09-02. Feature area: two kinds
+Research for the `archon` documentation platform. Written 2026-09-02. Feature area: two kinds
 of proposed change to a block of text — a **suggestion**, which needs acceptance, and an **edit**, which is
 applied by a person who may apply it.
 

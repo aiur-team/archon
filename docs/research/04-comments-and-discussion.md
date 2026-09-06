@@ -1,6 +1,6 @@
 # Commenting and threaded discussion
 
-Research for the `architecture-docs` document platform. Written 2026-09-01. Every external fact below
+Research for the `archon` document platform. Written 2026-09-01. Every external fact below
 was checked on 2026-09-01 unless another date is given.
 
 **Written when the builder was Python. Converted to Rust on 2 September 2026.** Every command, module

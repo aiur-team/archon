@@ -648,7 +648,7 @@ P2-E, for why this file exists.
       "date": "2026-09-01T17:20:00+00:00",
       "author": "the owner W",
       "subject": "Add remote build cache document",
-      "url": "https://github.com/aiur-team/architecture-docs/commit/7aaca51...",
+      "url": "https://github.com/aiur-team/archon/commit/7aaca51...",
       "changed": [
         { "file": "03-architecture.html", "id": "architecture", "label": "Architecture",
           "add": 4, "del": 1, "patch": "...", "clipped": false }
