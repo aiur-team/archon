@@ -1,6 +1,6 @@
 {
   "name": "@aiur-team/docbuild",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Compose an architecture doc into one self-contained HTML file.",
   "type": "module",
   "license": "MIT",
@@ -18,8 +18,6 @@
   },
   "files": [
     "dist",
-    "base",
-    "skeleton",
     "README.md"
   ],
   "engines": {
@@ -28,6 +26,8 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
+    "prepack": "node scripts/pack-assets.mjs copy",
+    "postpack": "node scripts/pack-assets.mjs clean",
     "check": "tsc --noEmit"
   },
   "devDependencies": {
