@@ -235,13 +235,19 @@ const isDir = (p: string): boolean => {
  * that vendors `templates/base/`, and an installed package that carries
  * `base/` beside its own code. The package must keep working after it is
  * split out of the repository it grew up in.
+ *
+ * The vendored copy is tried first, so a checkout always builds from the
+ * assets it has committed. The published package stages them next to the
+ * compiled modules, in `dist/base/`, which is where `npm pack` can reach them
+ * and where site discovery will never mistake them for a document.
  */
 export function resolveBase(root: string): string {
   const vendored = join(root, "templates", "base");
   if (existsSync(join(vendored, "layout.html"))) return vendored;
 
   const here = dirname(fileURLToPath(import.meta.url));
-  for (const candidate of [join(here, "..", "base"), join(here, "..", "..", "base")]) {
+  const candidates = [join(here, "base"), join(here, "..", "base"), join(here, "..", "..", "base")];
+  for (const candidate of candidates) {
     if (existsSync(join(candidate, "layout.html"))) return resolve(candidate);
   }
   return fail("cannot find base assets: no templates/base/layout.html and none beside the package");
