@@ -20,6 +20,10 @@ import {
  * create-only write, into the site-wide `doc-state` store. Later grants and
  * transfers live only in that store. No owner, role, email, or capability
  * claim from a built document, a request, or a client global is authoritative.
+ * The site-level `PUBLIC_DEFAULT_ROLE` variable is the one other runtime input
+ * to authority: it names the read-only-or-comment role an authenticated visitor
+ * receives when no owner, grant, invitation, or organization rule speaks for
+ * them. It is unset by default and denies on anything it does not recognise.
  *
  * Storage goes through the P2-B helpers imported above: every record read is a
  * strongly consistent `read()`, every stored record passes `upgrade()` before
@@ -149,6 +153,14 @@ const ISO_TIMESTAMP_PATTERN =
  */
 export const GRANTABLE_ROLES = Object.freeze(["editor", "commenter", "viewer"]);
 export const ORG_DEFAULTS = Object.freeze(["commenter", "viewer", "none"]);
+
+/**
+ * The only two roles the site-level `PUBLIC_DEFAULT_ROLE` may name. Both are
+ * read-only-or-comment roles: neither can edit, accept, share, or see members.
+ * `editor` and `owner` are deliberately absent and are not downgraded to a
+ * nearby role — a value naming one is invalid configuration and denies.
+ */
+export const PUBLIC_DEFAULT_ROLES = Object.freeze(["viewer", "commenter"]);
 
 const USER_KEYS = Object.freeze(["email", "isOrg", "name", "sub"]);
 const ACTOR_KEYS = Object.freeze(["email", "name", "sub"]);
@@ -924,6 +936,56 @@ function validateUser(user) {
 }
 
 /**
+ * Parse the site-level `PUBLIC_DEFAULT_ROLE` value into the role a signed-in
+ * visitor who matches nothing else receives.
+ *
+ * This is the one setting in the platform that widens access to people the
+ * owner has never named, so it fails closed in every direction. `undefined`,
+ * `null`, a non-string, the empty string, an ASCII-whitespace-only string, and
+ * every spelling that is not exactly `"viewer"` or `"commenter"` after edge
+ * trimming all return `"none"` — the role whose capability row is entirely
+ * false. Matching is exact and case-sensitive: `"Viewer"` is not a viewer.
+ *
+ * A value naming a writing role — `"editor"`, `"owner"` — is invalid
+ * configuration, not a request that gets clamped: it returns `"none"` rather
+ * than the nearest safe role, so a typo cannot quietly publish a document at
+ * some lower privilege the operator never asked for.
+ *
+ * Unlike `parseDocOwners()`, a malformed value denies rather than throwing
+ * `invalid-config`. A throw here would turn one bad site variable into a 500 on
+ * every request including the owner's own, and the safe answer to "who is this
+ * stranger?" is already available: nobody. The rejected value is never
+ * returned, embedded in a message, or logged.
+ *
+ * @param {unknown} value
+ * @returns {"viewer" | "commenter" | "none"}
+ */
+export function parsePublicDefaultRole(value) {
+  if (typeof value !== "string") {
+    return "none";
+  }
+  const trimmed = value.replace(ASCII_WHITESPACE, "");
+  return PUBLIC_DEFAULT_ROLES.includes(trimmed) ? trimmed : "none";
+}
+
+/**
+ * Read the public-default value for this invocation, by the same
+ * invocation-local rule as `runtimeDocOwners()`. There is deliberately no
+ * `resolveRole()` option counterpart: the only thing that may widen access to
+ * an unnamed visitor is site configuration, and an option would let any caller
+ * in the deploy tree pass a role of its own choosing.
+ *
+ * @returns {unknown}
+ */
+function runtimePublicDefaultRole() {
+  const env = globalThis.Netlify?.env;
+  if (env !== undefined && env !== null && typeof env.get === "function") {
+    return globalThis.Netlify.env.get("PUBLIC_DEFAULT_ROLE");
+  }
+  return globalThis.process?.env?.PUBLIC_DEFAULT_ROLE;
+}
+
+/**
  * Read the seed-owner value for this invocation. An Edge Function exposes the
  * Functions-scoped site variable through `Netlify.env`; a Node Function
  * exposes it through `process.env`. Nothing is cached across invocations.
@@ -1024,8 +1086,15 @@ async function liveInvitation(store, docId, key, email, now) {
  *   > explicit grant by sub
  *   > live invitation by normalized proven email
  *   > orgDefault for isOrg
+ *   > PUBLIC_DEFAULT_ROLE for any other authenticated caller
  *   > none
  * ```
+ *
+ * The `PUBLIC_DEFAULT_ROLE` tier is off unless the site variable holds exactly
+ * `viewer` or `commenter`; every other value, and no value at all, is `none`.
+ * It is reached only by an authenticated caller — a null user has already
+ * returned `none` — it cannot lower a role any earlier rule granted, and it is
+ * skipped entirely when the document's `orgDefault` is the explicit `"none"`.
  *
  * A null user, an absent document record, an unset seed, a missing grant, a
  * missing invitation, and an expired invitation all resolve to a result.
@@ -1165,5 +1234,14 @@ export async function resolveRole(docId, user, options = {}) {
   if (user.isOrg) {
     return resolved(orgDefault, shared);
   }
-  return resolved("none", shared);
+
+  /* The public default is the last thing consulted before denial, and only for
+     a signed-in visitor who matched nothing above. An explicit document-level
+     `orgDefault: "none"` is a deliberate denial of the default tier, so it
+     suppresses the public default too: this rule may only widen access that
+     nobody has decided, never resurrect access somebody removed. */
+  if (orgDefault === "none") {
+    return resolved("none", shared);
+  }
+  return resolved(parsePublicDefaultRole(runtimePublicDefaultRole()), shared);
 }

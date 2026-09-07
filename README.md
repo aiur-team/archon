@@ -33,6 +33,7 @@ exhaustive component reference, built by this template so it cannot drift from t
 |---|---|
 | `ORG_EMAIL_DOMAIN` | Organisation email suffix, including the leading `@` (for example, `@example.com`). Matching is case-insensitive. If it is unset, empty, or malformed, nobody receives organisation membership. |
 | `DOC_OWNERS` | Comma-separated document-owner seeds in `<document>:<email>` form. |
+| `PUBLIC_DEFAULT_ROLE` | Off unless set. The role any signed-in visitor receives when no owner, grant, invitation, or organisation rule applies to them. Only `viewer` and `commenter` are valid; anything else — unset, empty, `editor`, `owner`, a typo — grants nothing. Set it only on a deliberately public instance. |
 | `ABLY_API_KEY` | Optional Ably API key for realtime presence and events. |
 | `SLACK_WEBHOOK_URL` | Optional Slack webhook for notifications. |
 | `DOCS_REPO` | Source repository in `<owner>/<repository>` form for repository-backed edits. |
@@ -43,6 +44,12 @@ exhaustive component reference, built by this template so it cannot drift from t
 `ORG_EMAIL_DOMAIN` failing closed is deliberate: a missing or malformed value grants nobody membership
 rather than granting everybody. The implementation never sends configuration values to callers or writes
 them to logs.
+
+`PUBLIC_DEFAULT_ROLE` is the one setting that widens access to people nobody has named, so it fails closed
+the same way: an unset, empty, whitespace-only or unrecognised value resolves to no access at all, and a
+writing role is rejected outright rather than quietly reduced to a safe one. It never lowers a role somebody
+already holds, never applies to a signed-out visitor, and never overrides a document whose organisation
+default is the explicit `none`. On any instance that is not meant to be world-readable, leave it unset.
 
 ## The two modes
 

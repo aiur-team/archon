@@ -850,6 +850,343 @@ async function gateMatrix(ts, gateRoot, accessLib) {
 }
 
 /* ========================================================================= */
+/* section 5 — PUBLIC_DEFAULT_ROLE                                           */
+/* ========================================================================= */
+
+/**
+ * `PUBLIC_DEFAULT_ROLE` is the one site variable that widens access to a person
+ * no owner has ever named: a signed-in visitor who matches no owner, grant,
+ * invitation, or organization rule. Everything above in this file proves that a
+ * resolved row is internally consistent; this section proves the row is the
+ * right one, by driving the real `resolveRole()` — no stub, no double — over
+ * every branch of the precedence chain with the variable set and unset.
+ *
+ * The sole authority for the value is the invocation-local environment, so the
+ * matrix sets and restores `process.env.PUBLIC_DEFAULT_ROLE` around each case,
+ * and covers the `Netlify.env` reader an Edge Function uses as well. Every
+ * actor, document and address here is invented.
+ */
+
+/** An invented permanent document ID, in the `^[0-9a-f]{6}$` P1-A shape. */
+const PUBLIC_DOC = "0dc0de";
+const NOW = "2026-09-05T12:00:00.000Z";
+const LATER = "2026-10-05T12:00:00.000Z";
+
+const VISITOR = Object.freeze({
+  sub: "u_visitor_stranger",
+  email: "stranger@elsewhere.invalid",
+  name: "Stranger",
+  isOrg: false,
+});
+const OWNER_USER = Object.freeze({
+  sub: "u_owner_fixture",
+  email: "owner@example.com",
+  name: "Owner",
+  isOrg: false,
+});
+const MEMBER = Object.freeze({
+  sub: "u_member_fixture",
+  email: "member@example.com",
+  name: "Member",
+  isOrg: true,
+});
+
+/** The minimum blob store `read()`, `createOnly()` and `delete()` accept. */
+function fakeStore(entries = new Map()) {
+  let counter = 0;
+  return {
+    entries,
+    seed(key, value) {
+      entries.set(key, value);
+      return this;
+    },
+    async getWithMetadata(key) {
+      if (!entries.has(key)) return null;
+      counter += 1;
+      return { data: structuredClone(entries.get(key)), etag: `etag-${counter}` };
+    },
+    async setJSON(key, value) {
+      if (entries.has(key)) return { modified: false };
+      entries.set(key, structuredClone(value));
+      return { modified: true };
+    },
+    async delete(key) {
+      entries.delete(key);
+    },
+  };
+}
+
+function documentRecord(orgDefault = "commenter") {
+  return {
+    v: 1,
+    docId: PUBLIC_DOC,
+    ownerSub: OWNER_USER.sub,
+    ownerEmail: OWNER_USER.email,
+    orgDefault,
+    boundAt: NOW,
+    boundFrom: "env:DOC_OWNERS",
+  };
+}
+
+function grantRecord(user, role) {
+  return {
+    v: 1,
+    docId: PUBLIC_DOC,
+    sub: user.sub,
+    email: user.email,
+    name: user.name,
+    role,
+    grantedBy: { sub: OWNER_USER.sub, name: OWNER_USER.name, email: OWNER_USER.email },
+    grantedAt: NOW,
+    fromInvitation: null,
+  };
+}
+
+function invitationRecord(user, role) {
+  return {
+    v: 1,
+    docId: PUBLIC_DOC,
+    email: user.email,
+    role,
+    invitedBy: { sub: OWNER_USER.sub, name: OWNER_USER.name, email: OWNER_USER.email },
+    invitedAt: NOW,
+    expiresAt: LATER,
+    accountCreated: true,
+  };
+}
+
+/** Every configuration that must deny, with the reason it is rejected. */
+const DENYING_CONFIGURATIONS = Object.freeze([
+  ["unset", undefined],
+  ["the empty string", ""],
+  ["a single space", " "],
+  ["ASCII whitespace only", " \t\n\r\f\v "],
+  ["the writing role editor", "editor"],
+  ["the writing role owner", "owner"],
+  ["the literal none", "none"],
+  ["a differently cased viewer", "Viewer"],
+  ["an upper-case COMMENTER", "COMMENTER"],
+  ["a list of roles", "viewer,commenter"],
+  ["a role with a trailing writing role", "viewer editor"],
+  ["a role with an internal space", "com menter"],
+  ["a truthy-looking value", "true"],
+  ["a numeric value", "1"],
+  ["an unrelated word", "public"],
+  ["a role name with a suffix", "viewers"],
+  ["a JSON spelling", "\"viewer\""],
+]);
+
+async function publicDefaultRoleMatrix(accessLib) {
+  const before = failures;
+  const { capabilitiesFor, resolveRole, parsePublicDefaultRole } = accessLib;
+
+  ok(typeof parsePublicDefaultRole === "function", "access.mjs exports parsePublicDefaultRole()");
+  deepEq(
+    [...accessLib.PUBLIC_DEFAULT_ROLES],
+    ["viewer", "commenter"],
+    "PUBLIC_DEFAULT_ROLE may name exactly viewer and commenter",
+  );
+  ok(
+    Object.isFrozen(accessLib.PUBLIC_DEFAULT_ROLES),
+    "the public-default role list is frozen",
+  );
+
+  const had = Object.hasOwn(process.env, "PUBLIC_DEFAULT_ROLE");
+  const original = process.env.PUBLIC_DEFAULT_ROLE;
+  const configure = (value) => {
+    if (value === undefined) delete process.env.PUBLIC_DEFAULT_ROLE;
+    else process.env.PUBLIC_DEFAULT_ROLE = value;
+  };
+
+  /* A visitor who matches nothing: the document is owned by somebody else, the
+     visitor holds no grant and no invitation, and is not an organization
+     member. This is the only caller the new tier may ever speak for. */
+  const strangerStore = () =>
+    fakeStore(new Map([[accessLib.accessDocumentKey(PUBLIC_DOC), documentRecord()]]));
+
+  const resolveVisitor = (store = strangerStore(), user = VISITOR) =>
+    resolveRole(PUBLIC_DOC, user, { store, docOwners: "", now: NOW });
+
+  try {
+    /* ---- fail closed on every configuration that is not exactly a role ---- */
+    for (const [label, value] of DENYING_CONFIGURATIONS) {
+      configure(value);
+      eq(parsePublicDefaultRole(value), "none", `parse: ${label} is none`);
+      deepEq(
+        await resolveVisitor(),
+        row(capabilitiesFor, "none", true),
+        `a signed-in visitor with ${label} resolves the none row`,
+      );
+    }
+
+    /* A non-string can only arrive through the parser, never through env. */
+    for (const [label, value] of [
+      ["null", null],
+      ["a number", 7],
+      ["an array of roles", ["viewer"]],
+      ["an object", { role: "viewer" }],
+      ["a boolean", true],
+      ["a role-like object with toString", { toString: () => "viewer" }],
+    ]) {
+      eq(parsePublicDefaultRole(value), "none", `parse: ${label} is none`);
+    }
+
+    /* ---- each valid role grants exactly its documented row, and no more ---- */
+    for (const role of ["viewer", "commenter"]) {
+      configure(role);
+      eq(parsePublicDefaultRole(role), role, `parse: ${role} is accepted`);
+      eq(parsePublicDefaultRole(`  ${role}\n`), role, `parse: ${role} tolerates edge whitespace`);
+      const actual = await resolveVisitor();
+      deepEq(
+        actual,
+        row(capabilitiesFor, role, true),
+        `a signed-in visitor with PUBLIC_DEFAULT_ROLE=${role} resolves exactly the ${role} row`,
+      );
+      eq(actual.canEdit, false, `a public ${role} cannot edit`);
+      eq(actual.canAccept, false, `a public ${role} cannot accept`);
+      eq(actual.canShare, false, `a public ${role} cannot share`);
+      eq(actual.canSeeMembers, false, `a public ${role} cannot see members`);
+      ok(
+        accessLib.validateAccessRow(actual, capabilitiesFor),
+        `the public ${role} row passes the shared row validator`,
+      );
+    }
+
+    configure("viewer");
+    eq((await resolveVisitor()).canComment, false, "a public viewer cannot comment");
+    configure("commenter");
+    eq((await resolveVisitor()).threadControl, "own", "a public commenter controls only own threads");
+
+    /* ---- an anonymous caller is untouched ---- */
+    for (const role of ["viewer", "commenter"]) {
+      configure(role);
+      deepEq(
+        await resolveRole(PUBLIC_DOC, null, { store: strangerStore(), docOwners: "", now: NOW }),
+        row(capabilitiesFor, "none", false),
+        `an anonymous caller with PUBLIC_DEFAULT_ROLE=${role} still resolves none`,
+      );
+    }
+
+    /* ---- nothing above the new tier moves ---- */
+    configure("viewer");
+
+    deepEq(
+      await resolveVisitor(strangerStore(), OWNER_USER),
+      row(capabilitiesFor, "owner", true),
+      "the bound owner still resolves owner",
+    );
+
+    for (const granted of ["editor", "commenter", "viewer"]) {
+      const store = strangerStore();
+      store.seed(accessLib.accessGrantKey(PUBLIC_DOC, VISITOR.sub), grantRecord(VISITOR, granted));
+      deepEq(
+        await resolveVisitor(store),
+        row(capabilitiesFor, granted, true),
+        `an explicit ${granted} grant still resolves ${granted}`,
+      );
+    }
+
+    {
+      const store = strangerStore();
+      store.seed(
+        await accessLib.accessInvitationKey(PUBLIC_DOC, VISITOR.email),
+        invitationRecord(VISITOR, "editor"),
+      );
+      deepEq(
+        await resolveVisitor(store),
+        row(capabilitiesFor, "editor", true),
+        "a live editor invitation still outranks the public default",
+      );
+    }
+
+    for (const orgDefault of ["commenter", "viewer"]) {
+      const store = fakeStore(
+        new Map([[accessLib.accessDocumentKey(PUBLIC_DOC), documentRecord(orgDefault)]]),
+      );
+      deepEq(
+        await resolveVisitor(store, MEMBER),
+        row(capabilitiesFor, orgDefault, true),
+        `an organization member still resolves orgDefault ${orgDefault}`,
+      );
+    }
+
+    /* ---- an explicit denial is never resurrected ---- */
+    for (const user of [MEMBER, VISITOR]) {
+      const store = fakeStore(
+        new Map([[accessLib.accessDocumentKey(PUBLIC_DOC), documentRecord("none")]]),
+      );
+      deepEq(
+        await resolveVisitor(store, user),
+        row(capabilitiesFor, "none", true),
+        `orgDefault "none" denies ${user.sub} even with PUBLIC_DEFAULT_ROLE set`,
+      );
+    }
+
+    /* ---- an unbound document keeps its unshared answer shape ---- */
+    deepEq(
+      await resolveRole(PUBLIC_DOC, VISITOR, { store: fakeStore(), docOwners: "", now: NOW }),
+      row(capabilitiesFor, "viewer", false),
+      "an unbound document reports the public role as unshared",
+    );
+
+    /* ---- the Edge Function reader is the same rule ---- */
+    {
+      const reads = [];
+      const previous = Object.hasOwn(globalThis, "Netlify")
+        ? globalThis.Netlify
+        : undefined;
+      configure("editor");
+      globalThis.Netlify = {
+        env: {
+          get(name) {
+            reads.push(name);
+            return name === "PUBLIC_DEFAULT_ROLE" ? "commenter" : undefined;
+          },
+        },
+      };
+      try {
+        deepEq(
+          await resolveVisitor(),
+          row(capabilitiesFor, "commenter", true),
+          "an Edge Function reads PUBLIC_DEFAULT_ROLE from Netlify.env, not process.env",
+        );
+        ok(
+          reads.includes("PUBLIC_DEFAULT_ROLE"),
+          "the Netlify environment is asked for PUBLIC_DEFAULT_ROLE by name",
+        );
+      } finally {
+        if (previous === undefined) delete globalThis.Netlify;
+        else globalThis.Netlify = previous;
+      }
+    }
+
+    /* ---- the configured value never leaves the module ---- */
+    {
+      const secret = "editor-please-do-not-echo";
+      configure(secret);
+      const serialized = JSON.stringify(await resolveVisitor());
+      ok(!serialized.includes(secret), "a rejected configuration never reaches the resolved row");
+      let thrown = null;
+      try {
+        await resolveRole(PUBLIC_DOC, { ...VISITOR, name: "" }, { docOwners: "", now: NOW });
+      } catch (error) {
+        thrown = error;
+      }
+      ok(thrown !== null, "an invalid user still rejects while the variable is set");
+      ok(
+        !`${thrown?.message} ${thrown?.stack}`.includes(secret),
+        "a rejected configuration never reaches an error message or stack",
+      );
+    }
+  } finally {
+    if (had) process.env.PUBLIC_DEFAULT_ROLE = original;
+    else delete process.env.PUBLIC_DEFAULT_ROLE;
+  }
+
+  section(before, "PUBLIC_DEFAULT_ROLE widens only the authenticated-none branch");
+}
+
+/* ========================================================================= */
 /* entry point                                                               */
 /* ========================================================================= */
 
@@ -870,6 +1207,7 @@ async function main() {
     await convertedPathsMatrix(accessLib);
     await realtimeTokenMatrix(accessLib);
     await gateMatrix(ts, join(temporaryRoot, "gate"), accessLib);
+    await publicDefaultRoleMatrix(accessLib);
   } finally {
     removeTempRoots(roots);
   }
