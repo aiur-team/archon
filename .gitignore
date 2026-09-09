@@ -5,3 +5,9 @@ node_modules/
 templates/docbuild/dist/
 .DS_Store
 _site/
+
+# A hosted-profile artifact is built on demand for one private upload, never
+# committed. Documents commit their normal dist/<instance>.html; this keeps a
+# `git add <instance>` after `docbuild <instance> --hosted` from carrying the
+# hosted twin along with it.
+**/dist/*.hosted.html
