@@ -1,0 +1,55 @@
+# Netlify configuration for the hosted publishing app (contract C1).
+#
+# This is a SECOND, separate deployment. It is not the repo-backed `_site`
+# build at the repository root, it does not share that root's `netlify.toml`,
+# and the site that serves it must be configured with `hosted` as its base
+# directory so this file is the one that is read.
+#
+# What is deliberately absent matters more than what is here:
+#
+#   * No `[[edge_functions]]` block. The legacy all-path `gate` edge function
+#     is bound to the root deployment and resolves roles from Netlify Identity,
+#     `DOC_OWNERS` and organisation defaults. Those are the self-hosted
+#     product's authorities and are the wrong ones for identity-only shared
+#     uploads, so this deployment carries none of them.
+#   * No build command. There is nothing to compile: `public/` is served as it
+#     is committed, and functions bundle from this directory's own lockfile.
+#     A deploy therefore never runs the docbuild TypeScript build, which is
+#     what keeps `hosted/` importable in a clean install.
+#   * No environment values. Every C6 key -- HOSTED_APP_ORIGIN,
+#     HOSTED_RENDER_ORIGIN, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+#     HOSTED_PUBLISH_ENABLED -- is set by an operator in the Netlify site
+#     environment, never here. A secret in this file would be a secret in git,
+#     and values set in `netlify.toml` are build-scoped rather than available
+#     to a function at runtime, so putting them here would also be wrong on the
+#     mechanics. `hosted/lib/config.mjs` defaults every unset key to its strict
+#     reading: production origin parsing, publishing disabled.
+#   * No routed function. AHU-001 ships the shell only. A placeholder handler
+#     that returned success for an upload route would be a production surface
+#     that lies, so the route is simply absent until its producer lands.
+#
+# The static headers below apply to the files in `public/`. Netlify does not
+# apply TOML headers to function-generated responses, so every hosted function
+# sets its own security headers on success and error paths alike; that is a
+# rule for the function producers, not something this file can enforce.
+
+[build]
+  publish = "public"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[build.processing]
+  skip_processing = true
+
+[functions]
+  directory = "functions"
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    Content-Security-Policy = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    Cache-Control = "private, no-store"

@@ -40,6 +40,26 @@ jobs:
       - name: every deploy module loads
         run: node scripts/check-function-modules.mjs
 
+      # `hosted/` is a SECOND Netlify deployment with its own lockfile, its own
+      # dependency set and no share of the root deploy tree. The three steps
+      # below are its equivalent of the two above, and they run in this order
+      # for the same reason the root pair does: a clean install first, then a
+      # link check against exactly what that install produced, then the tests.
+      #
+      # They deliberately run before the docbuild typecheck installs a
+      # workspace. A hosted function cold-starts with nothing but this
+      # directory's own `node_modules`, so any hosted module that could only
+      # link on a machine where some other tree had been built does not link in
+      # production. Proving that requires checking before the other tree exists.
+      - name: hosted lockfile is in sync
+        run: npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
+
+      - name: every hosted module loads
+        run: node scripts/check-hosted-modules.mjs
+
+      - name: hosted contract tests
+        run: node --test hosted/lib/contracts.test.mjs
+
       # notify() runs after the authoritative write, so a body it rejects that
       # the store accepted is a 500 for a comment that already landed. The two
       # grammars are only kept in step by being asserted against each other.
