@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
   "build_order_id": "aiur-team/archon:agent-hosted-upload",
+  "root_number": 163,
   "title": "Archon — agent-hosted private documents",
-  "subtitle": "Agent builds HTML → GitHub sign-in → upload → private owner document · 13 draft tickets · 5 phases",
+  "subtitle": "Agent builds HTML → GitHub sign-in → upload → private owner document · 13 tickets · 5 phases",
   "repository": "aiur-team/archon",
   "plan_version": 1,
   "researched_at_commit": "dfbd7a7ed2bfb0b2f1742e1d1e2294ab599d1b79",
@@ -41,7 +42,7 @@
       "phase": 1,
       "complexity": 3,
       "depends_on": [],
-      "ticket": null,
+      "ticket": 164,
       "doc": "tickets/AHU-001.md"
     },
     {
@@ -51,7 +52,7 @@
       "phase": 1,
       "complexity": 2,
       "depends_on": [],
-      "ticket": null,
+      "ticket": 165,
       "doc": "tickets/AHU-002.md"
     },
     {
@@ -63,7 +64,7 @@
       "depends_on": [
         "AHU-001"
       ],
-      "ticket": null,
+      "ticket": 166,
       "doc": "tickets/AHU-003.md"
     },
     {
@@ -75,7 +76,7 @@
       "depends_on": [
         "AHU-001"
       ],
-      "ticket": null,
+      "ticket": 167,
       "doc": "tickets/AHU-004.md"
     },
     {
@@ -87,7 +88,7 @@
       "depends_on": [
         "AHU-001"
       ],
-      "ticket": null,
+      "ticket": 168,
       "doc": "tickets/AHU-005.md"
     },
     {
@@ -99,7 +100,7 @@
       "depends_on": [
         "AHU-001"
       ],
-      "ticket": null,
+      "ticket": 169,
       "doc": "tickets/AHU-006.md"
     },
     {
@@ -112,7 +113,7 @@
         "AHU-003",
         "AHU-004"
       ],
-      "ticket": null,
+      "ticket": 170,
       "doc": "tickets/AHU-007.md"
     },
     {
@@ -124,7 +125,7 @@
       "depends_on": [
         "AHU-004"
       ],
-      "ticket": null,
+      "ticket": 171,
       "doc": "tickets/AHU-008.md"
     },
     {
@@ -138,7 +139,7 @@
         "AHU-004",
         "AHU-005"
       ],
-      "ticket": null,
+      "ticket": 172,
       "doc": "tickets/AHU-009.md"
     },
     {
@@ -151,7 +152,7 @@
         "AHU-002",
         "AHU-006"
       ],
-      "ticket": null,
+      "ticket": 173,
       "doc": "tickets/AHU-010.md"
     },
     {
@@ -163,7 +164,7 @@
       "depends_on": [
         "AHU-004"
       ],
-      "ticket": null,
+      "ticket": 174,
       "doc": "tickets/AHU-011.md"
     },
     {
@@ -179,7 +180,7 @@
         "AHU-010",
         "AHU-011"
       ],
-      "ticket": null,
+      "ticket": 175,
       "doc": "tickets/AHU-012.md"
     },
     {
@@ -191,7 +192,7 @@
       "depends_on": [
         "AHU-012"
       ],
-      "ticket": null,
+      "ticket": 176,
       "doc": "tickets/AHU-013.md"
     }
   ]

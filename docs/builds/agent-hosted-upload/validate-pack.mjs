@@ -11,6 +11,13 @@ const manifest=JSON.parse(read('build-order.json'));
 const evidence=JSON.parse(read('planning-evidence.json'));
 const ts=manifest.tickets, byId=new Map(ts.map(t=>[t.id,t]));
 assert.equal(ts.length,13); assert.equal(byId.size,ts.length);
+const draft=ts.every(t=>t.ticket===null);
+const promoted=ts.every(t=>Number.isSafeInteger(t.ticket) && t.ticket>0);
+assert(draft || promoted,'ticket numbers must be either entirely draft or entirely promoted');
+if(promoted){
+ assert.equal(new Set(ts.map(t=>t.ticket)).size,ts.length,'promoted ticket numbers must be unique');
+ assert(Number.isSafeInteger(manifest.root_number) && manifest.root_number>0,'promoted pack requires root_number');
+}
 assert.equal(manifest.build_order_id,evidence.build_order_id);
 assert.equal(manifest.plan_version,evidence.plan_version);
 const lanes=new Set(manifest.workstreams.map(w=>w.id));
@@ -26,7 +33,7 @@ function depth(id) {
  visiting.delete(id); depths.set(id,d); return d;
 }
 for(const t of ts) {
- assert.match(t.id,/^AHU-\d{3}$/); assert(lanes.has(t.lane)); assert.equal(t.ticket,null);
+ assert.match(t.id,/^AHU-\d{3}$/); assert(lanes.has(t.lane));
  assert([1,2,3].includes(t.complexity)); assert.equal(t.phase,depth(t.id));
  assert.equal(new Set(t.depends_on).size,t.depends_on.length);
  assert.match(t.doc,/^tickets\/AHU-\d{3}\.md$/); assert(lstatSync(join(root,t.doc)).isFile());
@@ -48,7 +55,7 @@ for(let i=1;i<=15;i++){
 }
 assert.equal(evidence.decisions.length,7); assert(evidence.external_gates.length>0); assert(evidence.feature_boundary);
 const digest=s=>createHash('sha256').update(s).digest('hex');
-const result={result:'PASS',draft_tickets:13,requirements:15,decisions:7,widths:[2,4,5,1,1],longest_path:5,contract_blocks:blocks.size,manifest_sha256:digest(read('build-order.json')),contracts_sha256:digest(canonical),design_sha256:digest(read('design-v1.md'))};
+const result={result:'PASS',ticket_state:promoted?'promoted':'draft',tickets:13,requirements:15,decisions:7,widths:[2,4,5,1,1],longest_path:5,contract_blocks:blocks.size,manifest_sha256:digest(read('build-order.json')),contracts_sha256:digest(canonical),design_sha256:digest(read('design-v1.md'))};
 if(process.argv.includes('--runtime')){
  const canonicalRoot=resolve(process.env.AIUR_STATE_ROOT || join(homedir(),'.aiur/repo/aiur-team/archon/builds/agent-hosted-upload'));
  const mirror=resolve(root,'../../../.aiur/build_orders');
