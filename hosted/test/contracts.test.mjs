@@ -144,7 +144,26 @@ test("a rejection message is always a legal C3 message, whatever the key was", (
     validateDescriptor(replacing(VALID_DESCRIPTOR, { ["a\u0007b\u202Ec"]: 1 })),
   );
   assert.ok(!/[\p{Cc}\p{Cf}]/u.test(controlled.message));
+  /* The key is *filtered* down to its printable characters rather than merely
+     having them replaced with spaces, so the operator reading the log sees the
+     key a developer would recognise. */
+  assert.match(controlled.message, /unknown field\(s\): abc$/);
   validateWireError(controlled.toWire());
+
+  /* The field path is caller-supplied too, and unlike a key name it is not
+     filtered first - so it is what reaches the bound and the sanitizer. */
+  const longField = rejects(() => validateDescriptor(null, { field: "f".repeat(400) }));
+  assert.ok([...longField.message].length <= HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH);
+  validateWireError(longField.toWire());
+
+  const controlField = rejects(() => validateDescriptor(null, { field: "a\u0007b\u2028c" }));
+  assert.ok(!/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(controlField.message));
+  validateWireError(controlField.toWire());
+
+  /* A message that sanitizes away to nothing still has to be a legal message. */
+  const empty = new HostedContractError("invalid_request", "\u0007\u200B");
+  assert.equal(empty.message, "invalid request");
+  validateWireError(empty.toWire());
 
   /* Many unknown keys are summarised rather than listed, so the bound is not
      reached by volume either. */
@@ -237,6 +256,17 @@ test("the wire constants siblings hard-code are pinned here", () => {
   assert.equal(HOSTED_LIMITS.HTML_MAX_BYTES, 2097152);
   assert.deepEqual(RENDER_MESSAGE_TYPES, { READY: "archon:ready", RENDER: "archon:render" });
   assert.deepEqual([...LOOPBACK_HOSTS], ["localhost", "127.0.0.1", "[::1]"]);
+});
+
+test("the contract lifetimes are the contract's, not whatever the fixtures say", () => {
+  /* Deriving the fixtures from the constants (below) makes them agree, but it
+     also makes the pair circular: change the constant and both sides move. The
+     literals are what pin the contract. */
+  assert.equal(HOSTED_LIMITS.PENDING_TTL_SECONDS, 900);
+  assert.equal(HOSTED_LIMITS.UPLOAD_TTL_SECONDS, 600);
+  assert.equal(HOSTED_LIMITS.RECEIPT_TTL_SECONDS, 86400);
+  assert.equal(HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH, 200);
+  assert.equal(HOSTED_LIMITS.TITLE_MAX_SCALARS, 160);
 });
 
 test("the fixture lifetimes are the declared lifetimes", () => {
@@ -394,7 +424,17 @@ test("a title that renders differently from its bytes is rejected", () => {
 
 test("a title outside its bounds, untrimmed, or not text at all is rejected", () => {
   const tooLong = "t".repeat(HOSTED_LIMITS.TITLE_MAX_SCALARS + 1);
-  for (const title of ["", tooLong, " leading", "trailing ", "   ", "\uD800lone surrogate", 7, null]) {
+  for (const title of [
+    "",
+    tooLong,
+    " leading",
+    "trailing ",
+    "   ",
+    "\uD800leading lone surrogate",
+    "trailing lone surrogate\uDC00",
+    7,
+    null,
+  ]) {
     rejects(() => validateDescriptor(replacing(VALID_DESCRIPTOR, { title })), {
       field: "descriptor.title",
     });
@@ -432,6 +472,38 @@ test("a missing field, a wrong version and a non-record are all rejected", () =>
   for (const value of [null, undefined, [], "descriptor", 1, new Date(), new Map()]) {
     rejects(() => validateDescriptor(value), { field: "descriptor" });
   }
+  /* A class instance carrying exactly the right own keys passes every other
+     check, so the prototype rule is the only thing that rejects it. A JSON body
+     is a plain record; anything else arrived by a route a wire validator has no
+     business trusting. */
+  class Descriptorish {
+    constructor(fields) {
+      Object.assign(this, fields);
+    }
+  }
+  rejects(() => validateDescriptor(new Descriptorish(VALID_DESCRIPTOR)), { field: "descriptor" });
+  rejects(() => validateDescriptor(Object.assign(Object.create({ inherited: 1 }), VALID_DESCRIPTOR)), {
+    field: "descriptor",
+  });
+});
+
+test("every contract shape pins its version", () => {
+  /* Each of these is a separate guard, and each was a surviving mutant until it
+     had an input of its own: a v2 body that is otherwise perfect must not be
+     read as a v1 one. */
+  const cases = [
+    [() => validateSessionResponse(replacing(SIGNED_OUT_SESSION, { v: 2 })), "session.v"],
+    [() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { v: 2 })), "session.v"],
+    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 2 })), "publication.v"],
+    [() => validateStartResponse(replacing(START_RESPONSE, { v: 2 }), APP), "start.v"],
+    [() => validateResult(replacing(PENDING_RESULT_ENVELOPE, { v: 2 })), "result.v"],
+    [() => validateWireError(replacing(ERROR_ENVELOPE, { v: 2 })), "errorEnvelope.v"],
+    [() => validateDocumentMetadata(replacing(DOCUMENT_METADATA, { v: 2 })), "document.v"],
+    [() => validateReadyMessage(replacing(READY_MESSAGE, { v: 2 })), "readyMessage.v"],
+    [() => validateRenderMessage(replacing(RENDER_MESSAGE, { v: 2 })), "renderMessage.v"],
+    [() => validateDescriptor(replacing(VALID_DESCRIPTOR, { v: 2 })), "descriptor.v"],
+  ];
+  for (const [run, field] of cases) rejects(run, { field });
 });
 
 test("a caller-supplied field path is used verbatim in the message", () => {
@@ -1002,9 +1074,12 @@ test("an error envelope's retryability is derived from its code, never believed"
   assert.equal(envelope.error.code, "state_conflict");
   assert.equal(envelope.error.retryable, false);
 
-  rejects(() =>
-    validateWireError(replacing(ERROR_ENVELOPE, { error: { ...ERROR_ENVELOPE.error, retryable: true } })),
-  );
+  for (const retryable of [true, "false", 0, null]) {
+    rejects(() =>
+      validateWireError(replacing(ERROR_ENVELOPE, { error: { ...ERROR_ENVELOPE.error, retryable } })),
+      { field: "errorEnvelope.error.retryable" },
+    );
+  }
   rejects(() =>
     validateWireError(replacing(ERROR_ENVELOPE, { error: { ...ERROR_ENVELOPE.error, code: "teapot" } })),
   );
@@ -1258,7 +1333,19 @@ test("the relaxed mode is loopback-only and cannot describe a real deployment", 
   );
   /* The loopback environment is refused outright by the default mode. */
   assert.throws(() => readHostedConfig(FIXTURE_LOCAL_ENV), HostedConfigError);
-  assert.throws(() => readHostedConfig(FIXTURE_ENV, { mode: "preview" }), HostedConfigError);
+  assert.throws(
+    () => readHostedConfig(FIXTURE_ENV, { mode: "preview" }),
+    (error) => error instanceof HostedConfigError && error.key === "mode",
+  );
+  /* Without a shape check the reader would index into a non-object and raise a
+     TypeError from somewhere unhelpful instead of a named configuration
+     fault. */
+  for (const env of [null, undefined, "HOSTED_APP_ORIGIN=x", 42]) {
+    assert.throws(
+      () => readHostedConfig(env),
+      (error) => error instanceof HostedConfigError && error.key === "env",
+    );
+  }
 });
 
 test("a weak or misspelled GitHub credential is refused", () => {

@@ -1172,9 +1172,11 @@ export function validateWireError(value, { field = "errorEnvelope" } = {}) {
     throw invalid(`${field}.error.code`, "must be a contract error code");
   }
   requireDisplayText(error.message, 1, HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH, `${field}.error.message`);
-  if (typeof error.retryable !== "boolean") throw invalid(`${field}.error.retryable`, "must be a boolean");
+  /* One comparison covers both the type and the value: a non-boolean can never
+     be strictly equal to the boolean this code carries, so a separate
+     `typeof` check would be a guard no input could reach on its own. */
   if (error.retryable !== ERROR_CODES[error.code].retryable) {
-    throw invalid(`${field}.error.retryable`, "must match the retryability of its code");
+    throw invalid(`${field}.error.retryable`, "must be the retryability of its code");
   }
 
   return Object.freeze({
