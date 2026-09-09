@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "build_order_id": "aiur-team/archon:agent-hosted-upload",
+  "title": "Archon — agent-hosted private documents",
+  "subtitle": "Agent builds HTML → GitHub sign-in → upload → private owner document · 13 draft tickets · 5 phases",
+  "repository": "aiur-team/archon",
+  "plan_version": 1,
+  "researched_at_commit": "dfbd7a7ed2bfb0b2f1742e1d1e2294ab599d1b79",
+  "icon": "cloud-upload",
+  "workstreams": [
+    {
+      "id": "platform",
+      "title": "Platform"
+    },
+    {
+      "id": "agent",
+      "title": "Agent UX"
+    },
+    {
+      "id": "identity",
+      "title": "Identity"
+    },
+    {
+      "id": "storage",
+      "title": "Publication"
+    },
+    {
+      "id": "reader",
+      "title": "Private reader"
+    },
+    {
+      "id": "integration",
+      "title": "Acceptance"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "AHU-001",
+      "title": "Establish hosted service boundaries and executable contracts",
+      "lane": "platform",
+      "phase": 1,
+      "complexity": 3,
+      "depends_on": [],
+      "ticket": null,
+      "doc": "tickets/AHU-001.md"
+    },
+    {
+      "id": "AHU-002",
+      "title": "Build self-contained HTML for hosted rendering",
+      "lane": "agent",
+      "phase": 1,
+      "complexity": 2,
+      "depends_on": [],
+      "ticket": null,
+      "doc": "tickets/AHU-002.md"
+    },
+    {
+      "id": "AHU-003",
+      "title": "Implement identity-only GitHub sign-in and browser sessions",
+      "lane": "identity",
+      "phase": 2,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-001"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-003.md"
+    },
+    {
+      "id": "AHU-004",
+      "title": "Implement atomic publication state and capability storage",
+      "lane": "storage",
+      "phase": 2,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-001"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-004.md"
+    },
+    {
+      "id": "AHU-005",
+      "title": "Render active HTML on an isolated static origin",
+      "lane": "reader",
+      "phase": 2,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-001"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-005.md"
+    },
+    {
+      "id": "AHU-006",
+      "title": "Add resumable agent publishing commands",
+      "lane": "agent",
+      "phase": 2,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-001"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-006.md"
+    },
+    {
+      "id": "AHU-007",
+      "title": "Bind browser approval to the pending agent upload",
+      "lane": "identity",
+      "phase": 3,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-003",
+        "AHU-004"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-007.md"
+    },
+    {
+      "id": "AHU-008",
+      "title": "Commit approved artifact bytes atomically",
+      "lane": "storage",
+      "phase": 3,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-004"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-008.md"
+    },
+    {
+      "id": "AHU-009",
+      "title": "Serve private owner documents through the trusted viewer",
+      "lane": "reader",
+      "phase": 3,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-003",
+        "AHU-004",
+        "AHU-005"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-009.md"
+    },
+    {
+      "id": "AHU-010",
+      "title": "Distribute agent instructions and prove installed-package publishing",
+      "lane": "agent",
+      "phase": 3,
+      "complexity": 2,
+      "depends_on": [
+        "AHU-002",
+        "AHU-006"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-010.md"
+    },
+    {
+      "id": "AHU-011",
+      "title": "Prepare hosted deployment safeguards and operator runbook",
+      "lane": "platform",
+      "phase": 3,
+      "complexity": 2,
+      "depends_on": [
+        "AHU-004"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-011.md"
+    },
+    {
+      "id": "AHU-012",
+      "title": "Prove integrated browser and agent publishing security",
+      "lane": "integration",
+      "phase": 4,
+      "complexity": 3,
+      "depends_on": [
+        "AHU-007",
+        "AHU-008",
+        "AHU-009",
+        "AHU-010",
+        "AHU-011"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-012.md"
+    },
+    {
+      "id": "AHU-013",
+      "title": "Prove the deployed owner-publishing experience",
+      "lane": "integration",
+      "phase": 5,
+      "complexity": 2,
+      "depends_on": [
+        "AHU-012"
+      ],
+      "ticket": null,
+      "doc": "tickets/AHU-013.md"
+    }
+  ]
+}

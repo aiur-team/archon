@@ -1,0 +1,727 @@
+{
+  "build_order_id": "aiur-team/archon:agent-hosted-upload",
+  "plan_version": 1,
+  "researched_at_commit": "dfbd7a7ed2bfb0b2f1742e1d1e2294ab599d1b79",
+  "remote_main_observed": "e4be2bd0b844880b4e50f0ef478b7774f9cd7cbc",
+  "requirements": [
+    {
+      "id": "R1",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-002",
+        "AHU-006",
+        "AHU-010",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R2",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-002",
+        "AHU-005",
+        "AHU-006",
+        "AHU-008",
+        "AHU-010",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R3",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-006",
+        "AHU-007",
+        "AHU-010",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R4",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-006",
+        "AHU-008",
+        "AHU-010",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R5",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-004",
+        "AHU-006",
+        "AHU-008",
+        "AHU-009",
+        "AHU-010",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R6",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-007",
+        "AHU-009",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R7",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-004",
+        "AHU-006",
+        "AHU-007",
+        "AHU-010",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R8",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-004",
+        "AHU-006",
+        "AHU-007",
+        "AHU-008",
+        "AHU-010",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R9",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-004",
+        "AHU-007",
+        "AHU-008",
+        "AHU-009",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R10",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-004",
+        "AHU-005",
+        "AHU-009",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R11",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-002",
+        "AHU-003",
+        "AHU-005",
+        "AHU-009",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R12",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-004",
+        "AHU-006",
+        "AHU-007",
+        "AHU-008",
+        "AHU-010",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R13",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-004",
+        "AHU-006",
+        "AHU-008",
+        "AHU-010",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R14",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-002",
+        "AHU-004",
+        "AHU-005",
+        "AHU-006",
+        "AHU-008",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    },
+    {
+      "id": "R15",
+      "disposition": "ticket",
+      "ticket_ids": [
+        "AHU-001",
+        "AHU-003",
+        "AHU-004",
+        "AHU-006",
+        "AHU-007",
+        "AHU-008",
+        "AHU-009",
+        "AHU-011",
+        "AHU-012",
+        "AHU-013"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "DEC-001",
+      "decision": "Agent-produced single-file HTML, no repository integration",
+      "rationale": "The user selected upload plus GitHub identity over required repository access; preserve local portability."
+    },
+    {
+      "id": "DEC-002",
+      "decision": "Dedicated hosted GitHub OAuth and session seam",
+      "rationale": "Published Netlify Identity does not establish stable GitHub-ID linkage; preserve its legacy users rather than migrate them."
+    },
+    {
+      "id": "DEC-003",
+      "decision": "Single-record atomic publication in strong Blobs store",
+      "rationale": "One CAS commits bytes and owner together; removes cross-record commit and cleanup races at the chosen 2MiB limit."
+    },
+    {
+      "id": "DEC-004",
+      "decision": "Separate cookie-free renderer on another registrable site",
+      "rationale": "Active HTML cannot execute on the account origin; exact-origin messaging plus an opaque nested sandbox protects credentials."
+    },
+    {
+      "id": "DEC-005",
+      "decision": "Split-phase operation-scoped agent capability",
+      "rationale": "Browser confirmation binds owner; bounded resume/status and 24-hour receipt recovery survive agent timeouts without leaking GitHub credentials."
+    },
+    {
+      "id": "DEC-006",
+      "decision": "Private-first pilot with explicit live-release gates",
+      "rationale": "No sharing was selected; defer hard quotas and unrestricted rollout while testing an operator-bounded pilot."
+    },
+    {
+      "id": "DEC-007",
+      "decision": "Preserve self-hosted deployment and build profile",
+      "rationale": "Root gate/connect/access stay unchanged; hosted output removes legacy remote/collaboration dependencies without redefining existing documents."
+    }
+  ],
+  "tickets": [
+    {
+      "id": "AHU-001",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "platform",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R2",
+        "R3",
+        "R4",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R10",
+        "R11",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/package.json",
+        "hosted/netlify.toml",
+        "hosted/lib/contracts.mjs",
+        "hosted/lib/contracts.test.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-002",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "medium",
+      "capability_requirements": [
+        "agent",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R1",
+        "R2",
+        "R11",
+        "R14"
+      ],
+      "primary_files": [
+        "templates/docbuild/src/index.ts",
+        "templates/docbuild/src/cli.ts",
+        "templates/base/layout.html",
+        "templates/docbuild/src/index.test.ts"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-003",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "identity",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R3",
+        "R4",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R10",
+        "R11",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/lib/identity.mjs",
+        "hosted/functions/auth-github-start.mjs",
+        "hosted/functions/auth-github-callback.mjs",
+        "hosted/functions/session.mjs",
+        "hosted/functions/auth-logout.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-004",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "storage",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R5",
+        "R7",
+        "R8",
+        "R9",
+        "R10",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/lib/publication-store.mjs",
+        "hosted/lib/publications.mjs",
+        "hosted/functions/publications-start.mjs",
+        "hosted/functions/publications-status.mjs",
+        "hosted/functions/publications-cancel.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-005",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "reader",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R2",
+        "R10",
+        "R11",
+        "R14"
+      ],
+      "primary_files": [
+        "renderer/public/index.html",
+        "renderer/public/renderer.js",
+        "renderer/scripts/build.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-006",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "agent",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R7",
+        "R8",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "templates/docbuild/src/publish-cli.ts",
+        "templates/docbuild/src/publish.ts",
+        "templates/docbuild/package.json"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-007",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "identity",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R3",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R12",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/functions/publications-bind.mjs",
+        "hosted/functions/publications-review.mjs",
+        "hosted/functions/publications-decision.mjs",
+        "hosted/public/publish/"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-008",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "storage",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R2",
+        "R4",
+        "R5",
+        "R8",
+        "R9",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/functions/publications-artifact.mjs",
+        "hosted/lib/artifact-body.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-009",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "reader",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R5",
+        "R6",
+        "R9",
+        "R10",
+        "R11",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/functions/documents.mjs",
+        "hosted/public/viewer/"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-010",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "medium",
+      "capability_requirements": [
+        "agent",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R7",
+        "R8",
+        "R12",
+        "R13"
+      ],
+      "primary_files": [
+        "skills/archon-doc/SKILL.md",
+        "templates/docbuild/scripts/pack-assets.mjs",
+        "scripts/test-publish-package.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-011",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "platform",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R3",
+        "R4",
+        "R8",
+        "R10",
+        "R12",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "hosted/netlify.toml",
+        "renderer/netlify.toml",
+        "hosted/OPERATIONS.md",
+        "scripts/test-hosted-operations.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-012",
+      "kind": "executable",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "integration",
+        "node22"
+      ],
+      "requirement_refs": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "scripts/test-hosted-integration.mjs",
+        "scripts/fixtures/hosted/"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    },
+    {
+      "id": "AHU-013",
+      "kind": "capstone",
+      "provenance": "planned",
+      "introduced_in_plan_version": 1,
+      "risk": "high",
+      "capability_requirements": [
+        "integration",
+        "operator-supervised-live-proof"
+      ],
+      "requirement_refs": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "primary_files": [
+        "docs/builds/agent-hosted-upload/live-acceptance.md",
+        "docs/builds/agent-hosted-upload/acceptance/",
+        "scripts/test-hosted-live.mjs"
+      ],
+      "serializes_with": [],
+      "suggested_after": [],
+      "contains": [],
+      "external_gates": [
+        "GATE-002",
+        "GATE-003",
+        "GATE-004"
+      ],
+      "ci_conflict_policy": "Additive named steps; retain sibling runners; re-run inventory on merged main"
+    }
+  ],
+  "external_gates": [
+    {
+      "id": "GATE-001",
+      "owner": "Operator and later Executor",
+      "resolution": "Approve planning commit; authorize GitHub promotion and make source reachable; establish review/merge authority; explicitly resume implementation."
+    },
+    {
+      "id": "GATE-002",
+      "owner": "Archon operator",
+      "resolution": "Provide OAuth registration, exact callback, two separate-site HTTPS origins, isolated staging/prod, secrets and two real test accounts."
+    },
+    {
+      "id": "GATE-003",
+      "owner": "Archon operator",
+      "resolution": "Accept pilot volume/budget, physical retention, monitoring and kill switch; no hard aggregate quota claimed."
+    },
+    {
+      "id": "GATE-004",
+      "owner": "Archon operator",
+      "resolution": "Authorize externally installable release and live synthetic acceptance before capstone."
+    }
+  ],
+  "feature_boundary": {
+    "acceptance_criteria": [
+      "Installed agent skill creates self-contained HTML",
+      "Identity-only GitHub browser approval binds immutable owner",
+      "Agent upload commits exact bytes once and returns durable receipt",
+      "Owner alone reads bytes in isolated renderer",
+      "Local artifact and same-operation retry survive failures"
+    ],
+    "critical_path": [
+      "AHU-001",
+      "AHU-004",
+      "AHU-007",
+      "AHU-012",
+      "AHU-013"
+    ],
+    "documentation": [
+      "Packaged agent skill and README",
+      "hosted/OPERATIONS.md",
+      "Live acceptance report"
+    ],
+    "cleanup": [
+      "Remove implementation stubs and abandoned attempts",
+      "Preserve legacy deployment and unrelated user work",
+      "Retain completed documents; manual retention only"
+    ],
+    "capstone": "AHU-013",
+    "completion": "All finite outcomes merged/reviewed/current-base green, documented and actually proven live; missing live gates remain incomplete."
+  }
+}

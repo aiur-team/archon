@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "source": "User-selected agent→browser approval→upload workflow; existing Archon theme; no external design artifact",
+  "artifact": "design-v1.md",
+  "sha256": "aba05182db167c6b4f44e89e3591643ac14b7f54100c9243388c4a52eda6adf4",
+  "contracts": "contracts.md",
+  "contracts_sha256": "3a9baaa840649b06a972314570ed8089672e217b678664a455fed30de7e67276",
+  "runtime_manifest_sha256": "b4ffd75e2f250a1789f7e99c01974349f5ffbd90a41bbc9e0886e72f40cee655",
+  "reviewed_personas": [
+    "coherence",
+    "feasibility",
+    "security-lens",
+    "design-lens",
+    "scope",
+    "product-lens",
+    "adversarial"
+  ],
+  "independent_reviews": [
+    "claude product-lens",
+    "claude adversarial",
+    "claude security-lens",
+    "claude whole-doc"
+  ]
+}
