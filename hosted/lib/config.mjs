@@ -74,14 +74,22 @@ export class HostedConfigError extends Error {
   }
 }
 
-/** A present, non-empty environment value, or a configuration error. */
+/**
+ * A present, non-empty environment value, or a configuration error.
+ *
+ * Absent and empty are one condition rather than two because they are one
+ * situation: an operator who has not set a key and an operator who has set it
+ * to the empty string have both not configured it. The check has to happen
+ * here, before any per-key format rule, because a missing value coerces
+ * treacherously -- `/^[A-Za-z0-9._-]{8,128}$/.test(undefined)` tests the string
+ * `"undefined"` and passes, so an unset `GITHUB_CLIENT_ID` would otherwise be
+ * accepted as a nine-character client id.
+ */
 function requiredValue(env, key) {
   const value = env[key];
-  if (value === undefined || value === null || value === "") {
+  if (typeof value !== "string" || value === "") {
     throw new HostedConfigError(key, "is required");
   }
-  if (typeof value !== "string") throw new HostedConfigError(key, "must be a string");
-  if (value !== value.trim()) throw new HostedConfigError(key, "must not be surrounded by whitespace");
   return value;
 }
 

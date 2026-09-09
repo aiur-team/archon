@@ -256,12 +256,17 @@ function requireInteger(value, min, max, field, code = "invalid_request") {
  */
 function requireTimestamp(value, field) {
   requireWellFormedString(value, field);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
-    throw invalid(field, "must be an ISO-8601 UTC timestamp with milliseconds");
-  }
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
-    throw invalid(field, "must be a real calendar instant");
+  /* The invalid-date check is not redundant with the round trip below it:
+     `toISOString()` throws a `RangeError` on an invalid date, and a `RangeError`
+     escaping a validator is an uncaught 500 rather than a 400. */
+  if (Number.isNaN(parsed.getTime())) {
+    throw invalid(field, "must be an ISO-8601 UTC instant with milliseconds");
+  }
+  /* One spelling, decided by round trip rather than by a pattern. A regular
+     expression would accept `2026-02-30` and reject nothing this does not. */
+  if (parsed.toISOString() !== value) {
+    throw invalid(field, "must be an ISO-8601 UTC instant with milliseconds, spelled canonically");
   }
   return value;
 }
@@ -580,11 +585,18 @@ const LOOPBACK_HOSTS = Object.freeze(["localhost", "127.0.0.1", "[::1]"]);
  * Whether a parsed host sits under a suffix the public-suffix list actually
  * knows, and therefore has a registrable site that can be compared.
  *
- * `tldts` falls back to a wildcard rule for an unlisted TLD, so `app.internal`
- * comes back with a plausible-looking `domain` of `app.internal` and neither
- * the ICANN nor the private flag set. Accepting that would mean the app/render
- * site comparison was being made against a guess. A production origin has to be
- * a name the internet agrees on, so an unlisted suffix is refused outright.
+ * Both conditions carry their own weight, and each has a host that only it
+ * refuses:
+ *
+ *  - `co.uk` is a public suffix with nothing registered in front of it. `tldts`
+ *    reports `isIcann` and no `domain`, so the first line is what rejects it.
+ *  - `app.internal` sits under an unlisted TLD, for which `tldts` falls back to
+ *    a wildcard rule and returns a plausible-looking `domain` of `app.internal`
+ *    with neither flag set. The second line is what rejects that.
+ *
+ * IP literals and `localhost` fail the first line, because neither has a
+ * registrable domain at all. Accepting any of these would mean the app/renderer
+ * site comparison was being made against a guess.
  */
 function isDeterminateSite(host) {
   if (typeof host.domain !== "string" || host.domain === "") return false;
@@ -616,8 +628,6 @@ function isDeterminateSite(host) {
  */
 export function validateOrigin(value, { production = true, field = "origin" } = {}) {
   requireWellFormedString(value, field);
-  if (value !== value.trim() || /\s/.test(value)) throw invalid(field, "must not contain whitespace");
-  if (value !== value.toLowerCase()) throw invalid(field, "must be lowercase");
 
   let url;
   try {
@@ -625,22 +635,26 @@ export function validateOrigin(value, { production = true, field = "origin" } = 
   } catch {
     throw invalid(field, "must be an absolute URL");
   }
+  /* One comparison does the work of several. `new URL` lowercases the scheme
+     and host, trims surrounding whitespace, drops a default port and moves
+     everything else into a path, query, fragment or credential -- so requiring
+     the input to equal its own origin serialization rejects all of those
+     spellings at once, and rejects them rather than quietly accepting a
+     normalized version of what the operator actually wrote. */
   if (url.origin === "null" || url.origin !== value) {
     throw invalid(
       field,
-      "must be exactly a scheme://host[:port] origin with no path, query or credentials",
+      "must be exactly a lowercase scheme://host[:port] origin with no path, query or credentials",
     );
   }
 
   if (production) {
     if (url.protocol !== "https:") throw invalid(field, "must use https in production");
-    if (LOOPBACK_HOSTS.includes(url.hostname)) {
-      throw invalid(field, "must not be a loopback host in production");
-    }
-    const host = parseHost(url.hostname, { allowPrivateDomains: true });
-    if (host.isIp) throw invalid(field, "must be a domain name, not an IP address");
-    if (!isDeterminateSite(host)) {
-      throw invalid(field, "must resolve to a determinate registrable domain");
+    if (!isDeterminateSite(parseHost(url.hostname, { allowPrivateDomains: true }))) {
+      /* IP literals, `localhost` and unlisted suffixes all land here: none of
+         them has a registrable site, so none of them can be compared against
+         the other configured origin. */
+      throw invalid(field, "must be a named host under a listed public suffix in production");
     }
   } else if (url.protocol === "http:") {
     if (!LOOPBACK_HOSTS.includes(url.hostname)) {
@@ -668,7 +682,7 @@ export function validateOrigin(value, { production = true, field = "origin" } = 
  */
 export function registrableSite(origin, { field = "origin" } = {}) {
   const host = parseHost(new URL(origin).hostname, { allowPrivateDomains: true });
-  if (host.isIp || !isDeterminateSite(host)) {
+  if (!isDeterminateSite(host)) {
     throw invalid(field, "must resolve to a determinate registrable domain");
   }
   return host.domain;

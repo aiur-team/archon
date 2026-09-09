@@ -260,6 +260,17 @@ test("stored HTML must hash and measure to the approved descriptor", () => {
     code: "descriptor_mismatch",
     field: "publication.html",
   });
+
+  /* A descriptor whose digest is right and whose byte count is wrong: only the
+     length comparison catches this one, and getting it wrong would let a
+     record claim a size the owner never approved. */
+  const wrongLength = replacing(descriptorFor(FIXTURE_HTML), {
+    contentBytes: Buffer.byteLength(FIXTURE_HTML, "utf8") - 1,
+  });
+  rejects(() => validatePublication(replacing(complete, { descriptor: wrongLength })), {
+    code: "descriptor_mismatch",
+    field: "publication.html",
+  });
 });
 
 test("stored HTML must be a document, must be well-formed and must carry no NUL", () => {
@@ -340,7 +351,20 @@ test("identifiers, secret hashes and the pairing code are shape-checked", () => 
 
 test("an owner is a provider-scoped numeric id, never a username or an email", () => {
   const { approved } = PUBLICATION_FIXTURES;
-  for (const ownerAccountId of ["octocat", "gh_", "gh_0123", "gh_abc", "user@example.com", "gh_-1", 42]) {
+  /* `xy_123456` and a bare `1234567890` both survive the digit rule once the
+     first three characters are sliced off, so the provider prefix is the only
+     thing that rejects them. */
+  for (const ownerAccountId of [
+    "octocat",
+    "gh_",
+    "gh_0123",
+    "gh_abc",
+    "user@example.com",
+    "gh_-1",
+    "xy_123456",
+    "1234567890",
+    42,
+  ]) {
     rejects(() => validatePublication(replacing(approved, { ownerAccountId })), {
       field: "publication.ownerAccountId",
     });
@@ -355,6 +379,8 @@ test("timestamps have exactly one legal spelling", () => {
     "2026-09-09 18:00:00.000Z",
     "2026-02-30T18:00:00.000Z",
     "2026-09-09T18:00:00.000z",
+    "not-a-timestamp",
+    "",
     1757440800000,
   ]) {
     rejects(() => validatePublication(replacing(pending, { createdAt })), {
@@ -655,6 +681,12 @@ test("every required key is required, and the error names the key", () => {
 test("the app and renderer must be two different registrable sites", () => {
   assert.throws(
     () => readHostedConfig({ ...FIXTURE_ENV, HOSTED_RENDER_ORIGIN: FIXTURE_APP_ORIGIN }),
+    (error) => error instanceof HostedConfigError && error.key === "HOSTED_RENDER_ORIGIN",
+  );
+  /* Local-test mode skips the registrable-site comparison, so this is the case
+     that isolates the plain "these are the same origin" rule. */
+  assert.throws(
+    () => readHostedConfig({ ...FIXTURE_LOCAL_ENV, HOSTED_RENDER_ORIGIN: FIXTURE_LOCAL_APP_ORIGIN }),
     (error) => error instanceof HostedConfigError && error.key === "HOSTED_RENDER_ORIGIN",
   );
   assert.throws(
