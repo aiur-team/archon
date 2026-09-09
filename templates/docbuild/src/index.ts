@@ -24,6 +24,13 @@ const CHEVRON =
 export const USAGE = `docbuild — compose an architecture doc into one self-contained HTML file
 
     docbuild <instance>
+    docbuild <instance> --hosted
+
+--hosted builds the same document for private hosted reading instead: the same
+inline theme, navigation and section content, but no Google-font request and
+none of the session, comment, edit, realtime, presence or share client code.
+It writes <instance>/dist/<instance-basename>.hosted.html and leaves the normal
+<instance-basename>.html untouched.
 
 An instance directory holds:
     doc.json          document metadata
@@ -264,7 +271,91 @@ export function repoRoot(from: string = process.cwd()): string {
   }
 }
 
-export function build(root: string, instance: string): string {
+// ------------------------------------------------------------------- profiles
+
+/**
+ * How one build composes a document. `hosted` is the explicit profile for a
+ * privately hosted artifact; everything else is the normal profile, whose bytes
+ * are frozen by `templates/check-dist`.
+ *
+ * This is an option, never an inference. The builder must not read the
+ * environment, the document URL, or where the package happens to be installed
+ * to decide which artifact a caller asked for: the CLI flag and the library
+ * option are the same switch, so `docbuild <instance> --hosted` and
+ * `build(root, instance, { hosted: true })` produce the same file.
+ */
+export interface BuildOptions {
+  /** Compose the hosted/offline profile instead of the normal one. */
+  readonly hosted?: boolean;
+}
+
+/**
+ * The font markup the normal profile emits, kept here rather than in
+ * `layout.html` so the hosted profile can omit it without a second template.
+ *
+ * The value is the exact three lines the layout carried before `{{FONT_LINKS}}`
+ * existed, so a normal build is byte-identical across the change.
+ */
+export const FONT_LINKS =
+  '<link rel="preconnect" href="https://fonts.googleapis.com">\n' +
+  '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n' +
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2' +
+  '?family=JetBrains+Mono:wght@400;500;700&display=swap">';
+
+const FONT_SLOT = "{{FONT_LINKS}}";
+
+/** A `<link>` line requesting one of the Google font hosts. */
+const FONT_LINK_LINE = /^\s*<link\b[^>]*\bhref="https:\/\/fonts\.(?:googleapis|gstatic)\.com/;
+
+/**
+ * `{{FONT_LINKS}}` is the one placeholder a build tolerates missing. Every
+ * other slot is asserted, because a feature whose slot vanished from the layout
+ * would silently stop being composed. This one is different: an installed
+ * package staged before the slot existed still carries the literal font markup,
+ * and a hosted build of that layout must still come out without a font request.
+ * Fill the slot when it is there; strip the legacy lines when it is not.
+ */
+function applyFontProfile(html: string, hosted: boolean): string {
+  if (html.includes(FONT_SLOT)) {
+    if (!hosted) return html.split(FONT_SLOT).join(FONT_LINKS);
+    // Take the line the slot sits on with it, so a hosted head composed from
+    // this layout matches one composed from a layout that never had the markup.
+    return html.split(`${FONT_SLOT}\n`).join("").split(FONT_SLOT).join("");
+  }
+  if (!hosted) return html;
+  return html
+    .split("\n")
+    .filter((line) => !FONT_LINK_LINE.test(line))
+    .join("\n");
+}
+
+/**
+ * The slots the hosted profile leaves empty: every legacy account and
+ * collaboration client, plus the styles that only exist to dress their
+ * controls. A hosted artifact is read by its owner through a renderer that
+ * offers none of those endpoints, so shipping the code would only mean dead
+ * bytes attempting requests that cannot succeed.
+ *
+ * Theme, components, extra CSS/JS, the anchor core, the local changelog client
+ * and `app.js` are deliberately absent from this list: they are what makes the
+ * artifact readable and navigable offline.
+ */
+export const HOSTED_OMITTED_SLOTS: readonly string[] = [
+  "{{SESSION_CSS}}",
+  "{{COMMENTS_CSS}}",
+  "{{EDIT_CSS}}",
+  "{{PRESENCE_CSS}}",
+  "{{SHARE_CSS}}",
+  "{{EDIT_JS}}",
+  "{{COMMENTS_JS}}",
+  "{{REALTIME_JS}}",
+  "{{PRESENCE_JS}}",
+  "{{SHARE_JS}}",
+  "{{SESSION_JS}}",
+];
+
+export function build(root: string, instance: string, options: BuildOptions = {}): string {
+  const hosted = options.hosted === true;
   const inst = join(root, instance);
   if (!isDir(inst)) fail(`no such instance directory: ${instance}`);
   const base = resolveBase(root);
@@ -383,6 +474,16 @@ export function build(root: string, instance: string): string {
   const missing = subs.map(([token]) => token).filter((token) => !html.includes(token));
   if (missing.length > 0) fail(`layout.html is missing placeholders: ${missing.sort().join(", ")}`);
 
+  // Profile selection happens after the integrity assertion, never instead of
+  // it: the hosted artifact omits a feature the layout still has to declare.
+  html = applyFontProfile(html, hosted);
+  if (hosted) {
+    const omitted = new Set(HOSTED_OMITTED_SLOTS);
+    for (const sub of subs) {
+      if (omitted.has(sub[0])) sub[1] = "";
+    }
+  }
+
   for (const [token, value] of subs) {
     // split/join, never replaceAll: a string replacement in replaceAll treats
     // `$&`, `$'` and `` $` `` as capture references, and real section bodies
@@ -403,7 +504,11 @@ export function build(root: string, instance: string): string {
   }
   const name = inst.split(sep).filter(Boolean).pop();
   if (name === undefined) fail("instance path has no final component");
-  const out = join(outDir, `${name}.html`);
+  // The output is named after the instance directory's basename, not the
+  // document slug. The hosted profile gets its own suffix so a hosted build can
+  // never overwrite the committed normal artifact `templates/check-dist`
+  // rebuilds — both files coexist in dist/.
+  const out = join(outDir, hosted ? `${name}.hosted.html` : `${name}.html`);
   try {
     writeFileSync(out, html);
   } catch (e) {

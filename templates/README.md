@@ -237,6 +237,34 @@ the canonical committed `history.json`, or omits history when the file is absent
 `docbuild --site` is the underlying CLI spelling. Writers normally use the repository wrapper
 `templates/build --site`.
 
+## Build one document for private hosted reading
+
+```bash
+templates/build cache-notes --hosted
+```
+
+`--hosted` is an explicit profile, not an inference from the environment or from where the builder is
+installed. It writes `cache-notes/dist/cache-notes.hosted.html` — named after the instance directory, like
+every artifact here — and leaves the committed `cache-notes.html` untouched, so `templates/check-dist`
+still rebuilds the normal artifact byte-for-byte.
+
+The hosted artifact keeps the inline theme and component CSS, `extra.css`, `extra.js`, the theme toggle,
+the section navigation, the open/closed section behaviour, the generated `data-aid` anchors and the local
+changelog client. It omits the Google Fonts `preconnect` and stylesheet links, so it makes no network
+request, and it omits the session, comment, edit, realtime, presence and share client code together with
+the styles for their controls. Text falls back to the local `ui-monospace` and `system-ui` stacks the
+theme already names.
+
+`--hosted` and `--site` build different things and cannot be combined; either one with an unknown flag
+fails with the synopsis and a nonzero exit. The profile is not an HTML sanitizer: authored remote images,
+fonts and scripts stay exactly as written, are never fetched during the build, and remain subject to the
+renderer's own policy. Do not describe a hosted artifact as having comments or inline editing enabled.
+
+A hosted artifact is built on demand for one private upload and is not committed; `.gitignore` keeps
+`dist/*.hosted.html` out of the tree so a routine `git add cache-notes` cannot carry it along.
+
+`docbuild <instance> --hosted` is the underlying CLI spelling.
+
 ## Write prose one sentence per line
 
 Inside `sections/*.html`, start each new prose sentence on a new source line in paragraphs, headings,

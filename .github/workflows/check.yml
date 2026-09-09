@@ -95,7 +95,8 @@ jobs:
           npm --prefix templates/docbuild run build
           node --test \
             templates/docbuild/dist/index.test.js \
-            templates/docbuild/dist/anchors.test.js
+            templates/docbuild/dist/anchors.test.js \
+            templates/docbuild/dist/hosted-profile.test.js
           node --test scripts/connect.test.mjs
           node --test scripts/temp-roots.test.mjs
           node --experimental-vm-modules --test netlify/lib/identity.test.mjs
