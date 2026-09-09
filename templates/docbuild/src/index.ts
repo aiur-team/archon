@@ -304,29 +304,51 @@ export const FONT_LINKS =
 
 const FONT_SLOT = "{{FONT_LINKS}}";
 
+const FONT_LINK_LINES = FONT_LINKS.split("\n");
+
 /** A `<link>` line requesting one of the Google font hosts. */
 const FONT_LINK_LINE = /^\s*<link\b[^>]*\bhref="https:\/\/fonts\.(?:googleapis|gstatic)\.com/;
 
+/** Any surviving reference to a Google font host, in any position. */
+const FONT_HOST = /fonts\.(?:googleapis|gstatic)\.com/;
+
 /**
- * `{{FONT_LINKS}}` is the one placeholder a build tolerates missing. Every
- * other slot is asserted, because a feature whose slot vanished from the layout
- * would silently stop being composed. This one is different: an installed
- * package staged before the slot existed still carries the literal font markup,
- * and a hosted build of that layout must still come out without a font request.
- * Fill the slot when it is there; strip the legacy lines when it is not.
+ * `{{FONT_LINKS}}` is the one placeholder that may legitimately be absent, but
+ * absence still has to be *earned*. An installed package staged before the slot
+ * existed carries the literal font markup instead, and a hosted build of that
+ * layout must still come out without a font request — so both shapes are
+ * accepted and a layout carrying neither is a missing placeholder like any
+ * other. Without that check the two failures are indistinguishable: a layout
+ * that simply lost its font markup would build clean and ship a normal artifact
+ * with no font at all.
+ *
+ * The two removal mechanisms are additive rather than exclusive, because a
+ * merge can leave a layout holding the slot *and* the literal lines. Filling or
+ * clearing the slot happens first; in the hosted profile the line filter then
+ * runs over whatever is left, and a post-condition refuses to return a layout
+ * that still names a font host in a shape neither mechanism recognised.
  */
 function applyFontProfile(html: string, hosted: boolean): string {
-  if (html.includes(FONT_SLOT)) {
-    if (!hosted) return html.split(FONT_SLOT).join(FONT_LINKS);
-    // Take the line the slot sits on with it, so a hosted head composed from
-    // this layout matches one composed from a layout that never had the markup.
-    return html.split(`${FONT_SLOT}\n`).join("").split(FONT_SLOT).join("");
-  }
-  if (!hosted) return html;
-  return html
+  const hasSlot = html.includes(FONT_SLOT);
+  const hasLegacyMarkup = FONT_LINK_LINES.every((line) => html.includes(line));
+  if (!hasSlot && !hasLegacyMarkup) fail(`layout.html is missing placeholders: ${FONT_SLOT}`);
+
+  if (!hosted) return hasSlot ? html.split(FONT_SLOT).join(FONT_LINKS) : html;
+
+  // Take the line the slot sits on with it, so a hosted head composed from this
+  // layout matches one composed from a layout that never had the markup.
+  const cleared = hasSlot ? html.split(`${FONT_SLOT}\n`).join("").split(FONT_SLOT).join("") : html;
+  const stripped = cleared
     .split("\n")
     .filter((line) => !FONT_LINK_LINE.test(line))
     .join("\n");
+  // Only the layout template is in hand here — sections, `extra.css` and the
+  // base assets are substituted later — so a surviving font host is markup this
+  // function failed to remove, never authored content.
+  if (FONT_HOST.test(stripped)) {
+    fail("layout.html: the hosted profile could not remove the font markup");
+  }
+  return stripped;
 }
 
 /**
@@ -338,7 +360,9 @@ function applyFontProfile(html: string, hosted: boolean): string {
  *
  * Theme, components, extra CSS/JS, the anchor core, the local changelog client
  * and `app.js` are deliberately absent from this list: they are what makes the
- * artifact readable and navigable offline.
+ * artifact readable and navigable offline. They are named in
+ * `HOSTED_KEPT_SLOTS`, because a denylist alone fails open — a slot added later
+ * and forgotten here would simply ship.
  */
 export const HOSTED_OMITTED_SLOTS: readonly string[] = [
   "{{SESSION_CSS}}",
@@ -352,6 +376,40 @@ export const HOSTED_OMITTED_SLOTS: readonly string[] = [
   "{{PRESENCE_JS}}",
   "{{SHARE_JS}}",
   "{{SESSION_JS}}",
+];
+
+/**
+ * The slots the hosted profile deliberately keeps. Every one of them is either
+ * the document's own content, its chrome, or a client with no network, import
+ * or endpoint of any kind.
+ *
+ * This exists so the pair is a partition rather than a denylist. `build()`
+ * asserts that the two lists together classify every slot exactly once, in both
+ * profiles, so adding a slot to `layout.html` without deciding which side it
+ * falls on fails the next normal build rather than quietly shipping in the next
+ * hosted artifact. A renamed slot fails the same way instead of turning its
+ * denylist entry into a silent no-op.
+ */
+export const HOSTED_KEPT_SLOTS: readonly string[] = [
+  "{{TITLE}}",
+  "{{THEME_CSS}}",
+  "{{COMPONENTS_CSS}}",
+  "{{HISTORY_CSS}}",
+  "{{EXTRA_CSS}}",
+  "{{DOC_ID}}",
+  "{{EYEBROW}}",
+  "{{STATUS}}",
+  "{{HEADING}}",
+  "{{LEDE}}",
+  "{{META}}",
+  "{{NAV}}",
+  "{{SECTIONS}}",
+  "{{FOOTER}}",
+  "{{APP_JS}}",
+  "{{EXTRA_JS}}",
+  "{{HISTORY_JSON}}",
+  "{{ANCHOR_CORE_JS}}",
+  "{{HISTORY_JS}}",
 ];
 
 export function build(root: string, instance: string, options: BuildOptions = {}): string {
@@ -474,8 +532,24 @@ export function build(root: string, instance: string, options: BuildOptions = {}
   const missing = subs.map(([token]) => token).filter((token) => !html.includes(token));
   if (missing.length > 0) fail(`layout.html is missing placeholders: ${missing.sort().join(", ")}`);
 
-  // Profile selection happens after the integrity assertion, never instead of
-  // it: the hosted artifact omits a feature the layout still has to declare.
+  // The hosted profile must classify every slot, and both checks run in both
+  // profiles so drift fails the common build rather than the rare one. Without
+  // the first, a slot added later and forgotten ships in hosted artifacts;
+  // without the second, renaming a slot turns its omission entry into a silent
+  // no-op that leaves the client inlined.
+  const classified = new Set([...HOSTED_OMITTED_SLOTS, ...HOSTED_KEPT_SLOTS]);
+  const unclassified = subs.map(([token]) => token).filter((token) => !classified.has(token));
+  if (unclassified.length > 0) {
+    fail(`the hosted profile does not classify: ${unclassified.sort().join(", ")}`);
+  }
+  const tokens = new Set(subs.map(([token]) => token));
+  const unknown = [...classified].filter((token) => !tokens.has(token));
+  if (unknown.length > 0) {
+    fail(`the hosted profile classifies unknown slots: ${unknown.sort().join(", ")}`);
+  }
+
+  // Profile selection happens after the integrity assertions, never instead of
+  // them: the hosted artifact omits a feature the layout still has to declare.
   html = applyFontProfile(html, hosted);
   if (hosted) {
     const omitted = new Set(HOSTED_OMITTED_SLOTS);

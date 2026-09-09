@@ -26,7 +26,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { build, FONT_LINKS, repoRoot, resolveBase } from "./index.js";
+import {
+  build,
+  BuildError,
+  findPlaceholders,
+  FONT_LINKS,
+  HOSTED_KEPT_SLOTS,
+  HOSTED_OMITTED_SLOTS,
+  repoRoot,
+  resolveBase,
+} from "./index.js";
 
 const COMPILED = dirname(fileURLToPath(import.meta.url));
 const CLI = join(COMPILED, "cli.js");
@@ -89,6 +98,41 @@ const OMITTED_ASSETS = [
 const KEPT_ASSETS = ["theme.css", "components.css", "history.css", "app.js", "history.js"] as const;
 
 /**
+ * Per-instance content the hosted profile keeps. These are not base assets —
+ * they come from the instance directory — and no committed document in this
+ * repository has any of them, so `templates/check-dist` cannot cover them
+ * either. Without a fixture that writes them, widening `HOSTED_OMITTED_SLOTS`
+ * to swallow `{{EXTRA_CSS}}`, `{{EXTRA_JS}}` or `{{HISTORY_JSON}}` leaves every
+ * test green while every hosted artifact silently loses the author's own CSS,
+ * JS and changelog data.
+ */
+const EXTRA_CSS = ".authored-marker{outline:1px solid red}\n";
+const EXTRA_JS = 'window.authoredMarker = "authored-extra-js";\n';
+
+const HISTORY_HEAD = "0a1b2c3";
+const HISTORY_JSON = `${JSON.stringify(
+  {
+    doc: "sample",
+    head: HISTORY_HEAD,
+    versions: [
+      {
+        sha: HISTORY_HEAD,
+        date: "2026-01-02T03:04:05.000Z",
+        author: "A Person",
+        subject: "A commit subject",
+        url: "",
+        // Empty on purpose: a non-empty `changed` renders `&minus;`, which the
+        // anchor scanner's named-entity table does not know. That is a
+        // pre-existing defect, not this test's subject — see index.test.ts.
+        changed: [],
+      },
+    ],
+  },
+  null,
+  2,
+)}\n`;
+
+/**
  * Fresh history generation is gated on the origin slug, and the committed
  * fallback is a second branch. Keep both off so a result never depends on the
  * repository the tests happen to run inside.
@@ -109,30 +153,67 @@ const isolate = (t: { after: (fn: () => void) => void }): void => {
 /** The base assets this repository has committed. */
 const baseDir = (): string => resolveBase(repoRoot(COMPILED));
 
-const asset = (name: string): string => readFileSync(join(baseDir(), name), "utf8");
+/**
+ * Read a base asset, refusing to return an empty one. `html.includes("")` is
+ * unconditionally true, so an emptied asset would turn every kept-side
+ * assertion into a silent no-op — the one failure the kept-side checks exist
+ * to catch.
+ */
+const asset = (name: string): string => {
+  const source = readFileSync(join(baseDir(), name), "utf8");
+  assert.ok(source.trim() !== "", `${name} should be a non-empty base asset`);
+  return source;
+};
+
+/**
+ * The four shapes `layout.html` can take with respect to the font markup.
+ *
+ * - `slot` is what this repository commits.
+ * - `legacy` is a package staged before `{{FONT_LINKS}}` existed: literal
+ *   markup, no slot.
+ * - `both` is what a merge across this change can leave behind.
+ * - `none` is a layout that has lost its font markup altogether, which must be
+ *   a loud failure rather than a silently fontless artifact.
+ */
+type LayoutShape = "slot" | "legacy" | "both" | "none";
+
+interface Fixture {
+  /** Font-markup shape to stage into `layout.html`. Defaults to `slot`. */
+  readonly layout?: LayoutShape;
+  /** Write `extra.css`, `extra.js` and `history.json` into the instance. */
+  readonly authored?: boolean;
+}
 
 /**
  * A throwaway root carrying the real base assets and one instance, removed when
- * the test finishes. `legacyLayout` rewrites the staged layout back to the
- * pre-`{{FONT_LINKS}}` shape an already-installed package still carries.
+ * the test finishes.
  */
-const root = (t: { after: (fn: () => void) => void }, legacyLayout = false): string => {
+const root = (t: { after: (fn: () => void) => void }, fixture: Fixture = {}): string => {
   const dir = mkdtempSync(join(tmpdir(), "ahu002-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const base = join(dir, "templates", "base");
   cpSync(baseDir(), base, { recursive: true });
-  if (legacyLayout) {
+
+  const shape = fixture.layout ?? "slot";
+  if (shape !== "slot") {
     const layout = join(base, "layout.html");
     const src = readFileSync(layout, "utf8");
     assert.ok(src.includes("{{FONT_LINKS}}"), "the committed layout should carry the font slot");
-    writeFileSync(layout, src.split("{{FONT_LINKS}}").join(FONT_LINKS));
+    const replacement =
+      shape === "legacy" ? FONT_LINKS : shape === "both" ? `{{FONT_LINKS}}\n${FONT_LINKS}` : "";
+    writeFileSync(layout, src.split("{{FONT_LINKS}}").join(replacement));
   }
 
   const inst = join(dir, "sample");
   mkdirSync(join(inst, "sections"), { recursive: true });
   writeFileSync(join(inst, "doc.json"), DOC_JSON);
   writeFileSync(join(inst, "sections", "01-problem.html"), SECTION);
+  if (fixture.authored === true) {
+    writeFileSync(join(inst, "extra.css"), EXTRA_CSS);
+    writeFileSync(join(inst, "extra.js"), EXTRA_JS);
+    writeFileSync(join(inst, "history.json"), HISTORY_JSON);
+  }
   return dir;
 };
 
@@ -211,7 +292,7 @@ test("a layout without the font slot still builds both profiles correctly", (t) 
   // An installed package staged before `{{FONT_LINKS}}` existed still carries
   // the literal markup. Normal builds of it must be untouched, and a hosted
   // build of it must still come out without a font request.
-  const legacy = root(t, true);
+  const legacy = root(t, { layout: "legacy" });
   const normal = built(legacy, false);
   assert.ok(normal.html.includes(FONT_LINKS));
 
@@ -223,6 +304,91 @@ test("a layout without the font slot still builds both profiles correctly", (t) 
   // The same bytes as a hosted build from the current layout: the two paths to
   // omission converge rather than producing two different artifacts.
   assert.equal(hosted.html, built(root(t), true).html);
+});
+
+test("a layout carrying both the slot and the literal links is fully stripped", (t) => {
+  isolate(t);
+  // A branch cut before the slot existed and merged after it can resolve to a
+  // layout holding both shapes. If the two removal mechanisms were exclusive,
+  // the slot branch would win and the literal links would survive into a
+  // document whose whole point is that it makes no font request.
+  const { html } = built(root(t, { layout: "both" }), true);
+
+  assert.match(html, /<h2[^>]*>A heading<\/h2>/);
+  assert.doesNotMatch(html, /fonts\.googleapis\.com/);
+  assert.doesNotMatch(html, /fonts\.gstatic\.com/);
+});
+
+test("a layout with neither the slot nor the font markup fails both profiles", (t) => {
+  isolate(t);
+  // The tolerated-missing placeholder is tolerated because the legacy markup
+  // stands in for it. A layout carrying neither has genuinely lost a feature,
+  // and it must fail the way every other missing slot does rather than quietly
+  // producing a fontless artifact.
+  const dir = root(t, { layout: "none" });
+
+  for (const hosted of [false, true]) {
+    assert.throws(
+      () => build(dir, "sample", { hosted }),
+      (error: Error) => {
+        assert.ok(error instanceof BuildError, `expected a BuildError, got ${error.name}`);
+        assert.match(error.message, /missing placeholders: \{\{FONT_LINKS\}\}/);
+        return true;
+      },
+      `expected a missing-placeholder failure with hosted=${hosted}`,
+    );
+  }
+});
+
+test("the hosted profile keeps the author's own CSS, JS and changelog data", (t) => {
+  isolate(t);
+  // No committed document in this repository has an `extra.css`, `extra.js` or
+  // `history.json`, so `templates/check-dist` covers none of them. Without this
+  // fixture, widening HOSTED_OMITTED_SLOTS to swallow any of the three leaves
+  // the whole suite green while every hosted artifact loses authored content.
+  const { html } = built(root(t, { authored: true }), true);
+
+  assert.ok(html.includes(EXTRA_CSS.trim()), "hosted output dropped extra.css");
+  assert.ok(html.includes(EXTRA_JS.trim()), "hosted output dropped extra.js");
+
+  // The embedded changelog data the retained history client reads. Without it
+  // that client is inert, so keeping one without the other is not "kept".
+  const block = html.match(
+    /<script type="application\/json" id="doc-history"[^>]*>(.*?)<\/script>/s,
+  );
+  assert.ok(block, "hosted output dropped the embedded history block");
+  assert.match(block[0]!, new RegExp(` data-head="${HISTORY_HEAD}"`));
+  const parsed = JSON.parse(block[1]!.split("<\\/").join("</")) as { head: string };
+  assert.equal(parsed.head, HISTORY_HEAD);
+  assert.ok(html.includes(asset("history.js")), "hosted output dropped the changelog client");
+});
+
+test("every layout slot is classified as kept or omitted exactly once", (t) => {
+  isolate(t);
+  // The pair is a partition, not a denylist. A slot added to layout.html and
+  // forgotten here would otherwise ship in hosted artifacts by default, and a
+  // renamed slot would turn its omission entry into a silent no-op. The
+  // production build asserts this too; asserting it against the committed
+  // layout is what names the offending token at review time.
+  const layout = readFileSync(join(baseDir(), "layout.html"), "utf8");
+  const inLayout = new Set(findPlaceholders(layout));
+  // Composed here rather than declared in the layout, so it has no slot.
+  inLayout.delete("{{FONT_LINKS}}");
+
+  const omitted = new Set(HOSTED_OMITTED_SLOTS);
+  const kept = new Set(HOSTED_KEPT_SLOTS);
+  assert.equal(omitted.size, HOSTED_OMITTED_SLOTS.length, "duplicate entry in the omitted list");
+  assert.equal(kept.size, HOSTED_KEPT_SLOTS.length, "duplicate entry in the kept list");
+
+  const both = [...omitted].filter((token) => kept.has(token));
+  assert.deepEqual(both, [], "a slot is classified as both kept and omitted");
+
+  const classified = new Set([...omitted, ...kept]);
+  const unclassified = [...inLayout].filter((token) => !classified.has(token)).sort();
+  assert.deepEqual(unclassified, [], "layout.html has a slot the hosted profile does not classify");
+
+  const unknown = [...classified].filter((token) => !inLayout.has(token)).sort();
+  assert.deepEqual(unknown, [], "the hosted profile classifies a slot layout.html does not have");
 });
 
 test("each profile writes its own file, named after the instance basename", (t) => {
@@ -294,17 +460,41 @@ test("unknown and incompatible flags fail with help and a nonzero exit", (t) => 
   isolate(t);
   const dir = root(t);
 
-  for (const args of [["sample", "--hostedd"], ["sample", "-x"], ["--site", "--hosted"], ["--site", "sample"], []]) {
+  const rejected = [
+    ["sample", "--hostedd"],
+    ["sample", "-x"],
+    ["--site", "--hosted"],
+    ["--site", "sample"],
+    ["--site", "--site"],
+    ["sample", "--hosted", "--hosted"],
+    ["a", "b"],
+    [],
+    // Help is the whole request or it is a mistake. These exited 2 before the
+    // parser was rewritten, and a `docbuild "$doc" $FLAGS && upload ...` script
+    // depends on that: exiting 0 while writing nothing would upload the
+    // previous run's artifact.
+    ["sample", "--help"],
+    ["sample", "-h"],
+    ["--site", "--help"],
+  ];
+  for (const args of rejected) {
     const result = cli(dir, args);
     assert.notEqual(result.code, 0, `expected a nonzero exit for: ${args.join(" ")}`);
     assert.match(result.stderr, /^error: /m, `expected an error line for: ${args.join(" ")}`);
     assert.match(result.stderr, /docbuild <instance> --hosted/, `expected help for: ${args.join(" ")}`);
     assert.equal(result.stdout, "", `help must not go to stdout for: ${args.join(" ")}`);
+    assert.ok(
+      !existsSync(join(dir, "sample", "dist")),
+      `a rejected invocation must write nothing: ${args.join(" ")}`,
+    );
   }
 
-  // --help is still the one spelling that succeeds, and it documents --hosted.
-  const help = cli(dir, ["--help"]);
-  assert.equal(help.code, 0);
-  assert.match(help.stdout, /docbuild <instance> --hosted/);
-  assert.match(help.stdout, /docbuild --site/);
+  // A lone help flag is the one spelling that succeeds, in both spellings, and
+  // it documents every mode.
+  for (const flag of ["-h", "--help"]) {
+    const help = cli(dir, [flag]);
+    assert.equal(help.code, 0, help.stderr);
+    assert.match(help.stdout, /docbuild <instance> --hosted/);
+    assert.match(help.stdout, /docbuild --site/);
+  }
 });

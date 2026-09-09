@@ -28,7 +28,15 @@ const usage = (message?: string): never => {
   process.exit(message === undefined ? 0 : 2);
 };
 
-if (args.includes("-h") || args.includes("--help")) usage();
+// Help is the whole request or it is a mistake. `docbuild <instance> --help`
+// exited 2 before this parser existed, and a build script of the shape
+// `docbuild "$doc" $FLAGS && upload "$doc/dist/..."` depends on that: succeeding
+// with exit 0 while writing nothing would send the previous run's artifact.
+const helpAt = args.findIndex((arg) => arg === "-h" || arg === "--help");
+if (helpAt !== -1) {
+  if (args.length === 1) usage();
+  usage(`${args[helpAt]} takes no other arguments`);
+}
 
 // One argument parse for both modes, so an unknown or repeated flag fails the
 // same way whichever mode it was aimed at. Anything that is not a recognised

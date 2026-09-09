@@ -250,10 +250,11 @@ still rebuilds the normal artifact byte-for-byte.
 
 The hosted artifact keeps the inline theme and component CSS, `extra.css`, `extra.js`, the theme toggle,
 the section navigation, the open/closed section behaviour, the generated `data-aid` anchors and the local
-changelog client. It omits the Google Fonts `preconnect` and stylesheet links, so it makes no network
-request, and it omits the session, comment, edit, realtime, presence and share client code together with
-the styles for their controls. Text falls back to the local `ui-monospace` and `system-ui` stacks the
-theme already names.
+changelog client. It omits the Google Fonts `preconnect` and stylesheet links, so the generated chrome
+makes no network request, and it omits the session, comment, edit, realtime, presence and share client
+code together with the styles for their controls. Text falls back to the local `ui-monospace` and
+`system-ui` stacks the theme already names. Remote references you authored in your sections, `extra.css`
+or `extra.js` are left exactly as written and are not covered by this profile.
 
 `--hosted` and `--site` build different things and cannot be combined; either one with an unknown flag
 fails with the synopsis and a nonzero exit. The profile is not an HTML sanitizer: authored remote images,

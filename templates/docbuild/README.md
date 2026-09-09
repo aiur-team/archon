@@ -53,9 +53,11 @@ and component CSS, your `extra.css` and `extra.js`, the theme toggle, section
 navigation, open/closed section behaviour, the generated anchors, and the local
 changelog client. It leaves out:
 
-- the Google Fonts `preconnect` and stylesheet links, so the document makes no
-  network request at all. Text falls back to the local `ui-monospace` and
-  `system-ui` stacks the theme already names.
+- the Google Fonts `preconnect` and stylesheet links, so the generated chrome
+  makes no network request. Text falls back to the local `ui-monospace` and
+  `system-ui` stacks the theme already names. Remote references you authored in
+  your sections, `extra.css` or `extra.js` are left exactly as written and are
+  not covered by this profile.
 - the session, comment, edit, realtime, presence and share client code, and the
   styles for their controls. A hosted document is read privately by its owner
   through a renderer that offers none of those endpoints.
