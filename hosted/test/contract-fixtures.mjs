@@ -6,29 +6,42 @@
  * account, document or provider response. The `*SecretHash` fields are real
  * SHA-256 digests of the literal strings a few lines above them: a hash whose
  * preimage is printed next to it authenticates nobody, which is the property
- * that makes it safe to commit.
+ * that makes it safe to commit. The `agentSecret` and `csrfToken` fixtures are
+ * obvious literals padded to a legal length, not generated tokens.
  *
- * Digests and byte lengths are **computed, never transcribed**. A fixture whose
- * `contentSha256` was pasted in by hand asserts that somebody once ran a hash
- * correctly; a fixture that hashes its own bytes asserts the invariant the
- * server enforces. The malformed variants below are built by mutating a valid
- * fixture through `without` / `replacing`, for the same reason: a malformed
- * case written out longhand drifts away from the valid one it is supposed to
- * differ from in exactly one respect.
+ * Digests, byte lengths **and lifetimes** are computed, never transcribed. A
+ * fixture whose `contentSha256` was pasted in by hand asserts that somebody once
+ * ran a hash correctly; a fixture that hashes its own bytes asserts the
+ * invariant the server enforces. The timestamps are derived from
+ * `HOSTED_LIMITS`, because a hand-written `18:12:00` once drifted to 720 seconds
+ * against a declared 600-second upload TTL and nothing noticed - a fixture that
+ * contradicts the constant it illustrates is worse than no fixture.
+ *
+ * The malformed variants are built by mutating a valid fixture through
+ * `without` / `replacing`, for the same reason: a malformed case written out
+ * longhand drifts away from the valid one it is supposed to differ from in
+ * exactly one respect.
  *
  * **These fixtures are test data and nothing else.** They must never reach a
  * deployed code path, and that is enforced mechanically rather than promised:
- * `scripts/check-hosted-modules.mjs` fails if any module under `hosted/lib/` or
- * `hosted/functions/` imports anything from `hosted/test/`. There is no
- * "fixture mode" flag for a handler to be switched into, because a flag that
- * fakes success is the failure this rule exists to prevent.
+ * `scripts/check-hosted-modules.mjs` fails if any module in the hosted deploy
+ * tree resolves an import into `hosted/test/`. There is no "fixture mode" flag
+ * for a handler to be switched into, because a flag that fakes success is the
+ * failure this rule exists to prevent.
  */
 
 import { createHash } from "node:crypto";
 
+import { HOSTED_LIMITS } from "../lib/contracts.mjs";
+
 /** Hash helper. Also what the fixtures assert the production digest rule is. */
 function sha256(text) {
   return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+}
+
+/** `base` advanced by `seconds`, in the one canonical timestamp spelling. */
+function after(base, seconds) {
+  return new Date(Date.parse(base) + seconds * 1000).toISOString();
 }
 
 /* ------------------------------------------------------------------ */
@@ -77,9 +90,18 @@ export const VALID_DESCRIPTOR = Object.freeze(descriptorFor(FIXTURE_HTML));
 /* ------------------------------------------------------------------ */
 
 /** A synthetic GitHub numeric ID. Not a real account. */
-export const FIXTURE_OWNER_ACCOUNT_ID = "gh_10000042";
+export const FIXTURE_PROVIDER_USER_ID = "10000042";
+export const FIXTURE_OWNER_ACCOUNT_ID = `gh_${FIXTURE_PROVIDER_USER_ID}`;
 /** A second synthetic identity, for the "other account is denied" cases. */
 export const FIXTURE_OTHER_ACCOUNT_ID = "gh_10000043";
+export const FIXTURE_LOGIN = "archon-fixture-user";
+
+export const FIXTURE_PRINCIPAL = Object.freeze({
+  accountId: FIXTURE_OWNER_ACCOUNT_ID,
+  provider: "github.com",
+  providerUserId: FIXTURE_PROVIDER_USER_ID,
+  login: FIXTURE_LOGIN,
+});
 
 /** Published preimages: hashing these proves the field shape, not a capability. */
 export const FIXTURE_AGENT_SECRET_PREIMAGE = "archon-fixture-agent-secret-not-a-credential";
@@ -87,6 +109,11 @@ export const FIXTURE_BROWSER_SECRET_PREIMAGE = "archon-fixture-browser-secret-no
 
 export const FIXTURE_AGENT_SECRET_HASH = sha256(FIXTURE_AGENT_SECRET_PREIMAGE);
 export const FIXTURE_BROWSER_SECRET_HASH = sha256(FIXTURE_BROWSER_SECRET_PREIMAGE);
+
+/** Wire-shaped opaque tokens. Literal words, padded to a legal length. */
+export const FIXTURE_AGENT_SECRET = "fixture-agent-secret-not-a-real-capability-0";
+export const FIXTURE_BROWSER_SECRET = "fixture-browser-secret-not-a-real-capability";
+export const FIXTURE_CSRF_TOKEN = "fixture-csrf-token-not-a-real-capability-000";
 
 export const FIXTURE_PUBLICATION_ID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 export const FIXTURE_USER_CODE = "BCDF-2345";
@@ -104,7 +131,7 @@ export const FIXTURE_USER_CODE = "BCDF-2345";
  */
 export const FIXTURE_APP_ORIGIN = "https://app.archon.example.com";
 export const FIXTURE_RENDER_ORIGIN = "https://render.archon.example.net";
-/** A renderer sharing the app's registrable site — the C6 misconfiguration. */
+/** A renderer sharing the app's registrable site - the C6 misconfiguration. */
 export const FIXTURE_SIBLING_RENDER_ORIGIN = "https://render.archon.example.com";
 /**
  * Two origins under a *private* PSL suffix. They differ only in their first
@@ -122,7 +149,6 @@ export const FIXTURE_LOCAL_RENDER_ORIGIN = "http://localhost:8899";
 
 /** A complete, valid production environment. Credentials are obvious fakes. */
 export const FIXTURE_ENV = Object.freeze({
-  HOSTED_ENV: "production",
   HOSTED_APP_ORIGIN: FIXTURE_APP_ORIGIN,
   HOSTED_RENDER_ORIGIN: FIXTURE_RENDER_ORIGIN,
   GITHUB_CLIENT_ID: "Iv1.fixtureclientid",
@@ -130,23 +156,26 @@ export const FIXTURE_ENV = Object.freeze({
   HOSTED_PUBLISH_ENABLED: "false",
 });
 
-/** The loopback-only test environment. */
+/** The loopback-only environment, paired with `{ mode: "local-test" }`. */
 export const FIXTURE_LOCAL_ENV = Object.freeze({
   ...FIXTURE_ENV,
-  HOSTED_ENV: "local-test",
   HOSTED_APP_ORIGIN: FIXTURE_LOCAL_APP_ORIGIN,
   HOSTED_RENDER_ORIGIN: FIXTURE_LOCAL_RENDER_ORIGIN,
 });
 
 /* ------------------------------------------------------------------ */
-/* publication records — one per allowed state                         */
+/* publication records - one per allowed state                         */
 /* ------------------------------------------------------------------ */
 
 const CREATED_AT = "2026-09-09T18:00:00.000Z";
-const PENDING_EXPIRES_AT = "2026-09-09T18:15:00.000Z";
-const UPLOAD_EXPIRES_AT = "2026-09-09T18:12:00.000Z";
-const COMPLETED_AT = "2026-09-09T18:06:00.000Z";
-const RECEIPT_EXPIRES_AT = "2026-09-10T18:06:00.000Z";
+/** Derived from the contract, so a fixture can never disagree with a limit. */
+export const PENDING_EXPIRES_AT = after(CREATED_AT, HOSTED_LIMITS.PENDING_TTL_SECONDS);
+const APPROVED_AT = after(CREATED_AT, 120);
+export const UPLOAD_EXPIRES_AT = after(APPROVED_AT, HOSTED_LIMITS.UPLOAD_TTL_SECONDS);
+export const COMPLETED_AT = after(APPROVED_AT, 60);
+export const RECEIPT_EXPIRES_AT = after(COMPLETED_AT, HOSTED_LIMITS.RECEIPT_TTL_SECONDS);
+export const FIXTURE_CREATED_AT = CREATED_AT;
+export const FIXTURE_APPROVED_AT = APPROVED_AT;
 
 const PUBLICATION_BASE = {
   v: 1,
@@ -203,6 +232,16 @@ export const PUBLICATION_FIXTURES = Object.freeze({
 /* wire envelopes                                                      */
 /* ------------------------------------------------------------------ */
 
+export const START_RESPONSE = Object.freeze({
+  v: 1,
+  publicationId: FIXTURE_PUBLICATION_ID,
+  verificationUriComplete: `${FIXTURE_APP_ORIGIN}/publish/authorize#${FIXTURE_BROWSER_SECRET}`,
+  userCode: FIXTURE_USER_CODE,
+  agentSecret: FIXTURE_AGENT_SECRET,
+  expiresAt: PENDING_EXPIRES_AT,
+  intervalSeconds: 5,
+});
+
 export const PENDING_RESULT_ENVELOPE = Object.freeze({
   v: 1,
   state: "pending",
@@ -231,6 +270,38 @@ export const ERROR_ENVELOPE = Object.freeze({
     message: "publication is no longer pending",
     retryable: false,
   }),
+});
+
+/* ------------------------------------------------------------------ */
+/* identity and viewer bodies                                          */
+/* ------------------------------------------------------------------ */
+
+export const SIGNED_OUT_SESSION = Object.freeze({ v: 1, authenticated: false });
+
+export const SIGNED_IN_SESSION = Object.freeze({
+  v: 1,
+  authenticated: true,
+  accountId: FIXTURE_OWNER_ACCOUNT_ID,
+  login: FIXTURE_LOGIN,
+  csrfToken: FIXTURE_CSRF_TOKEN,
+});
+
+export const DOCUMENT_METADATA = Object.freeze({
+  v: 1,
+  documentId: FIXTURE_PUBLICATION_ID,
+  title: VALID_DESCRIPTOR.title,
+  ownerAccountId: FIXTURE_OWNER_ACCOUNT_ID,
+  contentSha256: VALID_DESCRIPTOR.contentSha256,
+  contentBytes: VALID_DESCRIPTOR.contentBytes,
+  createdAt: CREATED_AT,
+});
+
+export const READY_MESSAGE = Object.freeze({ type: "archon:ready", v: 1 });
+
+export const RENDER_MESSAGE = Object.freeze({
+  type: "archon:render",
+  v: 1,
+  html: FIXTURE_HTML,
 });
 
 /* ------------------------------------------------------------------ */

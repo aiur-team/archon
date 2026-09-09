@@ -41,24 +41,35 @@ jobs:
         run: node scripts/check-function-modules.mjs
 
       # `hosted/` is a SECOND Netlify deployment with its own lockfile, its own
-      # dependency set and no share of the root deploy tree. The three steps
-      # below are its equivalent of the two above, and they run in this order
-      # for the same reason the root pair does: a clean install first, then a
-      # link check against exactly what that install produced, then the tests.
+      # dependency set and no share of the root deploy tree. The steps below are
+      # its equivalent of the two above: a clean install first, then a link
+      # check against exactly what that install produced, then the tests.
       #
-      # They deliberately run before the docbuild typecheck installs a
-      # workspace. A hosted function cold-starts with nothing but this
-      # directory's own `node_modules`, so any hosted module that could only
-      # link on a machine where some other tree had been built does not link in
-      # production. Proving that requires checking before the other tree exists.
+      # Step order is NOT what isolates the two trees, and an earlier version of
+      # this comment claimed it was. Node's resolution walks up, so the root
+      # `npm ci` two steps above puts the repository's own `node_modules` on the
+      # resolution path of every file under `hosted/` no matter where these
+      # steps sit. What actually delivers "a hosted function cold-starts with
+      # nothing but its own `node_modules`" is a rule inside the gate: it
+      # records what Node resolves for each import and fails when a bare
+      # specifier lands anywhere but `hosted/node_modules`. That is checkable
+      # rather than positional, and `check-hosted-modules.test.mjs` proves it
+      # fails on a package installed only at the root.
       - name: hosted lockfile is in sync
         run: npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
 
       - name: every hosted module loads
         run: node scripts/check-hosted-modules.mjs
 
+      # The gate above is a silent-pass mechanism: an edit that empties its
+      # fault list leaves CI green forever and the only symptom is a hosted
+      # deploy 404ing. This runs the gate against planted faults and requires it
+      # to fail on each one.
+      - name: the hosted module gate can fail
+        run: node --test scripts/check-hosted-modules.test.mjs
+
       - name: hosted contract tests
-        run: node --test hosted/lib/contracts.test.mjs
+        run: node --test hosted/test/contracts.test.mjs
 
       # notify() runs after the authoritative write, so a body it rejects that
       # the store accepted is a 500 for a comment that already landed. The two

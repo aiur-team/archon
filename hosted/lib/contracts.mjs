@@ -1,20 +1,21 @@
 /**
- * Executable form of the hosted upload contracts v1 (blocks C2, C3, C6).
+ * Executable form of the hosted upload contracts v1 (blocks C1-C6).
  *
- * Every later hosted trust boundary — identity (AHU-003), publication state
- * (AHU-004), the renderer (AHU-005), the CLI (AHU-006) and browser approval
- * (AHU-007) — reads the same record shapes off the wire. Written out once per
- * consumer, "the same shape" lasts exactly as long as nobody edits one copy, so
- * the shapes live here and are imported rather than restated.
+ * Every later hosted trust boundary - identity (AHU-003), publication state
+ * (AHU-004), the renderer (AHU-005), the CLI (AHU-006), browser approval
+ * (AHU-007) and the owner viewer (AHU-009) - reads the same record shapes off
+ * the same wire. Written out once per consumer, "the same shape" lasts exactly
+ * as long as nobody edits one copy, so the shapes live here and are imported
+ * rather than restated.
  *
- * Three rules hold this module honest, and the tests in `contracts.test.mjs`
- * assert each of them directly:
+ * Four rules hold this module honest, and the tests in
+ * `hosted/test/contracts.test.mjs` assert each of them directly:
  *
  *  1. **A validator returns a validated value or throws.** There is no third
  *     answer. In particular there is no "could not check" result: a caller that
  *     cannot reach a backing service has not validated anything, and must not be
- *     able to spell that outcome as success. Every throw here is a
- *     `HostedContractError` whose `code` is an invalid-input code from C3 —
+ *     able to spell that outcome as success. Every rejection here is a
+ *     `HostedContractError` whose `code` is an invalid-input code from C3 -
  *     never `unavailable`.
  *  2. **Validators are pure.** No network, no clock, no process-global
  *     mutation, no ambient configuration. `validateOrigin` is the only function
@@ -28,9 +29,18 @@
  *     supplies is untrusted, and `ownerAccountId` is set by the server from an
  *     approved browser session, never by an uploader. Rejecting the key is a
  *     cheaper guarantee than remembering to ignore it at every call site.
+ *  4. **An error message is always a legal C3 message.** Messages are built
+ *     from a field path and a rule rather than from the offending value, and
+ *     `HostedContractError` additionally sanitizes and bounds whatever it is
+ *     handed. That belt-and-braces matters because these messages are returned
+ *     to unauthenticated callers: a validator that could emit an envelope
+ *     `validateWireError` would reject is a validator that can be turned into a
+ *     reflection channel by an attacker-chosen field name.
  *
- * Error messages name the field and the rule and never the value, because these
- * messages are returned to unauthenticated callers over C3's error envelope.
+ * Static imports only. `scripts/check-hosted-modules.mjs` observes what Node
+ * actually resolves for every module in the hosted deploy tree, which is exact
+ * for a static import and impossible for a dynamic one inside a function body -
+ * so dynamic import is refused outright in this tree.
  */
 
 import { createHash } from "node:crypto";
@@ -42,9 +52,25 @@ const NUL = "\u0000";
 const BYTE_ORDER_MARK = "\uFEFF";
 
 /**
- * The numeric and lexical bounds of contract C2, plus the C3 constants a
+ * Characters that must never appear in text a human reads to make a decision.
+ *
+ * `Cc`/`Cf` are the control and format categories, `Zl`/`Zp` the line and
+ * paragraph separators. Rejecting the whole of `Cf` is deliberate and slightly
+ * blunt: it covers the bidirectional overrides and isolates (U+202A-202E,
+ * U+2066-2069) that turn a title of `Invoice` + U+202E + `gpj.exe` into one that
+ * renders as `Invoice exe.jpg`,
+ * the zero-width characters that let a title display as empty while satisfying
+ * a one-character minimum, and the soft hyphen. The approval screen is where a
+ * person decides whether to publish a document; text that renders differently
+ * from its bytes there is a way to steer that decision, and no legitimate title
+ * needs a format character to be readable.
+ */
+const UNSAFE_DISPLAY = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+/**
+ * The numeric and lexical bounds of contracts C1-C3, plus the constants a
  * consumer would otherwise hard-code. Exported as one frozen table so a change
- * is a single reviewable diff rather than a grep across five hosted tickets.
+ * is a single reviewable diff rather than a grep across nine hosted tickets.
  */
 export const HOSTED_LIMITS = Object.freeze({
   /** C2: the only artifact format v1 accepts. Not ZIP, not a URL, not a manifest. */
@@ -63,8 +89,11 @@ export const HOSTED_LIMITS = Object.freeze({
   PUBLICATION_ID_HEX_LENGTH: 32,
   /** C1: `accountId` is the GitHub numeric ID behind a provider prefix. */
   ACCOUNT_ID_PREFIX: "gh_",
-  /** C4: the owner-facing document path the C3 result URL must address. */
+  /** C1: the only identity provider v1 accepts. */
+  IDENTITY_PROVIDER: "github.com",
+  /** C1/C4: the two app paths a contract record may address. */
   DOCUMENT_PATH_PREFIX: "/docs/",
+  AUTHORIZE_PATH: "/publish/authorize",
   /** C3: the poll interval the server advertises, and the floor a client honours. */
   POLL_INTERVAL_SECONDS: 5,
   /** C2 lifetimes, in seconds. Enforced on use; not a cleanup schedule. */
@@ -73,14 +102,24 @@ export const HOSTED_LIMITS = Object.freeze({
   RECEIPT_TTL_SECONDS: 86400,
   /** C3: error messages are bounded so an error cannot become a data channel. */
   ERROR_MESSAGE_MAX_LENGTH: 200,
+  /** Bounds for opaque bearer/CSRF material carried on the wire (base64url-ish). */
+  OPAQUE_TOKEN_MIN_LENGTH: 32,
+  OPAQUE_TOKEN_MAX_LENGTH: 256,
+  /** C1: GitHub login syntax, used to reject an email or a display name. */
+  LOGIN_MAX_LENGTH: 39,
   /**
-   * The user-visible pairing code. Two groups of four from a vowel-free,
-   * unambiguous alphabet: no accidental words, and no 0/O or 1/I/L to read back
-   * incorrectly over a shoulder. It is a pairing check only — C3 states plainly
-   * that no short-code lookup endpoint exists, so this is display grammar, not
-   * a credential.
+   * The pairing-code grammar this producer recommends AHU-004 mint: two groups
+   * of four from a vowel-free, unambiguous alphabet, so there are no accidental
+   * words and no 0/O or 1/I/L to read back incorrectly over a shoulder.
+   *
+   * It is **advice, not a validation rule**. C2 says `userCode: string` and
+   * nothing more, so `validatePublication` enforces only that - a shared
+   * validator that demanded this alphabet would silently amend the frozen
+   * contract for every sibling that mints or projects a code.
    */
-  USER_CODE_PATTERN: /^[BCDFGHJKMNPQRSTVWXZ23456789]{4}-[BCDFGHJKMNPQRSTVWXZ23456789]{4}$/,
+  RECOMMENDED_USER_CODE_PATTERN: /^[BCDFGHJKMNPQRSTVWXZ23456789]{4}-[BCDFGHJKMNPQRSTVWXZ23456789]{4}$/,
+  /** C2: the user code is display text; this is the only bound the contract implies. */
+  USER_CODE_MAX_SCALARS: 40,
 });
 
 /** C2: every state a publication record may be in. Order is not significant. */
@@ -93,7 +132,7 @@ export const PUBLICATION_STATES = Object.freeze([
   "expired",
 ]);
 
-/** C2: the states that are terminal — no further transition is legal from here. */
+/** C2: the states that are terminal - no further transition is legal from here. */
 export const TERMINAL_PUBLICATION_STATES = Object.freeze([
   "complete",
   "denied",
@@ -101,10 +140,22 @@ export const TERMINAL_PUBLICATION_STATES = Object.freeze([
   "expired",
 ]);
 
+/** C4: the only two message types that cross the app/renderer origin boundary. */
+export const RENDER_MESSAGE_TYPES = Object.freeze({
+  READY: "archon:ready",
+  RENDER: "archon:render",
+});
+
 /**
- * C3's error codes and the HTTP status each is returned with. `retryable` is a
- * property of the code, not of the moment: a client that retries a
- * `descriptor_mismatch` is retrying a request that cannot start succeeding.
+ * C3's error codes with the HTTP status each is returned with and whether a
+ * client may retry.
+ *
+ * C3 fixes the codes and statuses; it does not say which are retryable, but the
+ * envelope carries a `retryable` field, so somebody has to decide. Deciding it
+ * once here beats deciding it separately in the CLI, the handlers and the
+ * runbook - and it makes retryability a property of the code rather than of the
+ * moment, so a client that retries a `descriptor_mismatch` is retrying a request
+ * that cannot start succeeding.
  */
 export const ERROR_CODES = Object.freeze({
   invalid_request: Object.freeze({ status: 400, retryable: false }),
@@ -126,27 +177,32 @@ export const ERROR_CODES = Object.freeze({
 });
 
 /**
- * The codes a validator in this module is allowed to raise. A backing service
- * that is unreachable is not a malformed request, and the reverse matters more:
- * `unavailable` must never be reachable from a validation path, because a
- * caller that treats "we could not check" as "checked" has no boundary at all.
+ * A message that is guaranteed to be a legal C3 message, whatever it was built
+ * from.
+ *
+ * Every call site here already builds messages out of field paths and rules
+ * rather than values, but one of those paths interpolates a key name the caller
+ * chose, and a caller-chosen key can be three hundred characters long or carry
+ * a control character. That would let this module emit an envelope
+ * `validateWireError` rejects - an inconsistency in its own contract, on the
+ * one path that reaches an unauthenticated client. Sanitizing unconditionally
+ * here means no future message site has to remember.
  */
-const VALIDATION_CODES = Object.freeze([
-  "invalid_request",
-  "artifact_too_large",
-  "descriptor_mismatch",
-]);
+function safeMessage(text) {
+  const cleaned = String(text).replace(new RegExp(UNSAFE_DISPLAY, "gu"), " ").trim();
+  if (cleaned === "") return "invalid request";
+  const scalars = [...cleaned];
+  if (scalars.length <= HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH) return cleaned;
+  return `${scalars.slice(0, HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH - 1).join("").trim()}…`;
+}
 
 /**
- * A typed invalid-input error carrying its C3 wire code.
- *
- * The message is deliberately built from a field path and a rule, never from
- * the offending value: C3 returns these messages to unauthenticated callers, so
- * echoing input back would turn a 400 into a reflection gadget.
+ * A typed invalid-input error carrying its C3 wire code, HTTP status and
+ * retryability.
  */
 export class HostedContractError extends Error {
   constructor(code, message, { field = null } = {}) {
-    super(message);
+    super(safeMessage(message));
     this.name = "HostedContractError";
     if (!Object.hasOwn(ERROR_CODES, code)) {
       throw new Error(`unknown hosted error code: ${code}`);
@@ -166,11 +222,8 @@ export class HostedContractError extends Error {
   }
 }
 
-/** Raise an invalid-input error. `code` is checked against the validation subset. */
+/** Build an invalid-input error naming a field and the rule it broke. */
 function invalid(field, rule, code = "invalid_request") {
-  if (!VALIDATION_CODES.includes(code)) {
-    throw new Error(`validators may not raise ${code}`);
-  }
   return new HostedContractError(code, `${field} ${rule}`, { field });
 }
 
@@ -196,23 +249,38 @@ function requireRecord(value, field) {
 }
 
 /**
+ * A bounded, printable rendering of caller-supplied key names.
+ *
+ * The key name is the one part of a rejection message that comes from the
+ * caller, so it is the one part that has to be defanged: at most three keys, at
+ * most 32 characters each, and only characters a JavaScript identifier or JSON
+ * key would legitimately use.
+ */
+function safeKeyNames(keys) {
+  const shown = keys.slice(0, 3).map((key) => {
+    const printable = [...String(key)].filter((c) => /[A-Za-z0-9_.-]/.test(c)).join("");
+    return printable === "" ? "<unprintable>" : printable.slice(0, 32);
+  });
+  return keys.length > 3 ? `${shown.join(", ")} and ${keys.length - 3} more` : shown.join(", ");
+}
+
+/**
  * Exactly `required`: no key missing, no key extra. Reported one class at a
- * time so a caller sees the whole reason, and unknown keys are named because
- * the key name is a caller's own spelling rather than a value.
+ * time so a caller sees the whole reason.
  */
 function requireExactKeys(value, required, field) {
   const present = Object.keys(value);
   const missing = required.filter((key) => !Object.hasOwn(value, key));
   if (missing.length > 0) {
-    throw invalid(field, `is missing required field(s): ${missing.join(", ")}`);
+    throw invalid(field, `is missing required field(s): ${safeKeyNames(missing)}`);
   }
   const unknown = present.filter((key) => !required.includes(key));
   if (unknown.length > 0) {
-    throw invalid(field, `has unknown field(s): ${unknown.join(", ")}`);
+    throw invalid(field, `has unknown field(s): ${safeKeyNames(unknown)}`);
   }
 }
 
-/** A string with no lone surrogate — i.e. one that survives a UTF-8 round trip. */
+/** A string with no lone surrogate - i.e. one that survives a UTF-8 round trip. */
 function requireWellFormedString(value, field) {
   if (typeof value !== "string") throw invalid(field, "must be a string");
   for (let index = 0; index < value.length; index += 1) {
@@ -251,15 +319,15 @@ function requireInteger(value, min, max, field, code = "invalid_request") {
  *
  * One spelling is the point. Two records that mean the same moment must compare
  * equal as strings, because C2's ordering rules and AHU-004's conditional
- * writes both compare stored text, not parsed dates. Parsing is used only to
- * reject a syntactically well-formed impossibility such as `2026-02-30`.
+ * writes both compare stored text, not parsed dates. Anything `Date#toISOString`
+ * would render differently is refused rather than normalized.
  */
 function requireTimestamp(value, field) {
   requireWellFormedString(value, field);
   const parsed = new Date(value);
-  /* The invalid-date check is not redundant with the round trip below it:
-     `toISOString()` throws a `RangeError` on an invalid date, and a `RangeError`
-     escaping a validator is an uncaught 500 rather than a 400. */
+  /* Not redundant with the round trip below: `toISOString()` throws a
+     `RangeError` on an invalid date, and a `RangeError` escaping a validator is
+     an uncaught 500 rather than a 400. */
   if (Number.isNaN(parsed.getTime())) {
     throw invalid(field, "must be an ISO-8601 UTC instant with milliseconds");
   }
@@ -283,6 +351,15 @@ function requireOrder(earlier, later, earlierField, laterField) {
   }
 }
 
+/** C1: the GitHub numeric ID in decimal, with no leading zero. */
+function requireProviderUserId(value, field) {
+  requireWellFormedString(value, field);
+  if (!/^[1-9][0-9]{0,19}$/.test(value)) {
+    throw invalid(field, "must be a decimal provider user id with no leading zero");
+  }
+  return value;
+}
+
 /**
  * C1: an account ID is the provider prefix and the GitHub numeric ID in
  * decimal. Usernames and email addresses are not ownership keys and cannot be
@@ -295,26 +372,146 @@ function requireAccountId(value, field) {
   if (!value.startsWith(ACCOUNT_ID_PREFIX)) {
     throw invalid(field, `must begin with ${ACCOUNT_ID_PREFIX}`);
   }
-  const digits = value.slice(ACCOUNT_ID_PREFIX.length);
-  if (!/^[1-9][0-9]{0,19}$/.test(digits)) {
-    throw invalid(field, "must carry a decimal provider user id with no leading zero");
-  }
+  requireProviderUserId(value.slice(ACCOUNT_ID_PREFIX.length), field);
   return value;
 }
 
-/** Display text: well-formed, bounded in scalar values, and free of controls. */
+/**
+ * Display text: well-formed, bounded in scalar values, free of anything that
+ * renders differently from its bytes, and already trimmed.
+ *
+ * Trimming is checked rather than performed, in keeping with the rest of this
+ * module: a value the caller has to fix is better than a value that silently
+ * became a different value. It also subsumes the "a title of nothing but
+ * spaces" case, because `String#trim` removes every Unicode separator.
+ */
 function requireDisplayText(value, min, max, field) {
   requireWellFormedString(value, field);
-  for (const character of value) {
-    const point = character.codePointAt(0);
-    if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)) {
-      throw invalid(field, "must not contain control characters");
-    }
+  if (UNSAFE_DISPLAY.test(value)) {
+    throw invalid(field, "must not contain control, format or separator characters");
   }
+  if (value !== value.trim()) throw invalid(field, "must not begin or end with whitespace");
   const scalars = [...value].length;
   if (scalars < min) throw invalid(field, `must be at least ${min} character(s)`);
   if (scalars > max) throw invalid(field, `must be at most ${max} character(s)`);
   return value;
+}
+
+/**
+ * An opaque bearer or CSRF token as it appears on the wire.
+ *
+ * Only the shape is checked, and deliberately so: this module never sees the
+ * server-side hash it would have to compare against, and a validator that
+ * appeared to authenticate something would be worse than one that plainly does
+ * not. The alphabet is base64url so a token cannot smuggle a delimiter into a
+ * log line or a URL.
+ */
+function requireOpaqueToken(value, field) {
+  requireWellFormedString(value, field);
+  const { OPAQUE_TOKEN_MIN_LENGTH, OPAQUE_TOKEN_MAX_LENGTH } = HOSTED_LIMITS;
+  if (value.length < OPAQUE_TOKEN_MIN_LENGTH || value.length > OPAQUE_TOKEN_MAX_LENGTH) {
+    throw invalid(
+      field,
+      `must be ${OPAQUE_TOKEN_MIN_LENGTH}-${OPAQUE_TOKEN_MAX_LENGTH} characters`,
+    );
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw invalid(field, "must be base64url characters");
+  return value;
+}
+
+/* ------------------------------------------------------------------ */
+/* C1: identity                                                        */
+/* ------------------------------------------------------------------ */
+
+const PRINCIPAL_KEYS = Object.freeze(["accountId", "provider", "providerUserId", "login"]);
+
+/**
+ * Validate a `HostedPrincipal`, returning a frozen copy.
+ *
+ * The load-bearing check is the cross-reference: `accountId` must be exactly the
+ * provider prefix followed by `providerUserId`. C1 defines it as a derived
+ * value, and a record where the two disagree is a record where the ownership
+ * key and the identity it claims to encode are two different subjects - which
+ * is the whole failure this identity model exists to prevent. `login` is
+ * carried for display only and is never an ownership key.
+ *
+ * @param {unknown} value
+ * @param {{field?: string}} [options]
+ * @returns {Readonly<{accountId: string, provider: string, providerUserId: string, login: string}>}
+ * @throws {HostedContractError} `invalid_request`
+ */
+export function validatePrincipal(value, { field = "principal" } = {}) {
+  requireRecord(value, field);
+  requireExactKeys(value, PRINCIPAL_KEYS, field);
+
+  if (value.provider !== HOSTED_LIMITS.IDENTITY_PROVIDER) {
+    throw invalid(`${field}.provider`, `must be "${HOSTED_LIMITS.IDENTITY_PROVIDER}"`);
+  }
+  requireProviderUserId(value.providerUserId, `${field}.providerUserId`);
+  requireAccountId(value.accountId, `${field}.accountId`);
+  if (value.accountId !== `${HOSTED_LIMITS.ACCOUNT_ID_PREFIX}${value.providerUserId}`) {
+    throw invalid(`${field}.accountId`, "must be the provider prefix followed by providerUserId");
+  }
+
+  requireWellFormedString(value.login, `${field}.login`);
+  if (!new RegExp(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,${HOSTED_LIMITS.LOGIN_MAX_LENGTH - 1}})$`).test(value.login)) {
+    throw invalid(`${field}.login`, "must be a GitHub login, not an email address or display name");
+  }
+
+  return Object.freeze({
+    accountId: value.accountId,
+    provider: value.provider,
+    providerUserId: value.providerUserId,
+    login: value.login,
+  });
+}
+
+/**
+ * Validate the C1 session-endpoint body, returning a frozen copy.
+ *
+ * The two shapes are disjoint on purpose: a signed-out body carries no account
+ * fields at all, so a consumer cannot read `accountId` off a response that never
+ * authenticated anybody. `csrfToken` is browser-only and must never reach
+ * artifact or agent output - this validator does not and cannot enforce that,
+ * but the field is named here so a reviewer can see where it is allowed to go.
+ *
+ * @param {unknown} value
+ * @param {{field?: string}} [options]
+ * @returns {Readonly<object>}
+ * @throws {HostedContractError} `invalid_request`
+ */
+export function validateSessionResponse(value, { field = "session" } = {}) {
+  requireRecord(value, field);
+  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+  if (typeof value.authenticated !== "boolean") {
+    throw invalid(`${field}.authenticated`, "must be a boolean");
+  }
+
+  if (!value.authenticated) {
+    requireExactKeys(value, ["v", "authenticated"], field);
+    return Object.freeze({ v: 1, authenticated: false });
+  }
+
+  requireExactKeys(value, ["v", "authenticated", "accountId", "login", "csrfToken"], field);
+  requireAccountId(value.accountId, `${field}.accountId`);
+  validatePrincipal(
+    {
+      accountId: value.accountId,
+      provider: HOSTED_LIMITS.IDENTITY_PROVIDER,
+      providerUserId: value.accountId.slice(HOSTED_LIMITS.ACCOUNT_ID_PREFIX.length),
+      login: value.login,
+    },
+    { field },
+  );
+  requireOpaqueToken(value.csrfToken, `${field}.csrfToken`);
+
+  return Object.freeze({
+    v: 1,
+    authenticated: true,
+    accountId: value.accountId,
+    login: value.login,
+    csrfToken: value.csrfToken,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -335,7 +532,7 @@ const DESCRIPTOR_KEYS = Object.freeze([
  *
  * The descriptor is the whole of what a human approves: the title they read and
  * the digest and length of the bytes they are agreeing to publish. Nothing else
- * belongs in it, and in particular no owner field does — the owner is fixed from
+ * belongs in it, and in particular no owner field does - the owner is fixed from
  * the approving browser session, so an `ownerAccountId` here is an injection
  * attempt and is refused by the unknown-key rule rather than ignored.
  *
@@ -378,12 +575,64 @@ export function validateDescriptor(value, { field = "descriptor" } = {}) {
 }
 
 /**
+ * Decode raw artifact bytes to the string the rest of this module works with,
+ * preserving an optional UTF-8 BOM.
+ *
+ * C3 requires "BOM-preserving decoding and exact re-encoding", which is the
+ * difference between an owner downloading the bytes they approved and
+ * downloading bytes with a different digest. `ignoreBOM: true` is the option
+ * that *keeps* the BOM as U+FEFF instead of stripping it - the name reads
+ * backwards, which is exactly why this belongs in one shared function rather
+ * than in each of AHU-004's and AHU-006's decoders.
+ *
+ * `fatal: true` is the strict-UTF-8 requirement: an invalid sequence throws
+ * rather than becoming U+FFFD, because a replacement character would change the
+ * bytes while still producing a plausible-looking document.
+ *
+ * @param {Uint8Array} bytes
+ * @param {{field?: string}} [options]
+ * @returns {string}
+ * @throws {HostedContractError} `invalid_request` / `artifact_too_large`
+ */
+export function decodeArtifactBytes(bytes, { field = "artifact" } = {}) {
+  if (!ArrayBuffer.isView(bytes) || !(bytes instanceof Uint8Array)) {
+    throw invalid(field, "must be raw bytes");
+  }
+  requireInteger(
+    bytes.byteLength,
+    HOSTED_LIMITS.HTML_MIN_BYTES,
+    HOSTED_LIMITS.HTML_MAX_BYTES,
+    field,
+    "artifact_too_large",
+  );
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw invalid(field, "must be strict UTF-8");
+  }
+}
+
+/**
+ * Re-encode a decoded artifact to the exact bytes it came from.
+ *
+ * The pair `decodeArtifactBytes` / `encodeArtifactBytes` is a round trip, and
+ * the test asserts it byte for byte on a BOM-carrying document. Without that
+ * guarantee the digest an owner approved and the digest of what they download
+ * are two different numbers.
+ *
+ * @param {string} html
+ * @returns {Uint8Array}
+ */
+export function encodeArtifactBytes(html) {
+  return new TextEncoder().encode(html);
+}
+
+/**
  * The artifact body, checked against the descriptor the owner approved.
  *
  * Digest and length are re-derived here rather than trusted, because the whole
  * value of the approval step is that the bytes published are the bytes
- * described. An optional UTF-8 BOM is preserved verbatim and counted, so the
- * bytes an owner later downloads hash to the digest they approved.
+ * described.
  */
 function requireArtifactHtml(html, descriptor, field) {
   requireWellFormedString(html, field);
@@ -483,13 +732,11 @@ export function validatePublication(value, { field = "publication" } = {}) {
     `${field}.browserSecretHash`,
   );
 
-  requireWellFormedString(value.userCode, `${field}.userCode`);
-  if (!HOSTED_LIMITS.USER_CODE_PATTERN.test(value.userCode)) {
-    throw invalid(
-      `${field}.userCode`,
-      "must be two four-character groups from the pairing alphabet",
-    );
-  }
+  /* C2 says `userCode: string` and nothing else, so this is the only rule that
+     applies. The recommended minting grammar lives in `HOSTED_LIMITS` as advice
+     for AHU-004; enforcing it here would amend the contract for every sibling
+     that mints or projects a code. */
+  requireDisplayText(value.userCode, 1, HOSTED_LIMITS.USER_CODE_MAX_SCALARS, `${field}.userCode`);
 
   requireTimestamp(value.createdAt, `${field}.createdAt`);
   requireTimestamp(value.pendingExpiresAt, `${field}.pendingExpiresAt`);
@@ -511,9 +758,8 @@ export function validatePublication(value, { field = "publication" } = {}) {
     `${field}.receiptExpiresAt`,
   );
 
-  /* The state matrix. Each `absent`/`present` line below is a guard with a
-     named test; removing any one of them makes a specific regression in
-     `contracts.test.mjs` fail. */
+  /* The state matrix, exactly as C2 words it. Each `absent`/`present` line is a
+     guard with its own named test. */
   const absent = (name, actual) => {
     if (actual !== null) throw invalid(`${field}.${name}`, `must be null while state is "${state}"`);
   };
@@ -534,8 +780,10 @@ export function validatePublication(value, { field = "publication" } = {}) {
     absent("receiptExpiresAt", receiptExpiresAt);
     absent("html", value.html);
   } else if (state === "complete") {
+    /* C2 names owner, HTML, completion and receipt timestamps for this state -
+       and not `uploadExpiresAt`, so a completion write that clears the upload
+       deadline is legal and must not be rejected here. */
     present("ownerAccountId", ownerAccountId);
-    present("uploadExpiresAt", uploadExpiresAt);
     present("completedAt", completedAt);
     present("receiptExpiresAt", receiptExpiresAt);
     present("html", value.html);
@@ -579,7 +827,8 @@ export function validatePublication(value, { field = "publication" } = {}) {
 /* C1/C6: origins                                                      */
 /* ------------------------------------------------------------------ */
 
-const LOOPBACK_HOSTS = Object.freeze(["localhost", "127.0.0.1", "[::1]"]);
+/** The only hosts a loopback-only local test configuration may name. */
+export const LOOPBACK_HOSTS = Object.freeze(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * Whether a parsed host sits under a suffix the public-suffix list actually
@@ -603,26 +852,35 @@ function isDeterminateSite(host) {
   return host.isIcann === true || host.isPrivate === true;
 }
 
+/** Whether a canonical origin names one of the loopback hosts. */
+export function isLoopbackOrigin(origin) {
+  return LOOPBACK_HOSTS.includes(new URL(origin).hostname);
+}
+
 /**
  * Validate one configured origin, returning its canonical serialization.
  *
  * `URL.origin` is the comparison this service performs at every mutation
- * boundary, so the accepted spelling is exactly that serialization: a trailing
- * slash, a path, a query, credentials or an explicit default port are all
- * rejected rather than normalized away. Two strings that must compare equal are
- * easier to reason about than two strings that must compare equal *after* a
- * normalization step somebody could forget to apply.
+ * boundary, so the accepted spelling is exactly that serialization. One
+ * comparison does the work of several: `new URL` lowercases the scheme and
+ * host, trims surrounding whitespace, drops a default port, punycodes an IDN
+ * and moves everything else into a path, query, fragment or credential - so
+ * requiring the input to equal its own origin serialization rejects all of
+ * those spellings at once, and rejects them rather than quietly accepting a
+ * normalized version of what the operator actually wrote.
  *
- * In production the origin must be HTTPS and must resolve to a determinate
- * registrable domain under the public-suffix list. IP literals and hosts whose
- * suffix cannot be determined are refused: `readHostedConfig` compares the app
- * and renderer *registrable sites*, and a comparison it cannot perform must not
- * silently pass.
+ * In production the origin must additionally be HTTPS and resolve to a
+ * determinate registrable domain under the public-suffix list. IP literals,
+ * loopback names and unlisted suffixes have no registrable site, so a
+ * comparison against the other configured origin could not be performed - and a
+ * comparison that cannot be performed must not silently pass.
  *
  * @param {unknown} value
  * @param {{production?: boolean, field?: string}} [options] `production: false`
- *   is the explicit loopback-only test mode. It never relaxes exactness — it
- *   only permits `http` on a loopback host.
+ *   is the loopback-only local test mode. It relaxes the scheme and the
+ *   registrable-site requirement, and `readHostedConfig` pairs it with a rule
+ *   that both origins must then be loopback - so it can never describe a real
+ *   deployment.
  * @returns {string} the canonical origin
  * @throws {HostedContractError} `invalid_request`
  */
@@ -635,32 +893,27 @@ export function validateOrigin(value, { production = true, field = "origin" } = 
   } catch {
     throw invalid(field, "must be an absolute URL");
   }
-  /* One comparison does the work of several. `new URL` lowercases the scheme
-     and host, trims surrounding whitespace, drops a default port and moves
-     everything else into a path, query, fragment or credential -- so requiring
-     the input to equal its own origin serialization rejects all of those
-     spellings at once, and rejects them rather than quietly accepting a
-     normalized version of what the operator actually wrote. */
-  if (url.origin === "null" || url.origin !== value) {
+  if (url.origin !== value) {
     throw invalid(
       field,
       "must be exactly a lowercase scheme://host[:port] origin with no path, query or credentials",
     );
   }
+  /* A fully-qualified trailing dot survives `URL.origin`, resolves to the same
+     host, and never string-equals the `Origin` header a browser sends. Every
+     later CSRF and origin comparison in this service is an exact string
+     comparison, so accepting both spellings would be an outage waiting for the
+     operator who happens to type the dot. */
+  if (url.hostname.endsWith(".")) {
+    throw invalid(field, "must not end with a trailing dot");
+  }
 
   if (production) {
     if (url.protocol !== "https:") throw invalid(field, "must use https in production");
     if (!isDeterminateSite(parseHost(url.hostname, { allowPrivateDomains: true }))) {
-      /* IP literals, `localhost` and unlisted suffixes all land here: none of
-         them has a registrable site, so none of them can be compared against
-         the other configured origin. */
       throw invalid(field, "must be a named host under a listed public suffix in production");
     }
-  } else if (url.protocol === "http:") {
-    if (!LOOPBACK_HOSTS.includes(url.hostname)) {
-      throw invalid(field, "may only use http on a loopback host in local-test mode");
-    }
-  } else if (url.protocol !== "https:") {
+  } else if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw invalid(field, "must use http or https");
   }
 
@@ -668,7 +921,7 @@ export function validateOrigin(value, { production = true, field = "origin" } = 
 }
 
 /**
- * The registrable site of a production origin — the unit C6 means by "different
+ * The registrable site of a production origin - the unit C6 means by "different
  * registrable sites".
  *
  * The public-suffix list is consulted through pinned `tldts` with private
@@ -692,6 +945,15 @@ export function registrableSite(origin, { field = "origin" } = {}) {
 /* C3: wire envelopes                                                  */
 /* ------------------------------------------------------------------ */
 
+const START_KEYS = Object.freeze([
+  "v",
+  "publicationId",
+  "verificationUriComplete",
+  "userCode",
+  "agentSecret",
+  "expiresAt",
+  "intervalSeconds",
+]);
 const RESULT_KEYS = Object.freeze([
   "documentId",
   "url",
@@ -702,24 +964,113 @@ const RESULT_KEYS = Object.freeze([
 const ENVELOPE_KEYS = Object.freeze(["v", "state", "expiresAt", "intervalSeconds"]);
 
 /**
- * Validate the C3 status / completion envelope, returning a frozen copy.
+ * Require and validate a caller-supplied expected app origin.
  *
- * The load-bearing rule is that `result` is present exactly when the state is
- * `complete`. A receipt attached to any other state is a success claim for a
- * document that does not exist, which is the one failure C3 names twice: denial
- * and cancellation are normal terminal states, not transport failures, and an
- * unknown state is a protocol error rather than success.
+ * A missing `appOrigin` is a programming error, not a malformed message, so it
+ * raises a `TypeError` rather than a wire error: the caller has not been
+ * attacked, it has forgotten to say what it trusts. Making the omission throw
+ * is the whole point - a default would make "validate this receipt against
+ * nothing in particular" the easiest call to write, and that call is what lets a
+ * hostile responder hand a client somebody else's URL.
+ */
+function requireExpectedOrigin(appOrigin, production, what) {
+  if (typeof appOrigin !== "string" || appOrigin === "") {
+    throw new TypeError(
+      `${what} cannot be validated without the appOrigin it must belong to; pass { appOrigin } from readHostedConfig()`,
+    );
+  }
+  return validateOrigin(appOrigin, { production, field: "appOrigin" });
+}
+
+/**
+ * Validate the C3 start response - the 201 body of `POST /api/hosted/publications`.
  *
- * An error envelope is refused explicitly rather than by the generic
- * unknown-key path, because "the error envelope cannot pass result validation"
- * is an acceptance criterion and deserves a message that says so.
+ * Two checks earn this function its place. The browser URL must live on the
+ * configured app origin at the authorization path, because a start response is
+ * the first thing a CLI prints and the human is about to visit it; and the
+ * fragment must not contain the agent secret, because C3 says the browser URL
+ * carries the *browser* secret and putting the agent bearer in a URL would hand
+ * the upload capability to anything that sees a referrer, a history entry or a
+ * shoulder.
  *
  * @param {unknown} value
- * @param {{production?: boolean, field?: string}} [options]
+ * @param {{appOrigin: string, production?: boolean, field?: string}} options
  * @returns {Readonly<object>}
+ * @throws {TypeError} when `appOrigin` is omitted
  * @throws {HostedContractError} `invalid_request`
  */
-export function validateResult(value, { production = true, field = "result" } = {}) {
+export function validateStartResponse(value, { appOrigin, production = true, field = "start" } = {}) {
+  const expected = requireExpectedOrigin(appOrigin, production, "a start response");
+
+  requireRecord(value, field);
+  requireExactKeys(value, START_KEYS, field);
+  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+  requireLowerHex(
+    value.publicationId,
+    HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH,
+    `${field}.publicationId`,
+  );
+  requireDisplayText(value.userCode, 1, HOSTED_LIMITS.USER_CODE_MAX_SCALARS, `${field}.userCode`);
+  requireOpaqueToken(value.agentSecret, `${field}.agentSecret`);
+  requireTimestamp(value.expiresAt, `${field}.expiresAt`);
+  if (value.intervalSeconds !== HOSTED_LIMITS.POLL_INTERVAL_SECONDS) {
+    throw invalid(`${field}.intervalSeconds`, `must be ${HOSTED_LIMITS.POLL_INTERVAL_SECONDS}`);
+  }
+
+  requireWellFormedString(value.verificationUriComplete, `${field}.verificationUriComplete`);
+  let uri;
+  try {
+    uri = new URL(value.verificationUriComplete);
+  } catch {
+    throw invalid(`${field}.verificationUriComplete`, "must be an absolute URL");
+  }
+  if (uri.origin !== expected) {
+    throw invalid(`${field}.verificationUriComplete`, "must be on the configured app origin");
+  }
+  if (uri.pathname !== HOSTED_LIMITS.AUTHORIZE_PATH || uri.search !== "") {
+    throw invalid(
+      `${field}.verificationUriComplete`,
+      `must be ${HOSTED_LIMITS.AUTHORIZE_PATH} with no query string`,
+    );
+  }
+  if (uri.hash.length < 2) {
+    throw invalid(`${field}.verificationUriComplete`, "must carry the browser secret in its fragment");
+  }
+  if (uri.hash.includes(value.agentSecret)) {
+    throw invalid(`${field}.verificationUriComplete`, "must not carry the agent secret");
+  }
+
+  return Object.freeze({
+    v: 1,
+    publicationId: value.publicationId,
+    verificationUriComplete: value.verificationUriComplete,
+    userCode: value.userCode,
+    agentSecret: value.agentSecret,
+    expiresAt: value.expiresAt,
+    intervalSeconds: value.intervalSeconds,
+  });
+}
+
+/**
+ * Validate the C3 status / completion envelope, returning a frozen copy.
+ *
+ * Two rules are load-bearing. `result` is present exactly when the state is
+ * `complete`: a receipt attached to any other state is a success claim for a
+ * document that does not exist, and C3 says twice that denial and cancellation
+ * are normal terminal states rather than transport failures. And the receipt
+ * URL must be this document's own path **on the configured app origin** - a
+ * self-consistent URL is not enough, because a hostile responder can be
+ * perfectly self-consistent about `https://evil.example.net/docs/<id>` and the
+ * CLI would print it as the user's published document.
+ *
+ * @param {unknown} value
+ * @param {{appOrigin?: string, production?: boolean, field?: string}} [options]
+ *   `appOrigin` is required whenever the envelope is `complete`.
+ * @returns {Readonly<object>}
+ * @throws {TypeError} when a complete envelope is validated without `appOrigin`
+ * @throws {HostedContractError} `invalid_request`
+ */
+export function validateResult(value, { appOrigin, production = true, field = "result" } = {}) {
   requireRecord(value, field);
   if (Object.hasOwn(value, "error")) {
     throw invalid(field, "must not be an error envelope");
@@ -752,6 +1103,7 @@ export function validateResult(value, { production = true, field = "result" } = 
     });
   }
 
+  const expected = requireExpectedOrigin(appOrigin, production, "a completion receipt");
   const result = value.result;
   requireRecord(result, `${field}.result`);
   requireExactKeys(result, RESULT_KEYS, `${field}.result`);
@@ -770,22 +1122,11 @@ export function validateResult(value, { production = true, field = "result" } = 
     "artifact_too_large",
   );
 
-  /* C5 forbids a guessed URL: the receipt the client prints has to be the one
-     the server committed, addressing this exact document on a configured
-     origin. Deriving the expected string and comparing is the only check that
-     rejects a receipt pointing somewhere else entirely. */
   requireWellFormedString(result.url, `${field}.result.url`);
-  let resultUrl;
-  try {
-    resultUrl = new URL(result.url);
-  } catch {
-    throw invalid(`${field}.result.url`, "must be an absolute URL");
-  }
-  const origin = validateOrigin(resultUrl.origin, { production, field: `${field}.result.url` });
-  if (result.url !== `${origin}${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}${result.documentId}`) {
+  if (result.url !== `${expected}${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}${result.documentId}`) {
     throw invalid(
       `${field}.result.url`,
-      `must be the document's own ${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}<documentId> path on its service origin`,
+      `must be this document's ${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}<documentId> path on the configured app origin`,
     );
   }
 
@@ -840,4 +1181,127 @@ export function validateWireError(value, { field = "errorEnvelope" } = {}) {
     v: 1,
     error: Object.freeze({ code: error.code, message: error.message, retryable: error.retryable }),
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* C4: private read and renderer messages                              */
+/* ------------------------------------------------------------------ */
+
+const DOCUMENT_METADATA_KEYS = Object.freeze([
+  "v",
+  "documentId",
+  "title",
+  "ownerAccountId",
+  "contentSha256",
+  "contentBytes",
+  "createdAt",
+]);
+
+/**
+ * Validate the C4 owner document-metadata body, returning a frozen copy.
+ *
+ * Note what is absent: no HTML, and no bearer of any kind. C4 serves bytes from
+ * a separate content route that repeats the owner check, so metadata that
+ * carried the document would make the second check decorative.
+ *
+ * @param {unknown} value
+ * @param {{field?: string}} [options]
+ * @returns {Readonly<object>}
+ * @throws {HostedContractError} `invalid_request`
+ */
+export function validateDocumentMetadata(value, { field = "document" } = {}) {
+  requireRecord(value, field);
+  requireExactKeys(value, DOCUMENT_METADATA_KEYS, field);
+
+  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+  requireLowerHex(value.documentId, HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH, `${field}.documentId`);
+  requireDisplayText(
+    value.title,
+    HOSTED_LIMITS.TITLE_MIN_SCALARS,
+    HOSTED_LIMITS.TITLE_MAX_SCALARS,
+    `${field}.title`,
+  );
+  requireAccountId(value.ownerAccountId, `${field}.ownerAccountId`);
+  requireLowerHex(value.contentSha256, HOSTED_LIMITS.SHA256_HEX_LENGTH, `${field}.contentSha256`);
+  requireInteger(
+    value.contentBytes,
+    HOSTED_LIMITS.HTML_MIN_BYTES,
+    HOSTED_LIMITS.HTML_MAX_BYTES,
+    `${field}.contentBytes`,
+    "artifact_too_large",
+  );
+  requireTimestamp(value.createdAt, `${field}.createdAt`);
+
+  return Object.freeze({
+    v: 1,
+    documentId: value.documentId,
+    title: value.title,
+    ownerAccountId: value.ownerAccountId,
+    contentSha256: value.contentSha256,
+    contentBytes: value.contentBytes,
+    createdAt: value.createdAt,
+  });
+}
+
+/**
+ * Validate the renderer's `archon:ready` handshake, returning a frozen copy.
+ *
+ * Exact keys matter more here than anywhere else in this module: the trusted
+ * viewer sends a private document in reply to this message, so a handshake that
+ * tolerated extra fields would be a channel from the renderer back into the
+ * account origin's decision about what to send.
+ *
+ * Validating the shape is not the security boundary. AHU-005 and AHU-009 must
+ * still check `event.origin` against the configured renderer origin and
+ * `event.source` against the exact frame window before this function is even
+ * called; a well-formed message from the wrong window is still an attack.
+ *
+ * @param {unknown} value
+ * @param {{field?: string}} [options]
+ * @returns {Readonly<{type: string, v: 1}>}
+ * @throws {HostedContractError} `invalid_request`
+ */
+export function validateReadyMessage(value, { field = "readyMessage" } = {}) {
+  requireRecord(value, field);
+  requireExactKeys(value, ["type", "v"], field);
+  if (value.type !== RENDER_MESSAGE_TYPES.READY) {
+    throw invalid(`${field}.type`, `must be "${RENDER_MESSAGE_TYPES.READY}"`);
+  }
+  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+  return Object.freeze({ type: value.type, v: 1 });
+}
+
+/**
+ * Validate an `archon:render` message, returning a frozen copy.
+ *
+ * The byte cap is re-applied on the receiving side because C4 requires it: the
+ * renderer is a separate origin and must not trust that whoever sent the message
+ * already checked. No descriptor is available here, so this is a bounds and
+ * shape check rather than a digest check - the digest belongs to the owner-facing
+ * metadata the viewer already fetched.
+ *
+ * @param {unknown} value
+ * @param {{field?: string}} [options]
+ * @returns {Readonly<{type: string, v: 1, html: string}>}
+ * @throws {HostedContractError} `invalid_request` / `artifact_too_large`
+ */
+export function validateRenderMessage(value, { field = "renderMessage" } = {}) {
+  requireRecord(value, field);
+  requireExactKeys(value, ["type", "v", "html"], field);
+  if (value.type !== RENDER_MESSAGE_TYPES.RENDER) {
+    throw invalid(`${field}.type`, `must be "${RENDER_MESSAGE_TYPES.RENDER}"`);
+  }
+  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+
+  requireWellFormedString(value.html, `${field}.html`);
+  if (value.html.includes(NUL)) throw invalid(`${field}.html`, "must not contain a NUL character");
+  requireInteger(
+    Buffer.byteLength(value.html, "utf8"),
+    HOSTED_LIMITS.HTML_MIN_BYTES,
+    HOSTED_LIMITS.HTML_MAX_BYTES,
+    `${field}.html`,
+    "artifact_too_large",
+  );
+
+  return Object.freeze({ type: value.type, v: 1, html: value.html });
 }
