@@ -174,8 +174,15 @@ const asset = (name: string): string => {
  * - `both` is what a merge across this change can leave behind.
  * - `none` is a layout that has lost its font markup altogether, which must be
  *   a loud failure rather than a silently fontless artifact.
+ * - `unrecognised` carries the slot plus a font request written in a shape the
+ *   line filter does not match. Shipping it would be the one silent way to
+ *   break the profile's only hard promise.
  */
-type LayoutShape = "slot" | "legacy" | "both" | "none";
+type LayoutShape = "slot" | "legacy" | "both" | "none" | "unrecognised";
+
+/** A font request the `<link ... href="https://fonts...` line filter misses. */
+const UNRECOGNISED_FONT_LINK =
+  "<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter'>";
 
 interface Fixture {
   /** Font-markup shape to stage into `layout.html`. Defaults to `slot`. */
@@ -201,7 +208,13 @@ const root = (t: { after: (fn: () => void) => void }, fixture: Fixture = {}): st
     const src = readFileSync(layout, "utf8");
     assert.ok(src.includes("{{FONT_LINKS}}"), "the committed layout should carry the font slot");
     const replacement =
-      shape === "legacy" ? FONT_LINKS : shape === "both" ? `{{FONT_LINKS}}\n${FONT_LINKS}` : "";
+      shape === "legacy"
+        ? FONT_LINKS
+        : shape === "both"
+          ? `{{FONT_LINKS}}\n${FONT_LINKS}`
+          : shape === "unrecognised"
+            ? `{{FONT_LINKS}}\n${UNRECOGNISED_FONT_LINK}`
+            : "";
     writeFileSync(layout, src.split("{{FONT_LINKS}}").join(replacement));
   }
 
@@ -338,6 +351,28 @@ test("a layout with neither the slot nor the font markup fails both profiles", (
       `expected a missing-placeholder failure with hosted=${hosted}`,
     );
   }
+});
+
+test("a font request the line filter cannot recognise fails the hosted build", (t) => {
+  isolate(t);
+  // The line filter matches one exact shape. A layout writing the request with
+  // single quotes, reordered attributes or a wrapped tag would slip through,
+  // and the build would cheerfully report a hosted artifact that still calls
+  // out to a font host on every open. Refusing is the only safe answer: this is
+  // the profile's single hard promise, and a silent miss breaks exactly it.
+  const dir = root(t, { layout: "unrecognised" });
+
+  // The normal profile is unaffected — it never claimed to remove anything.
+  assert.match(built(dir, false).html, /fonts\.googleapis\.com/);
+
+  assert.throws(
+    () => build(dir, "sample", { hosted: true }),
+    (error: Error) => {
+      assert.ok(error instanceof BuildError, `expected a BuildError, got ${error.name}`);
+      assert.match(error.message, /could not remove the font markup/);
+      return true;
+    },
+  );
 });
 
 test("the hosted profile keeps the author's own CSS, JS and changelog data", (t) => {
