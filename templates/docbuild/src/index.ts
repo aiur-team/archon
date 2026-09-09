@@ -532,24 +532,14 @@ export function build(root: string, instance: string, options: BuildOptions = {}
   const missing = subs.map(([token]) => token).filter((token) => !html.includes(token));
   if (missing.length > 0) fail(`layout.html is missing placeholders: ${missing.sort().join(", ")}`);
 
-  // The hosted profile must classify every slot, and both checks run in both
-  // profiles so drift fails the common build rather than the rare one. Without
-  // the first, a slot added later and forgotten ships in hosted artifacts;
-  // without the second, renaming a slot turns its omission entry into a silent
-  // no-op that leaves the client inlined.
-  const classified = new Set([...HOSTED_OMITTED_SLOTS, ...HOSTED_KEPT_SLOTS]);
-  const unclassified = subs.map(([token]) => token).filter((token) => !classified.has(token));
-  if (unclassified.length > 0) {
-    fail(`the hosted profile does not classify: ${unclassified.sort().join(", ")}`);
-  }
-  const tokens = new Set(subs.map(([token]) => token));
-  const unknown = [...classified].filter((token) => !tokens.has(token));
-  if (unknown.length > 0) {
-    fail(`the hosted profile classifies unknown slots: ${unknown.sort().join(", ")}`);
-  }
-
-  // Profile selection happens after the integrity assertions, never instead of
-  // them: the hosted artifact omits a feature the layout still has to declare.
+  // Profile selection happens after the integrity assertion, never instead of
+  // it: the hosted artifact omits a feature the layout still has to declare.
+  //
+  // That the two hosted slot lists partition every slot exactly once is an
+  // invariant over source constants, so it cannot vary with any build input and
+  // is asserted from `hosted-profile.test.ts` rather than re-checked on every
+  // build. A slot added to `layout.html` without being classified fails that
+  // test; a slot this file never substitutes fails `findPlaceholders` below.
   html = applyFontProfile(html, hosted);
   if (hosted) {
     const omitted = new Set(HOSTED_OMITTED_SLOTS);
