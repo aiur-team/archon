@@ -24,6 +24,13 @@ const CHEVRON =
 export const USAGE = `docbuild — compose an architecture doc into one self-contained HTML file
 
     docbuild <instance>
+    docbuild <instance> --hosted
+
+--hosted builds the same document for private hosted reading instead: the same
+inline theme, navigation and section content, but no Google-font request and
+none of the session, comment, edit, realtime, presence or share client code.
+It writes <instance>/dist/<instance-basename>.hosted.html and leaves the normal
+<instance-basename>.html untouched.
 
 An instance directory holds:
     doc.json          document metadata
@@ -264,7 +271,153 @@ export function repoRoot(from: string = process.cwd()): string {
   }
 }
 
-export function build(root: string, instance: string): string {
+// ------------------------------------------------------------------- profiles
+
+/**
+ * How one build composes a document. `hosted` is the explicit profile for a
+ * privately hosted artifact; everything else is the normal profile, whose bytes
+ * are frozen by `templates/check-dist`.
+ *
+ * This is an option, never an inference. The builder must not read the
+ * environment, the document URL, or where the package happens to be installed
+ * to decide which artifact a caller asked for: the CLI flag and the library
+ * option are the same switch, so `docbuild <instance> --hosted` and
+ * `build(root, instance, { hosted: true })` produce the same file.
+ */
+export interface BuildOptions {
+  /** Compose the hosted/offline profile instead of the normal one. */
+  readonly hosted?: boolean;
+}
+
+/**
+ * The font markup the normal profile emits, kept here rather than in
+ * `layout.html` so the hosted profile can omit it without a second template.
+ *
+ * The value is the exact three lines the layout carried before `{{FONT_LINKS}}`
+ * existed, so a normal build is byte-identical across the change.
+ */
+export const FONT_LINKS =
+  '<link rel="preconnect" href="https://fonts.googleapis.com">\n' +
+  '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n' +
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2' +
+  '?family=JetBrains+Mono:wght@400;500;700&display=swap">';
+
+const FONT_SLOT = "{{FONT_LINKS}}";
+
+const FONT_LINK_LINES = FONT_LINKS.split("\n");
+
+/** A `<link>` line requesting one of the Google font hosts. */
+const FONT_LINK_LINE = /^\s*<link\b[^>]*\bhref="https:\/\/fonts\.(?:googleapis|gstatic)\.com/;
+
+/** Any surviving reference to a Google font host, in any position. */
+const FONT_HOST = /fonts\.(?:googleapis|gstatic)\.com/;
+
+/**
+ * `{{FONT_LINKS}}` is the one placeholder that may legitimately be absent, but
+ * absence still has to be *earned*. An installed package staged before the slot
+ * existed carries the literal font markup instead, and a hosted build of that
+ * layout must still come out without a font request — so both shapes are
+ * accepted and a layout carrying neither is a missing placeholder like any
+ * other. Without that check the two failures are indistinguishable: a layout
+ * that simply lost its font markup would build clean and ship a normal artifact
+ * with no font at all.
+ *
+ * The two removal mechanisms are additive rather than exclusive, because a
+ * merge can leave a layout holding the slot *and* the literal lines. Filling or
+ * clearing the slot happens first; in the hosted profile the line filter then
+ * runs over whatever is left, and a post-condition refuses to return a layout
+ * that still names a font host in a shape neither mechanism recognised.
+ */
+function applyFontProfile(html: string, hosted: boolean): string {
+  const hasSlot = html.includes(FONT_SLOT);
+  const hasLegacyMarkup = FONT_LINK_LINES.every((line) => html.includes(line));
+  if (!hasSlot && !hasLegacyMarkup) fail(`layout.html is missing placeholders: ${FONT_SLOT}`);
+
+  if (!hosted) return hasSlot ? html.split(FONT_SLOT).join(FONT_LINKS) : html;
+
+  // Take the line the slot sits on with it, so a hosted head composed from this
+  // layout matches one composed from a layout that never had the markup.
+  const cleared = hasSlot ? html.split(`${FONT_SLOT}\n`).join("").split(FONT_SLOT).join("") : html;
+  const stripped = cleared
+    .split("\n")
+    .filter((line) => !FONT_LINK_LINE.test(line))
+    .join("\n");
+  // Only the layout template is in hand here — sections, `extra.css` and the
+  // base assets are substituted later — so a surviving font host is markup this
+  // function failed to remove, never authored content.
+  if (FONT_HOST.test(stripped)) {
+    fail("layout.html: the hosted profile could not remove the font markup");
+  }
+  return stripped;
+}
+
+/**
+ * The slots the hosted profile leaves empty: every legacy account and
+ * collaboration client, plus the styles that only exist to dress their
+ * controls. A hosted artifact is read by its owner through a renderer that
+ * offers none of those endpoints, so shipping the code would only mean dead
+ * bytes attempting requests that cannot succeed.
+ *
+ * Theme, components, extra CSS/JS, the anchor core, the local changelog client
+ * and `app.js` are deliberately absent from this list: they are what makes the
+ * artifact readable and navigable offline. They are named in
+ * `HOSTED_KEPT_SLOTS`, because a denylist alone fails open — a slot added later
+ * and forgotten here would simply ship.
+ */
+export const HOSTED_OMITTED_SLOTS: readonly string[] = [
+  "{{SESSION_CSS}}",
+  "{{COMMENTS_CSS}}",
+  "{{EDIT_CSS}}",
+  "{{PRESENCE_CSS}}",
+  "{{SHARE_CSS}}",
+  "{{EDIT_JS}}",
+  "{{COMMENTS_JS}}",
+  "{{REALTIME_JS}}",
+  "{{PRESENCE_JS}}",
+  "{{SHARE_JS}}",
+  "{{SESSION_JS}}",
+];
+
+/**
+ * The slots the hosted profile deliberately keeps. Every one of them is either
+ * the document's own content, its chrome, or a client with no network, import
+ * or endpoint of any kind.
+ *
+ * This exists so the pair is a partition rather than a denylist. There is no
+ * runtime guard: `build()` does not check the partition, because both sides of
+ * that comparison are source constants and it could never fire for any build
+ * input. The partition is enforced by
+ * `hosted-profile.test.ts` ("every layout slot is classified as kept or omitted
+ * exactly once"), which compares the two lists against the committed
+ * `layout.html`. Adding a slot to the layout without deciding which side it
+ * falls on fails that test rather than quietly shipping in the next hosted
+ * artifact, and a renamed slot fails the same way instead of turning its
+ * denylist entry into a silent no-op.
+ */
+export const HOSTED_KEPT_SLOTS: readonly string[] = [
+  "{{TITLE}}",
+  "{{THEME_CSS}}",
+  "{{COMPONENTS_CSS}}",
+  "{{HISTORY_CSS}}",
+  "{{EXTRA_CSS}}",
+  "{{DOC_ID}}",
+  "{{EYEBROW}}",
+  "{{STATUS}}",
+  "{{HEADING}}",
+  "{{LEDE}}",
+  "{{META}}",
+  "{{NAV}}",
+  "{{SECTIONS}}",
+  "{{FOOTER}}",
+  "{{APP_JS}}",
+  "{{EXTRA_JS}}",
+  "{{HISTORY_JSON}}",
+  "{{ANCHOR_CORE_JS}}",
+  "{{HISTORY_JS}}",
+];
+
+export function build(root: string, instance: string, options: BuildOptions = {}): string {
+  const hosted = options.hosted === true;
   const inst = join(root, instance);
   if (!isDir(inst)) fail(`no such instance directory: ${instance}`);
   const base = resolveBase(root);
@@ -383,6 +536,22 @@ export function build(root: string, instance: string): string {
   const missing = subs.map(([token]) => token).filter((token) => !html.includes(token));
   if (missing.length > 0) fail(`layout.html is missing placeholders: ${missing.sort().join(", ")}`);
 
+  // Profile selection happens after the integrity assertion, never instead of
+  // it: the hosted artifact omits a feature the layout still has to declare.
+  //
+  // That the two hosted slot lists partition every slot exactly once is an
+  // invariant over source constants, so it cannot vary with any build input and
+  // is asserted from `hosted-profile.test.ts` rather than re-checked on every
+  // build. A slot added to `layout.html` without being classified fails that
+  // test; a slot this file never substitutes fails `findPlaceholders` below.
+  html = applyFontProfile(html, hosted);
+  if (hosted) {
+    const omitted = new Set(HOSTED_OMITTED_SLOTS);
+    for (const sub of subs) {
+      if (omitted.has(sub[0])) sub[1] = "";
+    }
+  }
+
   for (const [token, value] of subs) {
     // split/join, never replaceAll: a string replacement in replaceAll treats
     // `$&`, `$'` and `` $` `` as capture references, and real section bodies
@@ -403,7 +572,11 @@ export function build(root: string, instance: string): string {
   }
   const name = inst.split(sep).filter(Boolean).pop();
   if (name === undefined) fail("instance path has no final component");
-  const out = join(outDir, `${name}.html`);
+  // The output is named after the instance directory's basename, not the
+  // document slug. The hosted profile gets its own suffix so a hosted build can
+  // never overwrite the committed normal artifact `templates/check-dist`
+  // rebuilds — both files coexist in dist/.
+  const out = join(outDir, hosted ? `${name}.hosted.html` : `${name}.html`);
   try {
     writeFileSync(out, html);
   } catch (e) {
