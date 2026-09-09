@@ -383,11 +383,15 @@ export const HOSTED_OMITTED_SLOTS: readonly string[] = [
  * the document's own content, its chrome, or a client with no network, import
  * or endpoint of any kind.
  *
- * This exists so the pair is a partition rather than a denylist. `build()`
- * asserts that the two lists together classify every slot exactly once, in both
- * profiles, so adding a slot to `layout.html` without deciding which side it
- * falls on fails the next normal build rather than quietly shipping in the next
- * hosted artifact. A renamed slot fails the same way instead of turning its
+ * This exists so the pair is a partition rather than a denylist. There is no
+ * runtime guard: `build()` does not check the partition, because both sides of
+ * that comparison are source constants and it could never fire for any build
+ * input. The partition is enforced by
+ * `hosted-profile.test.ts` ("every layout slot is classified as kept or omitted
+ * exactly once"), which compares the two lists against the committed
+ * `layout.html`. Adding a slot to the layout without deciding which side it
+ * falls on fails that test rather than quietly shipping in the next hosted
+ * artifact, and a renamed slot fails the same way instead of turning its
  * denylist entry into a silent no-op.
  */
 export const HOSTED_KEPT_SLOTS: readonly string[] = [

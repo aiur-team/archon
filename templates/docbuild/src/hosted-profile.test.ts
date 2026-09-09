@@ -402,9 +402,11 @@ test("every layout slot is classified as kept or omitted exactly once", (t) => {
   isolate(t);
   // The pair is a partition, not a denylist. A slot added to layout.html and
   // forgotten here would otherwise ship in hosted artifacts by default, and a
-  // renamed slot would turn its omission entry into a silent no-op. The
-  // production build asserts this too; asserting it against the committed
-  // layout is what names the offending token at review time.
+  // renamed slot would turn its omission entry into a silent no-op. This test
+  // is the only enforcement: `build()` deliberately carries no runtime guard,
+  // since both lists are source constants and such a check could never fire for
+  // any build input. Comparing against the committed layout is also what names
+  // the offending token at review time.
   const layout = readFileSync(join(baseDir(), "layout.html"), "utf8");
   const inLayout = new Set(findPlaceholders(layout));
   // Composed here rather than declared in the layout, so it has no slot.
