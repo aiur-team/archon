@@ -500,6 +500,11 @@ test("unknown and incompatible flags fail with help and a nonzero exit", (t) => 
   const rejected = [
     ["sample", "--hostedd"],
     ["sample", "-x"],
+    // An unknown flag on its own, where no other guard would catch it: without
+    // the unknown-option branch these become the <instance> positional and fail
+    // late as a missing directory, with no help and a misleading message.
+    ["--hostedd"],
+    ["-x"],
     ["--site", "--hosted"],
     ["--site", "sample"],
     ["--site", "--site"],
