@@ -64,7 +64,7 @@ Two of the seven were checked against the outside world rather than against an
 absent variable, because "not supplied" and "does not exist" are different
 findings and only the second one is a fact about the project:
 
-- **G5, the release.** `npm view @aiur-team/docbuild` answers `404 Not Found` on
+- **G5, the release.** `npm view @aiur-team/archon` (then named `@aiur-team/docbuild`) answers `404 Not Found` on
   the public registry, and the repository has no published GitHub release. The
   package is `private: false` and packs correctly — `scripts/test-publish-package.mjs`
   proves a clean consumer can install *a tarball built here* — but AE1 is about

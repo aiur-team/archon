@@ -1,6 +1,6 @@
 ---
 name: archon-doc
-description: "Turn material a person hands you into an Archon document, build it into one self-contained HTML file, and — only when they ask — publish it to a hosted Archon service through a browser approval they perform themselves. Use when asked to write, restructure or update an architecture doc, design doc, feature analysis or technical brief with the @aiur-team/docbuild package, and when asked to share or publish one of those documents to a hosted link."
+description: "Turn material a person hands you into an Archon document, build it into one self-contained HTML file, and — only when they ask — publish it to a hosted Archon service through a browser approval they perform themselves. Use when asked to write, restructure or update an architecture doc, design doc, feature analysis or technical brief with the @aiur-team/archon package, and when asked to share or publish one of those documents to a hosted link."
 ---
 
 # Making and publishing an Archon document
@@ -11,7 +11,7 @@ Archon service, but only after **they** approve it in their own browser. You nev
 never decide on your own that something should be uploaded.
 
 This file is the whole instruction set. It is written for any agent that can run commands and read
-files. Everything below names real commands from the installed `@aiur-team/docbuild` package; run
+files. Everything below names real commands from the installed `@aiur-team/archon` package; run
 `--help` on either command if you want the synopsis in its own words.
 
 ## What you can and cannot do here
@@ -39,18 +39,19 @@ publication that can never complete.
 ## 1. Install
 
 ```sh
-npm install @aiur-team/docbuild
+npm install @aiur-team/archon
 ```
 
-Node 18 or later; the package has no runtime dependencies. That installs two commands, `docbuild`
-and `archon-publish`, and everything else this file refers to:
+Node 18 or later; the package has no runtime dependencies. That installs three commands — `archon`,
+`archon-publish`, and `docbuild`, a compatibility alias for the same builder as `archon` — and
+everything else this file refers to:
 
 | What | Installed path |
 | ---- | -------------- |
-| This file | `node_modules/@aiur-team/docbuild/dist/skills/archon-doc/SKILL.md` |
-| Document skeleton | `node_modules/@aiur-team/docbuild/dist/skeleton/` |
-| Base assets the builder inlines | `node_modules/@aiur-team/docbuild/dist/base/` |
-| Builder | `npx docbuild` |
+| This file | `node_modules/@aiur-team/archon/dist/skills/archon-doc/SKILL.md` |
+| Document skeleton | `node_modules/@aiur-team/archon/dist/skeleton/` |
+| Base assets the builder inlines | `node_modules/@aiur-team/archon/dist/base/` |
+| Builder | `npx archon` (alias: `npx docbuild`) |
 | Publisher | `npx archon-publish` |
 
 If `npm install` is not available to the person — no Node, no registry access, a locked-down
@@ -66,7 +67,7 @@ directory there makes this file load automatically:
 test -e .claude/skills/archon-doc \
   && echo ".claude/skills/archon-doc already exists; not overwriting" \
   || { mkdir -p .claude/skills \
-       && cp -R node_modules/@aiur-team/docbuild/dist/skills/archon-doc .claude/skills/archon-doc; }
+       && cp -R node_modules/@aiur-team/archon/dist/skills/archon-doc .claude/skills/archon-doc; }
 ```
 
 The existence check is not decoration. If that directory is already there it is the person's, and
@@ -83,7 +84,7 @@ Copy the packaged skeleton into a directory named for the document:
 ```sh
 test -e my-doc \
   && echo "my-doc already exists; choose another name" \
-  || cp -R node_modules/@aiur-team/docbuild/dist/skeleton my-doc
+  || cp -R node_modules/@aiur-team/archon/dist/skeleton my-doc
 ```
 
 The check is not decoration: `cp -R` into a directory that already exists nests the skeleton at
@@ -141,14 +142,14 @@ verify where it appears, not only in a footnote. Never present a summary as a me
 ## 3. Build it
 
 ```sh
-npx docbuild my-doc            # the normal profile
-npx docbuild my-doc --hosted   # the profile you publish
+npx archon my-doc            # the normal profile
+npx archon my-doc --hosted   # the profile you publish
 ```
 
 The output is named after the **instance directory**, not the `slug` in `doc.json`:
 
-- `npx docbuild my-doc` writes `my-doc/dist/my-doc.html`
-- `npx docbuild my-doc --hosted` writes `my-doc/dist/my-doc.hosted.html`
+- `npx archon my-doc` writes `my-doc/dist/my-doc.html`
+- `npx archon my-doc --hosted` writes `my-doc/dist/my-doc.hosted.html`
 
 The two coexist; a hosted build never overwrites the normal one. **The command prints the path it
 wrote — read that line rather than reconstructing it.** If the directory is `notes-2024` and the
@@ -170,12 +171,12 @@ size — read that output; an unbalanced tag means a dropped `</div>`.
 
 **It does not check that you replaced the skeleton's `id` and `slug`.** A document still carrying
 `10b902` and `short-specific-name` builds green, and the collision only surfaces later — as a
-duplicate-id failure in `docbuild --site`, or silently as a permanent `/d/<id>` link pointing at
+duplicate-id failure in `archon --site`, or silently as a permanent `/d/<id>` link pointing at
 somebody else's document. Changing those two fields is yours to get right.
 
 `<instance>` is resolved against the repository root the builder finds by walking up for
 `templates/base/layout.html`, and only against the current directory when there is none. In a
-checkout that vendors those assets, run `docbuild` from the repository root.
+checkout that vendors those assets, run `archon` from the repository root.
 
 ## 4. Before you publish anything
 

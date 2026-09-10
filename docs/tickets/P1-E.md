@@ -418,7 +418,7 @@ jobs:
 ```
 
 The scrub gate remains the first executable repository command.
-Node 22 is intentional: `@aiur-team/docbuild` continues to declare Node `>=18`, while the root Functions package P1-C later creates declares Node `>=22.12.0`.
+Node 22 is intentional: `@aiur-team/archon` continues to declare Node `>=18`, while the root Functions package P1-C later creates declares Node `>=22.12.0`.
 The edge assertion prevents a future edit from silently publishing every document by removing the gate, changing its target, or widening its exclusions.
 The site command proves the deploy entry point; `templates/check-dist` then compares the refreshed committed artifacts to git and fails if a writer forgot to commit them.
 
@@ -483,7 +483,7 @@ P1-E's Phase 1 Definition of Done stops at deterministic local preview-header ge
 - [ ] `netlify.toml` uses `_site`, one `templates/build --site` command, Node 22, no HTML post-processing, the exact Functions config, security/cache headers, environment blocks, and one gate on `/*` with exactly three exclusions.
 - [ ] `.gitignore` ignores `_site/` without ignoring committed document artifacts.
 - [ ] `.github/workflows/check.yml` retains its current triggers/job and runs scrub first, Node 22 setup, typecheck, fail-closed gate assertion, full site build, and `templates/check-dist` in that order.
-- [ ] Strict TypeScript checking passes with `noUncheckedIndexedAccess` and no runtime dependency is added to `@aiur-team/docbuild`.
+- [ ] Strict TypeScript checking passes with `noUncheckedIndexedAccess` and no runtime dependency is added to `@aiur-team/archon`.
 - [ ] After P1-A and P1-B are integrated and committed artifacts are refreshed, a site build followed by `git diff --exit-code -- '*/dist/*.html'` is clean.
 - [ ] No file outside the five owned implementation paths changes, apart from ignored/generated outputs produced while testing.
 - [ ] The repository scrub gate passes for this ticket and all implementation changes.

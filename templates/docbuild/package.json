@@ -1,11 +1,12 @@
 {
-  "name": "@aiur-team/docbuild",
+  "name": "@aiur-team/archon",
   "version": "0.0.1",
   "description": "Compose an architecture doc into one self-contained HTML file.",
   "type": "module",
   "license": "MIT",
   "private": false,
   "bin": {
+    "archon": "./dist/cli.js",
     "docbuild": "./dist/cli.js",
     "archon-publish": "./dist/publish-cli.js"
   },

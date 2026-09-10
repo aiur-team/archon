@@ -1,4 +1,4 @@
-# @aiur-team/docbuild
+# @aiur-team/archon
 
 Compose an architecture doc into one self-contained HTML file, and publish it
 to a hosted service with browser approval by a human. No runtime dependencies;
@@ -11,7 +11,7 @@ file you can open, email, or host as a static asset.
 ## Install
 
 ```sh
-npm install @aiur-team/docbuild
+npm install @aiur-team/archon
 ```
 
 ## Start a document
@@ -21,13 +21,13 @@ The package ships the same skeleton the repository uses. Copy it, then edit
 (`openssl rand -hex 3`), a `slug`, and a `title`.
 
 ```sh
-cp -R node_modules/@aiur-team/docbuild/dist/skeleton my-doc
+cp -R node_modules/@aiur-team/archon/dist/skeleton my-doc
 ```
 
 ## Build it
 
 ```sh
-npx docbuild my-doc
+npx archon my-doc
 ```
 
 The result is `my-doc/dist/my-doc.html`, a single self-contained file. Output is
@@ -35,13 +35,14 @@ named after the instance **directory**, not the `slug` in `doc.json`; the two
 are often the same name, and only the directory decides the filename. The CLI
 prints the path it wrote — read that line rather than guessing.
 
-Run `npx docbuild --help` for the full synopsis, including `--site`, which
-composes every document under the current directory into a static site.
+Run `npx archon --help` for the full synopsis, including `--site`, which
+composes every document under the current directory into a static site. The
+package also installs `docbuild`, a compatibility alias for the same builder.
 
 ## Build it for private hosted reading
 
 ```sh
-npx docbuild my-doc --hosted
+npx archon my-doc --hosted
 ```
 
 `--hosted` is an explicit profile, never inferred from the environment, the
@@ -69,7 +70,7 @@ and neither should yours.
 The library form is the same switch:
 
 ```js
-import { build } from "@aiur-team/docbuild";
+import { build } from "@aiur-team/archon";
 
 build(root, "my-doc", { hosted: true });
 ```
@@ -192,7 +193,7 @@ exit codes, the human approval boundary and the trust rules around the service
 origin:
 
 ```
-node_modules/@aiur-team/docbuild/dist/skills/archon-doc/SKILL.md
+node_modules/@aiur-team/archon/dist/skills/archon-doc/SKILL.md
 ```
 
 It is a plain Markdown file with nothing tool-specific in the instructions, so
@@ -203,7 +204,7 @@ any agent can read it in place. Claude Code loads a skill from
 test -e .claude/skills/archon-doc \
   && echo ".claude/skills/archon-doc already exists; not overwriting" \
   || { mkdir -p .claude/skills \
-       && cp -R node_modules/@aiur-team/docbuild/dist/skills/archon-doc .claude/skills/archon-doc; }
+       && cp -R node_modules/@aiur-team/archon/dist/skills/archon-doc .claude/skills/archon-doc; }
 ```
 
 The existence check matters: an `archon-doc` directory already there is yours
