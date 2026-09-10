@@ -18,8 +18,11 @@
  *   * the **application** origin, which holds a session cookie and the private
  *     document API, and which frames the renderer;
  *   * the **renderer** origin, a different host serving exactly what
- *     `renderer/scripts/build.mjs` produced, with the generated `_headers`
- *     applied to every response;
+ *     `renderer/scripts/build.mjs` produced, with that build's own header set
+ *     applied to every response. On the merged site those headers come from the
+ *     edge gate rather than from a `_headers` file, because only the gate can
+ *     tell which of the site's two hosts a request arrived on; the set itself is
+ *     still `headersFile` in the build, which is what this runner replays;
  *   * an **adversary** origin, which the artifact is invited to reach and which
  *     records every request it receives, so "blocked" is proven by the absence of
  *     a request at a server rather than by the absence of an exception.
@@ -41,7 +44,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -628,13 +631,19 @@ parent.__siblingReady = true;
 }
 
 /**
- * The renderer origin: exactly what the build produced, with the generated
- * `_headers` applied.
+ * The renderer origin: exactly what the build produced, with the header set the
+ * deployment applies to it.
  *
- * Parsing `_headers` and replaying it is the only way to make this an assertion
- * about the artifact that gets deployed. Hand-writing the same headers into this
- * server would test a copy, and a copy is the thing that goes stale on the day
- * somebody edits the build.
+ * The build no longer writes a `_headers` file. On one site answering on two
+ * hosts, the edge gate is the only thing that can tell which host a request
+ * arrived on, so it is the only place the header set can be decided; a
+ * `_headers` file beside it would be a second authority whose disagreement shows
+ * up as a page that is more dead, not more open.
+ *
+ * What the build still owns is the header set itself, as `headersFile`, and that
+ * is what this server replays. Reading it out of the build rather than
+ * hand-writing it here is the same property as before: a copy would be the thing
+ * that goes stale on the day somebody edits the policy.
  */
 function parseHeadersFile(text) {
   const headers = [];
@@ -646,16 +655,15 @@ function parseHeadersFile(text) {
       continue;
     }
     const separator = line.indexOf(":");
-    assert.ok(separator > 0, `malformed _headers line: ${line}`);
+    assert.ok(separator > 0, `malformed header line: ${line}`);
     headers.push([line.slice(0, separator).trim(), line.slice(separator + 1).trim()]);
   }
-  /* Exactly one block, and it is the global one. Netlify applies the most
-     specific match, so a second, path-scoped block would take effect in
-     production while a parser that only replayed `/*` dropped it on the floor
-     and stayed green. Requiring one block means the file this runner replays is
-     the whole file. */
-  assert.deepEqual(blocks, ["/*"], "_headers must declare exactly one block, for /*");
-  assert.ok(headers.length > 0, "_headers declared no headers for /*");
+  /* Exactly one block, and it is the global one. A second, path-scoped block
+     would take effect in production while a parser that only replayed `/*`
+     dropped it on the floor and stayed green. Requiring one block means what
+     this runner replays is the whole policy. */
+  assert.deepEqual(blocks, ["/*"], "the renderer policy must declare exactly one block, for /*");
+  assert.ok(headers.length > 0, "the renderer policy declared no headers for /*");
   return headers;
 }
 
@@ -666,14 +674,16 @@ const CONTENT_TYPES = {
 };
 
 /**
- * Read the built tree into memory: the generated header set, and every file the
- * build published.
+ * Read the built tree into memory: the deployment's header set for this origin,
+ * and every file the build published.
  */
-async function loadRendererBundle(distDir) {
-  const headers = parseHeadersFile(await readFile(join(distDir, "_headers"), "utf8"));
+async function loadRendererBundle(build, distDir, appOrigin) {
+  const headers = parseHeadersFile(build.headersFile(appOrigin));
   const files = new Map();
   for (const name of await readdir(distDir)) {
-    if (name === "_headers") continue;
+    /* Every published file is served. There is no exclusion left to make: a
+       `_headers` file appearing here would be a second header authority
+       shipping to a live origin, which the inventory assertion below refuses. */
     files.set(`/${name}`, await readFile(join(distDir, name)));
   }
   return { headers, files };
@@ -990,10 +1000,13 @@ async function assertBuildOutputIsStatic(tempRoot, appOrigin, renderOrigin) {
     },
   });
 
+  /* Four, not five. `_headers` is gone: the merged site's edge gate is the one
+     header authority, and a file here would ship a second one to a live
+     origin. */
   assert.deepEqual(
     result.files,
-    ["_headers", "index.html", "renderer-config.js", "renderer.css", "renderer.js"],
-    "the renderer build publishes exactly its five files",
+    ["index.html", "renderer-config.js", "renderer.css", "renderer.js"],
+    "the renderer build publishes exactly its four files",
   );
   for (const name of result.files) {
     const bytes = await readFile(join(outDir, name), "utf8");
@@ -1070,7 +1083,7 @@ async function assertBuildRefusesUnsafeTargets(tempRoot) {
      rule about containment rather than a build that refuses everything. */
   const ok = join(tempRoot, "dist-target-guard");
   const result = await build.buildRenderer({ outDir: ok, production: true, env });
-  assert.equal(result.files.length, 5, "a legitimate --out was refused");
+  assert.equal(result.files.length, 4, "a legitimate --out was refused");
   await rm(ok, { recursive: true, force: true });
 }
 
@@ -1095,7 +1108,7 @@ async function assertBuildRefusesUndeclaredPublicFile(tempRoot) {
   /* The copy builds, so a failure below is about the planted file and not
      about the copy. */
   const before = await build.buildRenderer({ outDir, production: true, env });
-  assert.equal(before.files.length, 5, "the copied renderer tree does not build");
+  assert.equal(before.files.length, 4, "the copied renderer tree does not build");
 
   await writeFile(join(copy, "public", "print.css"), "@media print { body { color: #000 } }\n", "utf8");
   await assert.rejects(
@@ -1109,16 +1122,26 @@ async function assertBuildRefusesUndeclaredPublicFile(tempRoot) {
 }
 
 /**
- * `renderer/netlify.toml` says it declares no functions, no edge functions, no
- * headers and no environment values. Until this ran, all four were prose.
+ * `renderer/netlify.toml` used to be a third deployment, and it said it declared
+ * no functions, no edge functions, no headers and no environment values. Those
+ * rules did not disappear when the file did -- they became rules about the one
+ * merged configuration and about the shell's place inside it, which is what this
+ * asserts now.
  *
- * AHU-011 owns the deployment configuration and will inherit this file; what it
- * should inherit is a guard rather than a promise, so that adding a function to
- * the one origin that renders arbitrary HTML, or a second header authority that
- * disagrees with the generated `_headers`, fails here first.
+ * The renderer no longer has a site, a command or a publish directory of its
+ * own. What it still must not have is a second header authority beside the edge
+ * gate, or any server code on the one origin that renders arbitrary HTML.
  */
 async function assertRendererDeploymentConfig() {
-  const toml = await readFile(join(ROOT, "renderer", "netlify.toml"), "utf8");
+  /* One site. A second `netlify.toml` anywhere is a second header authority
+     that the gate cannot see, which is the exact failure the consolidation
+     removed. */
+  const tracked = execFileSync("git", ["-C", ROOT, "ls-files", "*netlify.toml"], { encoding: "utf8" })
+    .split("\n")
+    .filter((path) => path !== "");
+  assert.deepEqual(tracked, ["netlify.toml"], "the repository declares more than one Netlify site");
+
+  const toml = await readFile(join(ROOT, "netlify.toml"), "utf8");
   /* Comments carry the words this checks for, and a rule that a comment can
      satisfy is not a rule. */
   const config = toml
@@ -1127,35 +1150,35 @@ async function assertRendererDeploymentConfig() {
     .join("\n");
 
   for (const [pattern, why] of [
-    [/^\s*\[functions[.\]]/m, "declares a [functions] block; this origin runs no server code"],
-    [/^\s*\[\[edge_functions\]\]/m, "declares an edge function; the legacy identity gate belongs to the root deploy"],
-    [/^\s*\[\[headers\]\]/m, "declares headers; the build owns them, and two authorities can disagree"],
-    [/^\s*\[context[.\]]/m, "declares a deploy context; the renderer is configured one way or not at all"],
+    [/^\s*\[\[headers\]\][\s\S]*?content-security-policy/im, "declares a content policy; the gate owns it, and two authorities can only intersect"],
     [/x-frame-options/i, "names X-Frame-Options; SAMEORIGIN would forbid the framing this design requires"],
+    [/referrer-policy/i, "names Referrer-Policy; the two hosts need different answers and TOML cannot ask which host it is on"],
   ]) {
-    assert.ok(!pattern.test(config), `renderer/netlify.toml ${why}`);
+    assert.ok(!pattern.test(config), `netlify.toml ${why}`);
   }
 
-  const environment = /\[build\.environment\]([\s\S]*?)(?=\n\[|$)/.exec(config);
-  const assigned = [...(environment ? environment[1] : "").matchAll(/^\s*([A-Za-z0-9_]+)\s*=/gm)]
-    .map((match) => match[1]);
+  /* The gate runs on every path. An excluded path is a path with no host
+     classification, which on the render host means a page served with the
+     application's policy or with none. */
+  const block = /\[\[edge_functions\]\]([\s\S]*?)(?=\n\[|$)/.exec(config);
+  assert.ok(block, "netlify.toml declares no edge function");
+  assert.match(block[1], /^\s*path\s*=\s*"\/\*"$/m, "the gate must run on every path");
+  assert.ok(!/excludedPath/.test(block[1]), "a path excluded from the gate has no host classification");
+
+  /* The renderer shell is published inside the one publish tree, and the build
+     that puts it there generates no header file to sit beside it. */
+  const build = await import(pathToFileURL(join(ROOT, "renderer/scripts/build.mjs")).href);
   assert.deepEqual(
-    assigned,
-    ["NODE_VERSION"],
-    "renderer/netlify.toml sets an environment value other than the Node version",
-  );
-  assert.match(config, /^\s*publish\s*=\s*"dist"$/m, "renderer/netlify.toml does not publish dist");
-  assert.match(
-    config,
-    /^\s*command\s*=\s*"node scripts\/build\.mjs"$/m,
-    "renderer/netlify.toml does not run the renderer build",
+    [...build.GENERATED_FILES],
+    ["renderer-config.js"],
+    "the renderer build generates a second header authority beside the shell",
   );
 
   /* No lockfile and no manifest: the build imports `node:` builtins only, and a
      dependency here would be a dependency on the origin that frames hostile
-     HTML. */
-  for (const name of ["package.json", "package-lock.json", "node_modules"]) {
-    assert.ok(!existsSync(join(ROOT, "renderer", name)), `renderer/${name} exists; the renderer takes no dependencies`);
+     HTML. And no configuration of its own -- it is not a site. */
+  for (const name of ["netlify.toml", "package.json", "package-lock.json", "node_modules"]) {
+    assert.ok(!existsSync(join(ROOT, "renderer", name)), `renderer/${name} exists; the renderer is not a deployment`);
   }
 }
 
@@ -2227,7 +2250,7 @@ async function worker() {
       production: false,
       env: { HOSTED_APP_ORIGIN: app.origin, HOSTED_RENDER_ORIGIN: renderer.origin },
     });
-    const built = await loadRendererBundle(distDir);
+    const built = await loadRendererBundle(build, distDir, app.origin);
     bundle.headers = built.headers;
     bundle.files = built.files;
 

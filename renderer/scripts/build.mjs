@@ -5,22 +5,27 @@
  *   node renderer/scripts/build.mjs [--out <dir>] [--local-test]
  *
  * There is nothing to compile. What this script exists for is the part of the
- * renderer that cannot be a committed file: the two places the exact configured
- * application origin has to appear, and the security headers that a static host
- * will not write on its own.
+ * renderer that cannot be a committed file: the exact configured application
+ * origin, which has to reach both the page and the response policy.
  *
- *  - `_headers` carries the response policy, and `frame-ancestors` in it names
- *    the one origin allowed to frame this renderer. That rule cannot be written
- *    in the HTML: a `meta` element may not express `frame-ancestors` at all, and
- *    the legacy `X-Frame-Options: SAMEORIGIN` the root deployment sets would be
- *    exactly wrong here, since the whole point is to be framed by a different
- *    site and by nobody else. So this build owns the header set, and the deployed
- *    `netlify.toml` sets none, leaving one authority rather than two that can
- *    disagree.
- *  - `renderer-config.js` carries the same origin into the page, where
+ *  - `renderer-config.js` carries the origin into the page, where
  *    `mountRenderer` compares it against `event.origin` by exact string equality.
+ *    It is the one file this build generates, and the deployed tree is therefore
+ *    exactly the three files in `public/` plus this one.
+ *  - `rendererHeaders` and `headersFile` express the response policy, and
+ *    `frame-ancestors` in it names the one origin allowed to frame this
+ *    renderer. That rule cannot be written in the HTML: a `meta` element may not
+ *    express `frame-ancestors` at all. It is no longer written to a `_headers`
+ *    file either. The renderer shell is published into the one site's publish
+ *    tree, under `/_render/`, where the host-aware edge gate applies this header
+ *    set to the render host and the application's own set to the application
+ *    host. A `_headers` file beside the gate would be a second authority on one
+ *    deployment, and Netlify emits every matching rule: a browser handed two
+ *    `Content-Security-Policy` headers enforces their intersection, so the
+ *    disagreement would surface as a page that is more dead, not more open.
+ *    These exports stay because the gate is their one consumer.
  *
- * Both are the reason the origin is parsed rather than pasted. A build-time
+ * The origin is parsed rather than pasted for both of them. A build-time
  * substitution that concatenated an operator-supplied string into a header line
  * or into script source would be an injection point in a file nobody reads
  * again: a newline in the value forges a header, a quote in it escapes the
@@ -53,9 +58,9 @@ const PUBLIC_DIR = join(RENDERER_ROOT, "public");
 /** The two C6 keys this deployment reads. It reads no others, and no secrets. */
 export const RENDERER_CONFIG_KEYS = Object.freeze(["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN"]);
 
-/** The files copied verbatim from `public/`, and the two that are generated. */
+/** The files copied verbatim from `public/`, and the one that is generated. */
 export const STATIC_FILES = Object.freeze(["index.html", "renderer.js", "renderer.css"]);
-export const GENERATED_FILES = Object.freeze(["renderer-config.js", "_headers"]);
+export const GENERATED_FILES = Object.freeze(["renderer-config.js"]);
 
 /**
  * The characters an origin may contain once it has been through `URL`.
@@ -235,7 +240,14 @@ export function rendererHeaders(appOrigin) {
   ];
 }
 
-/** The Netlify `_headers` file for that policy, applied to every path. */
+/**
+ * That policy as a Netlify `_headers` body, applied to every path.
+ *
+ * No build writes this file any more — the edge gate is the one authority on a
+ * merged site. It is kept as the single readable spelling of the header set: the
+ * gate applies it, and the renderer oracle serves its own fixtures with it, so
+ * both are reading the same lines rather than two transcriptions of them.
+ */
 export function headersFile(appOrigin) {
   const lines = ["/*"];
   for (const [name, value] of rendererHeaders(appOrigin)) lines.push(`  ${name}: ${value}`);
@@ -281,11 +293,12 @@ export async function buildRenderer({ outDir, env = process.env, production = tr
 
   const target = resolve(outDir);
   /* The next line deletes this directory, so it is worth being sure what it is.
-     `--out .` from `renderer/` would otherwise delete `public/`, `scripts/` and
-     `netlify.toml` and then fail copying a file it had just removed -- the
-     working copy gone and nothing published. `--out ..` and `--out /` are the
-     same shape. A target that contains the source is refused rather than
-     emptied. */
+     `--out .` from `renderer/` would otherwise delete `public/` and `scripts/`
+     and then fail copying a file it had just removed -- the working copy gone
+     and nothing published. `--out ..` and `--out /` are the same shape. A target
+     that contains the source is refused rather than emptied. The site builder
+     passes `_site/_render/`, which is a fresh subdirectory of the publish tree
+     and not the publish tree itself, for exactly this reason. */
   const forbidden = [RENDERER_ROOT, PUBLIC_DIR, resolve(RENDERER_ROOT, "scripts"), process.cwd()];
   for (const path of forbidden) {
     /* `path.startsWith(`${target}/`)` is the obvious spelling and it is wrong
@@ -321,7 +334,6 @@ export async function buildRenderer({ outDir, env = process.env, production = tr
     await cp(join(PUBLIC_DIR, name), join(target, name));
   }
   await writeFile(join(target, "renderer-config.js"), configScript(appOrigin), "utf8");
-  await writeFile(join(target, "_headers"), headersFile(appOrigin), "utf8");
 
   /* The deployable tree is exactly the files named above. Reading the directory
      back rather than reporting the list that was just written is what makes a
@@ -367,8 +379,9 @@ function parseArguments(argv) {
 
 async function main(argv) {
   const { out, production } = parseArguments(argv);
-  /* Relative to the working directory, which is `renderer/` when Netlify runs
-     the build command from this deployment's base directory. */
+  /* Relative to the working directory. The one site's build calls
+     `buildRenderer` directly with an absolute `_site/_render/`; this entry point
+     is what a person uses to inspect the tree by hand. */
   const result = await buildRenderer({
     outDir: resolve(out),
     env: process.env,

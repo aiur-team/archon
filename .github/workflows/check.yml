@@ -145,13 +145,13 @@ jobs:
       # object Netlify packages -- rather than off the TOML or off the runbook
       # prose. It contacts no provider, reads no credential and needs no network.
       #
-      # One contract here is asserted against a synthetic fixture by choice, not
-      # by necessity: AHU-005's renderer build has merged, and
-      # `scripts/test-hosted-renderer.mjs` already drives it for real. This
-      # runner asserts only the *invocation* contract around it -- that the
-      # command `renderer/netlify.toml` declares, run from the declared base
-      # directory, emits the declared publish directory -- and does so against a
-      # fixture so that two runners are not in charge of one output.
+      # Its renderer half is now the merged deployment's invocation contract:
+      # there is no `renderer/netlify.toml` with a command and a publish
+      # directory of its own, so what it asserts instead is that the one build
+      # command produces the renderer shell inside the one publish tree, and
+      # that neither the shell nor the configuration carries a second header
+      # authority. `scripts/test-hosted-renderer.mjs` still owns driving the
+      # renderer build itself, so two runners are not in charge of one output.
       #
       # It runs after the root install because it links against
       # `netlify/lib/hosted`, which resolves `tldts` out of `node_modules`.
@@ -180,40 +180,6 @@ jobs:
       # against an injected fetch so no probe leaves the runner.
       - name: the live acceptance gate can fail
         run: node --test --test-timeout=30000 scripts/test-hosted-live.test.mjs
-
-      # The hosted deployment's safety is mostly in what its TOML does NOT say:
-      # no edge function (the legacy all-path gate resolves Netlify Identity and
-      # DOC_OWNERS, the wrong authorities here), no build command (so a deploy
-      # never compiles docbuild), no `included_files` (which would widen the
-      # deploy tree back over `netlify/` with CI green), and no environment
-      # beyond the Node version, since every C6 key is operator-set. Absences
-      # are exactly what a diff review skims, so they are asserted here the same
-      # way the root deployment's edge gate is.
-      - name: hosted deploy config is fail-closed
-        run: |
-          node --input-type=module <<'NODE'
-          import assert from "node:assert/strict";
-          import { readFileSync } from "node:fs";
-
-          const toml = readFileSync("hosted/netlify.toml", "utf8");
-          /* Comments carry the reasons for every absence below, and matching
-             them would pass a file that says one thing and deploys another. */
-          const live = toml.replace(/^\s*#.*$/gm, "");
-
-          assert.match(live, /^\s*publish\s*=\s*"public"\s*$/m, "publish must be public/");
-          assert.match(live, /^\s*directory\s*=\s*"functions"\s*$/m, "functions.directory must be functions/");
-          assert.match(live, /^\s*NODE_VERSION\s*=\s*"[^"]+"\s*$/m, "build.environment must pin NODE_VERSION");
-
-          assert.doesNotMatch(live, /\[\[edge_functions\]\]/, "hosted carries no edge function");
-          assert.doesNotMatch(live, /^\s*command\s*=/m, "hosted has nothing to build");
-          assert.doesNotMatch(live, /included_files/, "included_files would widen the deploy tree");
-
-          const environment = live.match(/^\[build\.environment\]$([\s\S]*?)(?=^\[|\Z)/m);
-          assert.ok(environment, "missing [build.environment]");
-          const keys = [...environment[1].matchAll(/^\s*([A-Za-z_][\w]*)\s*=/gm)].map((match) => match[1]);
-          assert.deepEqual(keys, ["NODE_VERSION"], "no secret or C6 key belongs in git");
-          console.log("PASS  hosted deploy config is fail-closed");
-          NODE
 
       # notify() runs after the authoritative write, so a body it rejects that
       # the store accepted is a 500 for a comment that already landed. The two
@@ -276,6 +242,12 @@ jobs:
             templates/docbuild/dist/publish.test.js
           node --test scripts/connect.test.mjs
           node --test scripts/temp-roots.test.mjs
+          # The site build's own pre-flight, against an injected fetch. What it
+          # guards is a Netlify setting nothing in this repository can hold --
+          # whether the site's default *.netlify.app hostname is redirected to
+          # the primary domain, which would collapse the renderer origin onto
+          # the application's registrable site with every other gate green.
+          node --test scripts/check-site-hostname.test.mjs
           node --experimental-vm-modules --test netlify/lib/identity.test.mjs
           # The permanent regression runners are standalone supervisors, not
           # `node --test` files: each one names itself, forks its own matrices
@@ -341,8 +313,8 @@ jobs:
           node --experimental-vm-modules scripts/test-p4-k.mjs contract
           node scripts/test-p4-k-browser.mjs
           # AHU-005's renderer oracle. It builds `renderer/` into a temporary
-          # root, serves that output on its own loopback origin with the
-          # generated `_headers` applied to every response, and drives the
+          # root, serves that output on its own loopback origin under the
+          # header set the build spells out as `headersFile`, and drives the
           # isolation matrix against a separate account origin and a third
           # adversary origin. Two engines rather than one: the design rests on a
           # content-security policy being inherited into a sandboxed `srcdoc`
@@ -440,28 +412,78 @@ jobs:
             echo "SKIP scripts/test-p4-k-hosted.mjs (no operator credentials)"
           fi
 
-      - name: edge gate config is fail-closed
+      # One site, one deploy configuration, and its safety is mostly in what it
+      # does NOT say.
+      #
+      # The gate runs on every path with no `excludedPath`, because it is the one
+      # thing that can tell the render host from the application host: a path
+      # excluded from it is a path with no host classification and no security
+      # header at all. And no security header is written here, because the two
+      # hosts need different answers and a TOML rule cannot ask which host it is
+      # on. Netlify emits every matching rule and a browser handed two
+      # `Content-Security-Policy` headers enforces their intersection, so a
+      # policy left in this file could only make a page more dead.
+      #
+      # The last assertion is the one that keeps the merge from coming apart: a
+      # second `netlify.toml` anywhere in the tree is a second site, and a second
+      # site is a second header authority that this one cannot see.
+      - name: deploy config is fail-closed
         run: |
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
           import { readFileSync } from "node:fs";
 
           const toml = readFileSync("netlify.toml", "utf8");
+          /* Comments carry the reasons for every absence below, and matching
+             them would pass a file that says one thing and deploys another. */
+          const live = toml.replace(/^\s*#.*$/gm, "");
+
+          assert.match(live, /^\s*command\s*=\s*"templates\/build --site"\s*$/m, "one build command");
+          assert.match(live, /^\s*publish\s*=\s*"_site"\s*$/m, "one publish directory");
+          assert.match(live, /^\s*directory\s*=\s*"netlify\/functions"\s*$/m, "one functions directory");
+
           const marker = "[[edge_functions]]";
-          const start = toml.indexOf(marker);
+          const start = live.indexOf(marker);
           assert.notEqual(start, -1, "missing [[edge_functions]] block");
-          assert.equal(toml.indexOf(marker, start + marker.length), -1, "expected exactly one edge_functions block");
-          const tail = toml.slice(start + marker.length);
+          assert.equal(live.indexOf(marker, start + marker.length), -1, "expected exactly one edge_functions block");
+          const tail = live.slice(start + marker.length);
           const nextBlock = tail.search(/^\[/m);
           const block = nextBlock === -1 ? tail : tail.slice(0, nextBlock);
           assert.match(block, /^\s*path\s*=\s*"\/\*"\s*$/m);
           assert.match(block, /^\s*function\s*=\s*"gate"\s*$/m);
-          const line = block.match(/^\s*excludedPath\s*=\s*\[(.*)\]\s*$/m);
-          assert.ok(line, "missing excludedPath");
-          const quoted = [...line[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-          assert.deepEqual(quoted, ["/login/*", "/api/*", "/_assets/*"]);
-          assert.equal(line[1].replace(/"[^"]+"/g, "").replace(/[\s,]/g, ""), "");
-          console.log("PASS  edge gate config is fail-closed");
+          assert.doesNotMatch(block, /excludedPath/, "a path excluded from the gate has no headers and no host classification");
+
+          for (const header of ["X-Frame-Options", "Content-Security-Policy", "Referrer-Policy"]) {
+            assert.doesNotMatch(live, new RegExp(header, "i"), `${header} belongs to the gate, not to TOML`);
+          }
+
+          /* Every environment block, inventoried. This rule came from the
+             deleted hosted configuration, where it kept a C6 key out of git;
+             merging the deployments would otherwise have dropped it, and an
+             AUTH0_CLIENT_SECRET committed here would pass every other gate.
+             Values set in netlify.toml are also build-scoped rather than
+             available to a function at runtime, so a secret here would be a
+             secret in git that did not even work. */
+          /* `gm` for the leading `^`, and `(?![\s\S])` rather than `$` for the
+             end: under `m` a `$` would close the block at the end of its own
+             header line, every body would be empty, and this inventory would
+             read nothing while looking exactly like it read something. The
+             non-empty assertions on both sides are what turn that mistake into
+             a failure instead of the silent pass this step exists to be. */
+          const environments = [...live.matchAll(/^\[(build\.environment|context\.[^\]]+\.environment)\]([\s\S]*?)(?=\n\[|(?![\s\S]))/gm)];
+          assert.ok(environments.length > 0, "missing [build.environment]");
+          for (const [, name, body] of environments) {
+            const keys = [...body.matchAll(/^\s*([A-Za-z_][\w]*)\s*=/gm)].map((match) => match[1]);
+            const allowed = name === "build.environment" ? ["NODE_VERSION"] : ["DOC_ENV"];
+            assert.deepEqual(keys, allowed, `[${name}] may declare only ${allowed.join(", ")}`);
+          }
+
+          const tomls = execFileSync("git", ["ls-files", "*netlify.toml"], { encoding: "utf8" })
+            .split("\n")
+            .filter((path) => path !== "");
+          assert.deepEqual(tomls, ["netlify.toml"], "a second netlify.toml is a second site");
+          console.log("PASS  deploy config is fail-closed");
           NODE
 
       - name: complete site builds

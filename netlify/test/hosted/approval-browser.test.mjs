@@ -69,11 +69,9 @@ import { createClock, createProviderDouble, sequentialRandomBytes } from "./help
 
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SELF), "..", "..", "..");
-/* The hosted deployment definition is still `hosted/netlify.toml`, which ACN-001
-   folds into the root one; the pages it serves already live in the single deploy
-   tree at `netlify/public/`. Two anchors rather than one, because the two halves
-   no longer share a parent. */
-const HOSTED_TOML = join(ROOT, "hosted", "netlify.toml");
+/* One deployment definition, and the pages it serves live beside it in the
+   single deploy tree at `netlify/public/`. */
+const TOML = join(ROOT, "netlify.toml");
 const PUBLIC = join(ROOT, "netlify", "public");
 const PLAYWRIGHT = "playwright@1.55.0";
 /* Per `spawnSync` call, and there are two of them - the package and the browser.
@@ -119,26 +117,30 @@ const OTHER_ACCOUNT = {
 };
 
 /**
- * The deploy configuration this matrix serves the page under.
+ * Where the policy this matrix serves the page under is decided.
  *
- * The policy above is a hand copy on purpose - a matrix that read the header out
- * of the file it is meant to hold would pass whatever the file said. But nothing
- * else in the repository asserts that block exists: the workflow's deploy-config
- * step checks only absences, so deleting `[[headers]]`, dropping
- * `connect-src 'self'` or adding `'unsafe-inline'` to `script-src` would leave
- * every gate green while this matrix kept enforcing the old, stricter policy.
- * Reading the file *once*, to check it still declares the same string, closes
- * that loop without making the enforcement circular.
+ * It used to be `[[headers]]` in the hosted deployment's own TOML, and this
+ * function read that block once to check the hand copy above had not gone stale
+ * against it. On one site answering on two hosts, TOML cannot decide it any
+ * more: Netlify emits every matching rule and a browser handed two
+ * `Content-Security-Policy` headers enforces their intersection, so a rule here
+ * could only make the sign-in and approval pages *more* dead. The host-aware
+ * edge gate is the single authority, and holding this matrix's policy equal to
+ * the gate's is that ticket's to close.
+ *
+ * What survives is the half this file can still check: TOML declares no policy
+ * at all, so the second authority cannot come back.
+ *
+ * The `/publish/authorize` rewrite moved too, out of TOML and into the publish
+ * tree's generated `_redirects`. `templates/docbuild/src/site.test.ts` builds a
+ * site and asserts the rule is in it, which is a stronger claim than a string
+ * match here and leaves one owner for it rather than two.
  */
-async function assertDeployedPolicyMatches(failures) {
-  const toml = await readFile(HOSTED_TOML, "utf8");
-  if (!toml.includes(`Content-Security-Policy = "${CSP}"`)) {
-    failures.push("netlify.toml no longer declares the policy this matrix enforces");
-  }
-  /* And the rewrite that puts the page on the path C3 freezes. Netlify's
-     extensionless serving is post-processing, which this deployment disables. */
-  if (!/from = "\/publish\/authorize"/.test(toml) || !/to = "\/publish\/authorize\.html"/.test(toml)) {
-    failures.push("netlify.toml no longer rewrites /publish/authorize to the committed page");
+async function assertNoSecondPolicyAuthority(failures) {
+  const toml = await readFile(TOML, "utf8");
+  const live = toml.replace(/^\s*#.*$/gm, "");
+  if (/content-security-policy/i.test(live)) {
+    failures.push("netlify.toml declares a content policy; the edge gate is the only authority");
   }
 }
 
@@ -479,7 +481,7 @@ async function runMatrix(chromium) {
   const eq = (actual, expected, message) =>
     check(actual === expected, `${message} (saw ${JSON.stringify(actual)}, wanted ${JSON.stringify(expected)})`);
 
-  await assertDeployedPolicyMatches(failures);
+  await assertNoSecondPolicyAuthority(failures);
 
   const browser = await chromium.launch();
   try {

@@ -7,8 +7,10 @@
 # dependencies; TypeScript is the only devDependency and it is fetched once.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
 pkg="$here/docbuild"
 entry="$pkg/dist/cli.js"
+preflight="$root/scripts/check-site-hostname.mjs"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "error: node is not installed. Node 18 or later is required." >&2
@@ -21,5 +23,22 @@ if [[ ! -f "$entry" || -n "$newest_src" ]]; then
   [[ -d "$pkg/node_modules" ]] || npm install --prefix "$pkg" --silent
   npm run --prefix "$pkg" --silent build
 fi
+
+# The site build serves two hosts off one deploy, and the renderer host is the
+# site's own `*.netlify.app` hostname. A platform setting can redirect that
+# hostname to the primary domain, which would silently collapse the two origins
+# into one registrable site. Nothing in the repository can hold that setting, so
+# the build asks before it publishes. Off Netlify the check has no site to ask
+# and skips; see scripts/check-site-hostname.mjs.
+#
+# It runs before the builder rather than after, because the point is to stop
+# short of publishing rather than to annotate what was already published. It is
+# a step of the site build only: a single-document build serves no renderer.
+for arg in "$@"; do
+  if [[ "$arg" == "--site" ]]; then
+    node "$preflight"
+    break
+  fi
+done
 
 exec node "$entry" "$@"
