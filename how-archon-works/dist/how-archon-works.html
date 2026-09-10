@@ -2140,9 +2140,13 @@ by how hard they are.</p>
 <h2 data-aid="aec903f93" data-editable>What is deliberately not being built</h2>
 
 <ul>
-  <li data-aid="a47d367cc"><b>A second identity vendor.</b> No GitHub OAuth, no Auth0, no single sign-on and no multi-factor
-  authentication. If an organisation mandates either of the last two, this design is replaced rather than
-  extended.</li>
+  <li data-aid="a78a79416"><b>A second identity vendor.</b> There is one, and it is Auth0 &mdash; which brokers Google and
+  GitHub, so a visitor continues with an account they already have and Archon never sees a password. This
+  entry originally read "no GitHub OAuth, no Auth0, no single sign-on"; the platform now has all three
+  through one broker, and the sentence is kept rather than deleted because what it was defending is still
+  true: <b>one</b> identity vendor, chosen once. No second broker, no per-deployment provider matrix, and
+  still no multi-factor authentication of Archon's own &mdash; that is the identity provider's to enforce,
+  and an organisation that mandates it configures its own tenant.</li>
   <li data-aid="afc1f0f1c"><b>Cross-document features.</b> No "shared with me" list, no cross-document revoke, no unread
   count and no full-text search of comment bodies. The storage decision rules these out, and they were cut
   deliberately rather than deferred.</li>
@@ -7931,22 +7935,31 @@ runHistory();
     }
   }
 
-  // Presentation only, and conservative by construction: a name is broadcast to
-  // everybody else in the document, so it is only ever the name of somebody the
-  // owner has actually admitted.
+  // Presentation only, and conservative by construction: a label is broadcast to
+  // everybody else in the document, so it is only ever a name somebody chose to
+  // put on a document they were deliberately given access to.
   //
   // The test used to be the compatibility `roles` field -- one of `member` or
   // `guest`, derived from a site-wide organisation email suffix. ACN-006 removed
-  // that suffix rule and the field with it, so the successor is the document
-  // role, which is both the thing that was always authoritative and a narrower
-  // question: not "does this address end the right way" but "has this person
-  // been given access to this document". A caller with no role, and a legacy
-  // body that carries no role at all, both stay `Guest`.
+  // that suffix rule and the field with it. The successor is the document role,
+  // which is both what was always authoritative and a narrower question: not
+  // "does this address end the right way" but "has this person been given access
+  // to this document".
   //
-  // There is no email, sub, role or domain fallback in either branch.
+  // `viewer` is deliberately excluded from the named set even though it is a
+  // real role. Sign-in is open to anyone with a Google or GitHub account, and on
+  // a deployment with `PUBLIC_DEFAULT_ROLE` set, `viewer` is exactly the role a
+  // stranger who was never named receives -- the page cannot tell that apart from
+  // an invited viewer, so it broadcasts a name for neither. An owner, editor or
+  // commenter reached that role only by being granted or invited.
+  //
+  // A caller with no role, and a legacy body carrying no role at all, stay
+  // `Guest`. There is no email, sub, role or domain fallback in either branch.
+  const NAMED_ROLES = ["owner", "editor", "commenter"];
+
   function deriveLabel(detail) {
     const role = detail.role;
-    if (typeof role !== "string" || !ROLE_VALUES.includes(role) || role === "none") return "Guest";
+    if (typeof role !== "string" || !NAMED_ROLES.includes(role)) return "Guest";
 
     const name = detail.name;
     if (typeof name !== "string" || CONTROL_RE.test(name)) return "Member";

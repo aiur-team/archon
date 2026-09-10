@@ -784,7 +784,7 @@
       "ab1777329",
       "aa4c1a683",
       "aec903f93",
-      "a47d367cc",
+      "a78a79416",
       "afc1f0f1c",
       "a0fad8983",
       "a783b075f"
@@ -811,7 +811,7 @@
       "The Problem section rests on authoring becoming cheap, and this is the bill for that. A build failure catches an unbalanced tag, a duplicate section id, an unfilled placeholder and an orphaned anchor. Nothing catches a confident sentence that is wrong. An interactive element that renders correctly and models the system incorrectly is worse than prose, because it looks like evidence.",
       "What changes on the answer: nothing in the architecture, which is why this is last rather than first. But it is the question a reader should leave with, because it is the only one on this list that the design cannot answer — and the comment and suggestion layer this document describes is, at bottom, the proposed answer to it.",
       "What is deliberately not being built",
-      "A second identity vendor. No GitHub OAuth, no Auth0, no single sign-on and no multi-factor authentication. If an organisation mandates either of the last two, this design is replaced rather than extended.",
+      "A second identity vendor. There is one, and it is Auth0 — which brokers Google and GitHub, so a visitor continues with an account they already have and Archon never sees a password. This entry originally read \"no GitHub OAuth, no Auth0, no single sign-on\"; the platform now has all three through one broker, and the sentence is kept rather than deleted because what it was defending is still true: one identity vendor, chosen once. No second broker, no per-deployment provider matrix, and still no multi-factor authentication of Archon's own — that is the identity provider's to enforce, and an organisation that mandates it configures its own tenant.",
       "Cross-document features. No \"shared with me\" list, no cross-document revoke, no unread count and no full-text search of comment bodies. The storage decision rules these out, and they were cut deliberately rather than deferred.",
       "A diagram library. It renders one fixed theme, cannot be checked before publishing, and needs a script the CSP blocks. Diagrams are hand-built from the template's components.",
       "Conflict-free merging of two edits to one block. Two people editing the same block is a genuine conflict and the second writer is told. Merging the text would be the fix that hides the problem."

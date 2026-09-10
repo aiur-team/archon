@@ -286,22 +286,31 @@
     }
   }
 
-  // Presentation only, and conservative by construction: a name is broadcast to
-  // everybody else in the document, so it is only ever the name of somebody the
-  // owner has actually admitted.
+  // Presentation only, and conservative by construction: a label is broadcast to
+  // everybody else in the document, so it is only ever a name somebody chose to
+  // put on a document they were deliberately given access to.
   //
   // The test used to be the compatibility `roles` field -- one of `member` or
   // `guest`, derived from a site-wide organisation email suffix. ACN-006 removed
-  // that suffix rule and the field with it, so the successor is the document
-  // role, which is both the thing that was always authoritative and a narrower
-  // question: not "does this address end the right way" but "has this person
-  // been given access to this document". A caller with no role, and a legacy
-  // body that carries no role at all, both stay `Guest`.
+  // that suffix rule and the field with it. The successor is the document role,
+  // which is both what was always authoritative and a narrower question: not
+  // "does this address end the right way" but "has this person been given access
+  // to this document".
   //
-  // There is no email, sub, role or domain fallback in either branch.
+  // `viewer` is deliberately excluded from the named set even though it is a
+  // real role. Sign-in is open to anyone with a Google or GitHub account, and on
+  // a deployment with `PUBLIC_DEFAULT_ROLE` set, `viewer` is exactly the role a
+  // stranger who was never named receives -- the page cannot tell that apart from
+  // an invited viewer, so it broadcasts a name for neither. An owner, editor or
+  // commenter reached that role only by being granted or invited.
+  //
+  // A caller with no role, and a legacy body carrying no role at all, stay
+  // `Guest`. There is no email, sub, role or domain fallback in either branch.
+  const NAMED_ROLES = ["owner", "editor", "commenter"];
+
   function deriveLabel(detail) {
     const role = detail.role;
-    if (typeof role !== "string" || !ROLE_VALUES.includes(role) || role === "none") return "Guest";
+    if (typeof role !== "string" || !NAMED_ROLES.includes(role)) return "Guest";
 
     const name = detail.name;
     if (typeof name !== "string" || CONTROL_RE.test(name)) return "Member";

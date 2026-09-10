@@ -798,7 +798,13 @@ async function gateMatrix(ts, gateRoot, accessLib) {
   const before = failures;
   const gate = (await import(transpileGate(ts, gateRoot))).default;
 
-  const gateRequest = () => new Request("https://docs.example.invalid/doc/", { method: "GET" });
+  /* The gate short-circuits a request with no session cookie without asking the
+     session route, so this matrix has to present one to reach the access-row
+     logic it exists to exercise. */
+  const gateRequest = () => new Request("https://docs.example.invalid/doc/", {
+    method: "GET",
+    headers: { cookie: "__Host-archon_session=invented-session-token" },
+  });
   const downstream = () =>
     new Response(PAGE, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
   const context = () => ({ next: async () => downstream() });

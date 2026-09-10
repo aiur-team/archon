@@ -314,7 +314,10 @@ async function loadGate() {
  * how the context seams were used. `next` and `rewrite` each default to a
  * throwing seam so a branch that should not touch downstream is caught.
  */
-async function runGate(host, path, { next, rewrite, env, session } = {}) {
+/** The cookie header a request carries unless a test says otherwise. */
+const SESSION_COOKIE_HEADER = "__Host-archon_session=opaque-session-token";
+
+async function runGate(host, path, { next, rewrite, env, session, cookie } = {}) {
   const { gate } = await loadGate();
   control.identifyCalls = 0;
   control.resolveCalls = 0;
@@ -355,7 +358,14 @@ async function runGate(host, path, { next, rewrite, env, session } = {}) {
   };
 
   try {
-    const response = await gate(new Request(`https://${host}${path}`, { method: "GET" }), context);
+    const presented = cookie === undefined ? SESSION_COOKIE_HEADER : cookie;
+    const response = await gate(
+      new Request(`https://${host}${path}`, {
+        method: "GET",
+        headers: presented === null ? {} : { cookie: presented },
+      }),
+      context,
+    );
     return { response, calls };
   } finally {
     globalThis.fetch = realFetch;
@@ -627,4 +637,43 @@ test("the gate projects the session onto the identity resolveRole is given", asy
   } finally {
     control.resolveRole = original;
   }
+});
+
+test("a request with no session cookie is answered without asking the session route", async () => {
+  // The route mints a fresh pre-login binding on every call, so asking about a
+  // request that provably has no session would write a record per page view --
+  // and an unauthenticated flood of gated URLs would be free write amplification
+  // against the store every signed-in read depends on.
+  for (const cookie of [null, "", "other=1", "__Host-archon_login=binding"]) {
+    const { response, calls } = await runGate(APP_HOST, "/some-slug/", { cookie });
+    assert.equal(calls.session.length, 0, `${cookie ?? "(absent)"}: the route is not asked`);
+    assert.equal(response.status, 303, `${cookie ?? "(absent)"}: still a sign-in redirect`);
+    assert.equal(response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+    assert.equal(calls.next, 0, "and the document is never fetched");
+  }
+});
+
+test("a presented session cookie is always resolved by the route, never by the gate", async () => {
+  // Presence only. Expired, revoked and forged all look alike here, and only the
+  // route can tell them apart -- so anything carrying the cookie is asked about.
+  const { calls } = await runGate(APP_HOST, "/some-slug/", {
+    next: () => docPage(),
+    cookie: "__Host-archon_session=a-token-this-deployment-never-issued",
+  });
+  assert.equal(calls.session.length, 1);
+  assert.equal(
+    calls.session[0].headers.get("cookie"),
+    "__Host-archon_session=a-token-this-deployment-never-issued",
+  );
+});
+
+test("the session subrequest is addressed to the configured origin, not the request's", async () => {
+  const { calls } = await runGate(APP_HOST, "/some-slug/", { next: () => docPage() });
+  assert.equal(calls.session[0].url.origin, APP_ORIGIN);
+
+  // With no host configuration there is no configured origin to prefer, so the
+  // request's own is the only one there is -- which is what keeps a
+  // connect-vendored consumer serving.
+  const unconfigured = await runGate(OTHER_HOST, "/some-slug/", { env: {}, next: () => docPage() });
+  assert.equal(unconfigured.calls.session[0].url.origin, `https://${OTHER_HOST}`);
 });

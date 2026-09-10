@@ -1270,6 +1270,27 @@ async function groupThree() {
   await expectNoContent(await legacyKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "renew a record from the old flow");
   eq(legacyStore.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, true), "the vestigial flag is carried, not reinterpreted");
 
+  // A coordinator record written before ACN-006 carries recovery: null. It is
+  // read, the mutation succeeds, and the replacement drops the field for good.
+  const legacyCoordinator = seededStore();
+  legacyCoordinator.put(WRITE_KEY, {
+    v: 1, docId: DOC, epoch: 3, lease: null, recovery: null, transfer: null,
+  });
+  const legacyCoordinatorKit = kitFor(legacyCoordinator);
+  await expectNoContent(await legacyCoordinatorKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "a pre-ACN-006 coordinator record still admits a mutation");
+  check(!("recovery" in coordinatorOf(legacyCoordinator)), "and the field is gone after the write");
+  eq(legacyCoordinator.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, false), "the invitation still landed");
+
+  // One carrying an actual marker is a bootstrap nothing can finish. It stays a
+  // refusal rather than a silent discard.
+  const strandedCoordinator = seededStore();
+  strandedCoordinator.put(WRITE_KEY, {
+    v: 1, docId: DOC, epoch: 3, lease: null, transfer: null,
+    recovery: { invitationKey: inviteKey, email: INVITEE, role: "viewer" },
+  });
+  const strandedKit = kitFor(strandedCoordinator);
+  await expectError(await strandedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 500, "internal-error", "a stranded recovery marker is refused loudly");
+
   // A grant for the same address blocks a new invitation.
   const grantedStore = seededStore();
   grantedStore.put(accessGrantKey(DOC, EDITOR.sub), grantRecord(EDITOR, "editor"));

@@ -101,6 +101,11 @@ const TRANSFER_PHASES = Object.freeze([
 const WRITE_RECORD_KEYS = Object.freeze([
   "v", "docId", "epoch", "lease", "transfer",
 ]);
+
+/** The shape written before ACN-006, tolerated on read while `recovery` is null. */
+const LEGACY_WRITE_RECORD_KEYS = Object.freeze([
+  "v", "docId", "epoch", "lease", "recovery", "transfer",
+]);
 const LEASE_KEYS = Object.freeze(["id", "holder", "acquiredAt", "expiresAt"]);
 const ACTOR_KEYS = Object.freeze(["sub", "name", "email"]);
 const TRANSFER_KEYS = Object.freeze([
@@ -619,7 +624,25 @@ function assertAccessWriteRecord(value, docId, key) {
   if (typeof key !== "string" || key !== writeCoordinatorKey(docId)) {
     throw new TypeError("Invalid write record key");
   }
-  if (!isUnorderedPlainDataObject(value, WRITE_RECORD_KEYS) ||
+  /* The exact key set, plus one tolerated legacy spelling.
+     ACN-006 removed `recovery` from this record along with the account-bootstrap
+     saga it coordinated, and every record written before that carries the field
+     as `recovery: null`. An exact-key check alone would refuse each of those,
+     and the refusal is not recoverable by retrying: `acquireLease()` validates
+     the stored draft before it may write a replacement, so the first mutation
+     on such a document would answer 500 and every later one would too. Reading
+     the legacy shape is therefore not a courtesy, it is the difference between
+     a document whose access can still be revoked and one whose cannot.
+
+     Only `null` is tolerated. A record still carrying an actual marker is a
+     bootstrap that was interrupted by the deploy that removed the machinery to
+     finish it, and nothing here can resume it -- so it stays a loud refusal
+     rather than a silent discard of state somebody would have to know about.
+     Nothing writes the field again: `withLease` and `setTransfer` both emit the
+     current shape, so the first successful mutation drops it for good. */
+  const legacyRecovery = isUnorderedPlainDataObject(value, LEGACY_WRITE_RECORD_KEYS) &&
+    value.recovery === null;
+  if ((!isUnorderedPlainDataObject(value, WRITE_RECORD_KEYS) && !legacyRecovery) ||
       value.v !== 1 || value.docId !== docId ||
       !Number.isSafeInteger(value.epoch) || value.epoch < 0) {
     throw new TypeError("Invalid write record");
@@ -1654,15 +1677,21 @@ export function createAccessHandler(dependencies = {}) {
 
     const store = openStore();
     /* Every record this route writes stamps the actor's address into
-       `invitedBy` or `grantedBy`, and those are validated addresses, not free
-       text. An identity carrying no usable address therefore cannot perform a
-       mutation here — it has nothing to sign the change with.
-       That is now a reachable case rather than a theoretical one: a GitHub
-       identity with no email is a valid session (ACN-006), and one that had
-       been granted ownership by subject would reach this line. It is a refusal
-       the caller can understand and act on by adding an address to their
-       account, so it answers 403 rather than the blanket 500 a malformed
-       server identity gets. */
+       `invitedBy` or `grantedBy`, and those addresses are read back by people:
+       they are what the roster shows and what the audit event names. So the
+       address has to be one the identity provider actually proved.
+
+       Both halves of that are now reachable cases rather than theoretical ones.
+       A GitHub identity with no email at all is a valid session (ACN-006), and
+       sign-in is open, so anyone may present any unproven address to a provider
+       and have it appear on their profile — writing that into a durable record
+       would let somebody sign a share as `ceo@somewhere-else.example` without
+       ever controlling it.
+
+       Both are refusals the caller can understand and act on by adding a
+       verified address to their account, so both answer 403 rather than the
+       blanket 500 a malformed server identity gets. */
+    if (user.emailVerified !== true) throw forbidden();
     let actorEmail;
     try {
       actorEmail = normalizeEmail(user.email);

@@ -39,6 +39,15 @@ const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
 const SESSION_ROUTE = "/api/hosted/session";
 
 /**
+ * The session cookie's name, restated for one question: is there anything to ask
+ * about? It is `netlify/lib/hosted/identity.mjs`'s `SESSION_COOKIE`, copied
+ * rather than imported because that module reaches a store and this is an edge
+ * function. The name is a constant of the deployment, and a wrong copy fails in
+ * the safe direction -- every visitor is asked about, which is the old behaviour.
+ */
+const SESSION_COOKIE = "__Host-archon_session";
+
+/**
  * The sign-in destination grammar ACN-005 froze, restated here for the one
  * question this file asks of it: is the path we are about to refuse one the
  * sign-in page is allowed to send a visitor back to?
@@ -323,6 +332,7 @@ async function applicationHost(
   req: Request,
   url: URL,
   context: GateContext,
+  env: Record<string, string | undefined>,
 ): Promise<Response> {
   /* The renderer shell prefix is never a first-party page on the application
      origin, so it is a not-found before any session check. */
@@ -352,7 +362,7 @@ async function applicationHost(
     return withApplicationHeaders(passed);
   }
 
-  return withApplicationHeaders(await sessionGate(req, url, context));
+  return withApplicationHeaders(await sessionGate(req, url, context, env));
 }
 
 export default async function gate(
@@ -367,7 +377,7 @@ export default async function gate(
      with `X-Robots-Tag: noindex` so it is never indexed. */
   if (host === "other") return notFoundForeignHost();
   if (host === "render") return renderHost(url, context, env);
-  return applicationHost(req, url, context);
+  return applicationHost(req, url, context, env);
 }
 
 
@@ -410,15 +420,42 @@ type SessionOutcome =
  * other reading of "I could not understand the reply" is "nobody is signed in",
  * which is the fail-open this whole shape exists to avoid.
  */
-async function resolveSession(req: Request, url: URL): Promise<SessionOutcome> {
-  const headers = new Headers();
+async function resolveSession(
+  req: Request,
+  url: URL,
+  env: Record<string, string | undefined>,
+): Promise<SessionOutcome> {
   const cookie = req.headers.get("cookie");
-  if (cookie !== null) headers.set("cookie", cookie);
+
+  /* A request carrying no session cookie has nothing for the route to validate:
+     `identifyHosted` answers null on the absent cookie before it reads anything.
+     Asking anyway is not merely wasted -- the route mints a fresh pre-login CSRF
+     binding on every call, so each cookieless request would write a record this
+     gate then discards, and an unauthenticated flood of gated URLs would be free
+     write amplification against the same store every signed-in read depends on.
+     The check is presence-only: a cookie that is expired, revoked or forged is
+     still resolved by the route, because only the route can tell. */
+  if (cookie === null || !cookie.includes(`${SESSION_COOKIE}=`)) {
+    return { kind: "anonymous" };
+  }
+
+  const headers = new Headers();
+  headers.set("cookie", cookie);
   headers.set("accept", "application/json");
+
+  /* The configured origin in preference to the request's own. They are the same
+     origin on a configured deployment -- `classifyHost` has already refused every
+     other hostname by the time this runs -- but a deployment with no `HOSTED_*`
+     configuration classifies every host as the application, and there the
+     request's own origin is the only one there is. Preferring the configured
+     value means the session cookie is never re-sent to a host the deployment did
+     not name whenever it has named one. */
+  const configured = applicationOrigin(env);
+  const target = new URL(SESSION_ROUTE, configured ?? url.origin).toString();
 
   let response: Response;
   try {
-    response = await fetch(new URL(SESSION_ROUTE, url.origin).toString(), {
+    response = await fetch(target, {
       method: "GET",
       headers,
       redirect: "manual",
@@ -494,8 +531,9 @@ async function sessionGate(
   req: Request,
   url: URL,
   context: GateContext,
+  env: Record<string, string | undefined>,
 ): Promise<Response> {
-  const outcome = await resolveSession(req, url);
+  const outcome = await resolveSession(req, url, env);
 
   /* An outage is a plain 503 and never a sign-in redirect. Sending a visitor to
      `/login/` during a store outage would tell them they are signed out, which
