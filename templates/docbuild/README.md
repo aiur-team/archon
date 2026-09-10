@@ -1,7 +1,8 @@
 # @aiur-team/docbuild
 
-Compose an architecture doc into one self-contained HTML file. No runtime
-dependencies; Node 18 or later is the only requirement.
+Compose an architecture doc into one self-contained HTML file, and publish it
+to a hosted service with browser approval by a human. No runtime dependencies;
+Node 18 or later is the only requirement.
 
 A document is a directory holding a `doc.json` and a `sections/` directory of
 HTML fragments. The builder inlines every stylesheet and script into a single
@@ -79,6 +80,106 @@ image, font or script your sections reference. The builder never fetches those
 references, and a strict host renderer may refuse to load them — the generated
 chrome stays usable when it does. Do not describe a hosted artifact as having
 comments or inline editing enabled: it does not.
+
+## Publish it to a hosted service
+
+The package ships a second command, `archon-publish`, which uploads a built
+`--hosted` artifact to an Archon hosted service **after a human approves it in
+a browser**. The agent or script running the command never signs in, never sees
+a GitHub credential or a browser cookie, and never keeps an account login — it
+holds one capability for the single publication it started, and nothing else.
+
+Because a person has to approve it, publishing is deliberately split across
+separate command invocations. `start` returns immediately with a link and a
+pairing code; `resume` picks the same publication up later, in a different
+process, and uploads once approval has happened.
+
+```sh
+npx archon-publish start \
+  --file my-doc/dist/my-doc.hosted.html \
+  --title "My document" \
+  --service https://docs.example.com \
+  --json
+# → exit 10, and one JSON object naming the browser URL, the pairing code and
+#   the request file to resume from.
+
+# The human opens the URL, checks the pairing code matches, signs in, reads the
+# title and byte count, and approves. Then:
+npx archon-publish resume --request <requestFile> --json
+# → exit 0 and the server's receipt, including the document URL.
+```
+
+`status` observes once without uploading, and `cancel` cancels a publication
+that has not completed. All three take `--request <file>` rather than a token,
+so the capability never appears in `ps` output.
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0    | Complete. The server returned a durable receipt with the document URL. |
+| 10   | **Checkpoint, not a failure.** Pending or approved; the command finished normally. Read `nextAction` and call again later. |
+| 20   | The human denied it, or it was cancelled. Terminal. |
+| 21   | The authorization window, or the 24-hour completion receipt, expired. |
+| 22   | Local input, request-state or protocol error. Nothing was published. |
+| 23   | A retryable service or network condition. Run the same command again. |
+
+**Exit 10 is success.** It means the publication exists and is waiting on a
+human. A wrapper that treats every non-zero status as a failure and retries
+`start` will create a second publication for the same document.
+
+### Output
+
+`stdout` is one machine-readable JSON object and nothing else; progress,
+warnings and the human-facing instructions go to `stderr`. No bearer token,
+cookie, raw provider error or unfiltered HTTP body is ever written to either.
+The resolved `serviceOrigin` appears in both, so the person approving can see
+where the document is going.
+
+A completion carries `{documentId, url, ownerAccountId, contentSha256,
+contentBytes}` exactly as the server returned it. The command never guesses a
+URL, an owner or a document identity from the title, the filename or a
+username.
+
+A failure under `--json` prints one object of the same shape with
+`"state": "error"` plus `code` and a bounded `message`, so a wrapper reads the
+outcome the same way whichever it gets. Error text is sanitized and length-
+bounded before it is printed: a hostile service cannot use this command's
+output as a channel.
+
+### Where the destination comes from
+
+`--service` wins, then `ARCHON_PUBLISH_SERVICE`, then the origin baked into the
+release. Nothing else — in particular, not the document, the repository, or any
+tool output the command was handed. Only HTTPS origins are accepted, except
+under `--local-test`, which allows plain HTTP for a loopback host and nothing
+else.
+
+### Private request state
+
+`start` writes a mode-0600 request file into a mode-0700 state directory
+outside your repository: `ARCHON_PUBLISH_STATE_DIR` if set, otherwise
+`$XDG_STATE_HOME/archon-publish`, otherwise `~/.local/state/archon-publish`.
+`--state-dir` overrides it for one run. The file pins the service origin, the
+absolute input path, the approved descriptor and the operation capability, and
+it survives interruption and error — nothing in this command deletes it or your
+source HTML.
+
+The bytes are re-read and re-hashed before every upload. If the file changed
+after the descriptor was fixed, the upload is refused: publishing different
+bytes under an approval a person gave for the old ones is not something a retry
+should be able to do. Build again and start a new publication.
+
+### If an upload answer is lost
+
+The command asks the service rather than guessing. One status call with the
+same capability returns the original receipt when the upload landed durably, so
+a dropped connection does not become a second published document. If the
+24-hour receipt window has passed the command exits 21 and prints a
+`checkPublicationUrl` labelled *Check publication* — a place to sign in and
+look, **not** a receipt and not a claim the document exists. Only owner
+authentication in a browser settles that. No replacement publication is ever
+started automatically.
 
 ## Assets
 
