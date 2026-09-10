@@ -36,6 +36,7 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1476,4 +1477,67 @@ test("--help is the whole request or it is a mistake", async (t: TestContext) =>
   const twice = await cli(["start", "--service", "https://a.example", "--service", "https://b.example"], space.stateDir);
   assert.equal(twice.code, 22, "a repeated flag is refused rather than resolved by precedence");
   assert.match(twice.stderr, /--service given twice/);
+});
+
+test("the restated wire constants still agree with the server's own contract", async (t: TestContext) => {
+  /* This package deliberately restates the client-side subset of the contract
+     rather than importing `hosted/lib/contracts.mjs`: the published tarball is
+     `dist/` alone, so a repo-relative import resolves in development and is
+     simply absent on a user's machine. The cost of that decision is drift —
+     the server could raise a limit and this client would keep enforcing the
+     old one, refusing artifacts the service would have accepted, or worse
+     accepting ones it will not.
+
+     So the copy is checked against the original wherever both exist: in the
+     repository, and therefore in CI, that is every run. From an installed
+     package `hosted/` is not there, and the test reports itself skipped rather
+     than failing on a machine that was never meant to have it.
+
+     The server's constants are read out of the source text rather than
+     imported. `contracts.mjs` pulls in dependencies installed under `hosted/`,
+     which this package does not have and must not acquire; importing it would
+     throw for a reason that has nothing to do with drift, and a guard that
+     turns "could not load" into "skipped" is a guard that silently stops
+     running. Reading the text has no such failure mode, and every shared name
+     must be found for the test to pass, so a change to how those constants are
+     written fails here instead of quietly matching nothing. */
+  const repoContracts = join(COMPILED, "..", "..", "..", "hosted", "lib", "contracts.mjs");
+  if (!existsSync(repoContracts)) {
+    t.skip("hosted/lib/contracts.mjs is not present; this is an installed package, not the repo");
+    return;
+  }
+  const source = readFileSync(repoContracts, "utf8");
+
+  /* Only the names this package restates that the server also states. A
+     constant one side alone owns is not drift. */
+  const shared: Record<string, string | number> = {};
+  for (const key of Object.keys(PUBLISH_CONTRACT)) {
+    const declared = new RegExp(`^\\s*${key}:\\s*(\"[^\"]*\"|'[^']*'|-?\\d+)\\s*,\\s*$`, "m").exec(source);
+    if (declared === null) continue;
+    const literal = declared[1] as string;
+    shared[key] = literal.startsWith('"') || literal.startsWith("'")
+      ? literal.slice(1, -1)
+      : Number(literal);
+  }
+
+  /* The five the two sides are known to share today. If this ever drops, the
+     regex stopped matching rather than the contract shrinking, and that is a
+     failure too. */
+  for (const key of [
+    "TITLE_MAX_SCALARS",
+    "HTML_MAX_BYTES",
+    "AUTHORIZE_PATH",
+    "POLL_INTERVAL_SECONDS",
+    "USER_CODE_MAX_SCALARS",
+  ]) {
+    assert.ok(key in shared, `${key} was not found in hosted/lib/contracts.mjs`);
+  }
+
+  for (const [key, serverValue] of Object.entries(shared)) {
+    assert.equal(
+      PUBLISH_CONTRACT[key as keyof typeof PUBLISH_CONTRACT],
+      serverValue,
+      `PUBLISH_CONTRACT.${key} has drifted from the server's HOSTED_LIMITS.${key}`,
+    );
+  }
 });
