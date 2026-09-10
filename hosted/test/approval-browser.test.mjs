@@ -223,7 +223,18 @@ async function startDeployment(record) {
 
   const server = createServer(async (incoming, outgoing) => {
     const url = new URL(incoming.url, dependencies.origin);
-    seen.push({ method: incoming.method, path: url.pathname });
+    /* The query string and the request headers are recorded as well as the
+       path, because the invariant this matrix has to hold is that the link's
+       secret is exchanged in a same-origin POST body and reaches the server no
+       other way. With only `{method, path}` kept, a bind URL carrying
+       `?s=<browserSecret>` - or a secret copied into a header, or into a
+       `Referer` - passed every case in this file. */
+    seen.push({
+      method: incoming.method,
+      path: url.pathname,
+      search: url.search,
+      headers: { ...incoming.headers },
+    });
 
     const asset = staticAsset(url.pathname);
     if (asset !== null) {
@@ -436,10 +447,31 @@ async function runMatrix(chromium) {
     try {
       await run({ app, page, context });
     } finally {
+      /* Checked after every case rather than in one of them: the rule is about
+         where the secret may appear at all, so the case most likely to break it
+         is whichever one is added next. A fragment is never sent to a server, so
+         any sighting here means some code put it somewhere a fragment is not -
+         a query string, a header, a path - which is also where access logs and
+         proxies would keep it. */
+      for (const entry of app.seen) {
+        check(
+          !carriesTheSecret(entry),
+          `no request may carry the browser secret outside its body: ${entry.method} ` +
+            `${entry.path}${entry.search} ${JSON.stringify(entry.headers)}`,
+        );
+      }
       await context.close();
       await app.close();
     }
   }
+
+  /** Does a recorded request carry the link's secret anywhere but its body? */
+  const carriesTheSecret = (entry) =>
+    entry.path.includes(FIXTURE_RECORD_BROWSER_SECRET) ||
+    entry.search.includes(FIXTURE_RECORD_BROWSER_SECRET) ||
+    Object.entries(entry.headers).some(([name, value]) =>
+      `${name}: ${[value].flat().join(", ")}`.includes(FIXTURE_RECORD_BROWSER_SECRET),
+    );
 
   const link = (app, record = null, secret = FIXTURE_RECORD_BROWSER_SECRET) =>
     `${app.origin}/publish/authorize#${(record ?? RECORDS.pending).id}.${secret}`;
@@ -832,6 +864,43 @@ async function runMatrix(chromium) {
       !(await page.content()).includes(RECORDS.pending.userCode),
       "a refused link must not leak the pairing code",
     );
+  });
+
+  /* -------- 11. a refused bind must not strand a live approval -------- */
+  await withCase(seedRecord(), async ({ app, page }) => {
+    await open(page, link(app));
+    await signIn(page);
+    await page.waitForSelector("#review:not([hidden])");
+
+    /* A second link for the same operation whose secret does not verify. The
+       server releases the browser's binding only *after* it has verified the
+       new secret, so this leaves the earlier, still-pending operation bound.
+       Dropping the remembered id before the request - which is where it used to
+       happen - stranded that operation behind a "no pending publication" no
+       reload could clear, with the visitor already signed in and the server
+       still holding their binding. */
+    /* Away first: navigating from `/publish/authorize` to the same path with a
+       fragment is a same-document navigation, so the bootstrap would never run
+       a second time and the case would assert against the first load. */
+    await page.goto(`${app.origin}/login/`);
+    await open(page, link(app, null, "not-the-browser-secret-but-long-enough-to-be-well-formed"));
+    check(
+      (await statusOf(page)).includes("cannot be used"),
+      "a link whose secret does not verify must be refused",
+    );
+    eq(await page.isVisible("#review"), false, "a refused bind must reveal no document");
+
+    /* Back to the page with no fragment, which is all the visitor has left. */
+    await open(page, `${app.origin}/publish/authorize`);
+    await page.waitForSelector("#review:not([hidden])");
+    eq(await page.textContent("#user-code"), RECORDS.pending.userCode,
+      "the operation the refused link never touched must still be the bound one");
+
+    await page.click("#approve");
+    await page.waitForSelector("#review", { state: "hidden" });
+    await settled(page, "the decision");
+    eq(app.stored().state, "approved",
+      "and must still be approvable after the refusal");
   });
 
   } finally {
