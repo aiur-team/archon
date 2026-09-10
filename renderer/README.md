@@ -1,6 +1,6 @@
 # `renderer/` — the isolated artifact renderer
 
-A static deployment on its own origin whose only job is to display one uploaded
+A static shell served on its own origin whose only job is to display one uploaded
 HTML document. It runs no server code, holds no session, stores nothing and
 never learns which document it is showing.
 
@@ -33,6 +33,15 @@ SameSite purposes, so `render.example.com` beside `app.example.com` would not be
 the cookie-free origin this depends on. `netlify/lib/hosted/config.mjs` owns that rule
 and refuses to start the application when the two configured origins share a
 site.
+
+That rule is unchanged, and **one Netlify site satisfies it.** The renderer is
+not a second deployment: this shell is published into the one site's publish tree
+under `/_render/`, and the site answers on two hostnames — the primary custom
+domain, which is the application, and the site's own `<name>.netlify.app` name,
+which is the renderer. `netlify.app` is on the public suffix list, so the default
+hostname is a *different registrable site* from the custom domain, which is
+exactly what makes one site enough. Netlify does not redirect the default
+hostname to the primary domain; adding such a redirect breaks the renderer.
 
 ## The message contract (C4)
 
@@ -91,12 +100,11 @@ the first try rather than a silent leak later.
 | `public/index.html` | The shell. Inert, explanatory, and carries no sign-in control |
 | `public/renderer.js` | The whole behaviour: `validateRenderMessage`, `buildArtifactSrcdoc`, `mountRenderer` |
 | `public/renderer.css` | Presentation, which is almost nothing |
-| `scripts/build.mjs` | Produces `dist/`: the three files above plus `renderer-config.js` and `_headers` |
-| `netlify.toml` | Deployment configuration. No functions, no edge function, no headers, no environment |
+| `scripts/build.mjs` | Produces the shell: the three files above plus `renderer-config.js` |
 
-There are no dependencies and no lockfile. The build imports nothing but `node:`
-builtins, which is what keeps the published tree five files a reviewer can read
-in full.
+There is no `netlify.toml` here, no `package.json` and no lockfile: this tree is
+not a site. The build imports nothing but `node:` builtins, which is what keeps
+the published shell four files a reviewer can read in full.
 
 ## Building
 
@@ -106,25 +114,41 @@ HOSTED_RENDER_ORIGIN=https://render.example.net \
 node renderer/scripts/build.mjs --out dist
 ```
 
-The output directory is generated and gitignored; `netlify.toml` publishes
-`dist`, and the build refuses a target that is the renderer tree or a directory
-containing it, because `--out .` would otherwise delete the sources it is about
-to copy. It also refuses to run when `public/` holds a file the build does not
-declare, so adding one is a build failure rather than a page that quietly 404s
-its stylesheet.
+The output directory is generated and gitignored. In a real deploy the site
+builder calls this build with `_site/_render/` as its target, so the shell lands
+inside the one publish tree; `--out` above is the same thing by hand. The build
+refuses a target that is the renderer tree or a directory containing it, because
+`--out .` would otherwise delete the sources it is about to copy. It also refuses
+to run when `public/` holds a file the build does not declare, so adding one is a
+build failure rather than a page that quietly 404s its stylesheet.
 
 `--local-test` relaxes the HTTPS requirement for loopback testing. It is an
 argument rather than an environment variable, exactly as it is in
 `netlify/lib/hosted/config.mjs`: no value an operator can set on a deployed site can
 select it.
 
-The build owns the security headers because one of them cannot be a committed
-file. `frame-ancestors` has to name the exact configured application origin, and
-neither a `meta` element nor `X-Frame-Options` can express "this specific other
-site". So `_headers` is generated, `netlify.toml` sets none, and there is one
-authority rather than two that can disagree. In particular there is deliberately
-no `X-Frame-Options`: `SAMEORIGIN` would forbid the one framing this design
-requires.
+**The host-aware edge function is the header authority, and this build is not.**
+`netlify/edge-functions/gate.ts` runs on every path of the one site, and it is
+the only thing that can tell the render hostname from the application hostname —
+so it is the only place a security header may be decided. It emits this shell's
+policy on the render host and the application's own on the application host,
+from the origins in `HOSTED_APP_ORIGIN` and `HOSTED_RENDER_ORIGIN` and never from
+a request `Host` header.
+
+The build therefore generates **no `_headers` file**, and `netlify.toml` declares
+no security header either. `rendererHeaders` and `headersFile` are still exported
+from `scripts/build.mjs`, and the gate is now their one consumer — the policy is
+still expressed here, but it is applied there. A `_headers` file beside the gate
+would be a second authority on one deployment: Netlify emits every matching rule,
+and a browser handed two `Content-Security-Policy` headers enforces their
+intersection, so the disagreement would surface as a page that is more dead
+rather than more open.
+
+`frame-ancestors` is why the policy cannot be a committed file at all: it has to
+name the exact configured application origin, and neither a `meta` element nor
+`X-Frame-Options` can express "this specific other site". In particular there is
+deliberately no `X-Frame-Options`: `SAMEORIGIN` would forbid the one framing this
+design requires.
 
 The configured origin is parsed with `URL`, required to equal its own origin
 serialization, held to a character allowlist with no room for a newline or a
@@ -139,21 +163,24 @@ file nobody reads again.
 | `HOSTED_APP_ORIGIN` | yes | The one origin allowed to frame this renderer and send it a document |
 | `HOSTED_RENDER_ORIGIN` | yes | This deployment's own origin. Must differ from the application origin |
 
-Both are the same keys `netlify/lib/hosted/` reads, deliberately: the application and the
-renderer have to agree on the pair, and two names for one value is how they stop
-agreeing. No secret is read here, because there is none this deployment could
-need.
+Both are the same keys `netlify/lib/hosted/` reads and the same keys the edge gate
+classifies hosts with, deliberately: the application, the renderer and the gate
+have to agree on the pair, and two names for one value is how they stop agreeing.
+One site means one place they are set — `netlify/.env.example` is the template
+and `hosted/OPERATIONS.md` §2 the reference. No secret is read here,
+because there is none this shell could need.
 
 ## Content-security policy, and why the outer one is not strict
 
 A `srcdoc` document inherits its parent's policy and then intersects whatever its
 own `meta` element adds. That inheritance decides the whole header set:
 
-- The **renderer's HTTP policy** allows inline script and style, because the
-  artifact one level down is inline by construction and cannot run otherwise.
-  That allowance is the entire reason this is a separate, cookie-free site — the
-  account application's own policy stays strict and is never asked to make room
-  for it.
+- The **renderer's HTTP policy**, which the gate emits on the render hostname,
+  allows inline script and style, because the artifact one level down is inline
+  by construction and cannot run otherwise. That allowance is the entire reason
+  this is a separate, cookie-free hostname — the account application's own
+  policy, which the gate emits on the application hostname, stays strict and is
+  never asked to make room for it.
 - The **artifact's `srcdoc` policy** is emitted before a single byte of authored
   content and denies `connect-src`, `form-action`, `object-src`, `base-uri`,
   nested frames and every remote subresource. Because policies intersect, an
