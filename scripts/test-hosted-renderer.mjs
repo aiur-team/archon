@@ -45,7 +45,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -484,6 +484,14 @@ window.__app = state;
 var frame = document.createElement("iframe");
 frame.id = "renderer";
 frame.title = "Document renderer";
+/* Without this the account origin reaches the artifact. An \`about:srcdoc\`
+   document inherits its parent's referrer, and the renderer document's
+   referrer is whatever the viewer's frame sent -- in Firefox that is the full
+   application origin, readable from inside the sandbox as
+   \`document.referrer\`. Chromium happens to send nothing; \`no-referrer\` makes
+   both engines agree, and it is part of the contract in \`renderer/README.md\`
+   rather than a property of this fixture. */
+frame.referrerPolicy = "no-referrer";
 frame.src = RENDER_ORIGIN + (params.get("rendererPath") || "/");
 document.getElementById("slot").appendChild(frame);
 window.__rendererFrame = frame;
@@ -705,16 +713,45 @@ function permissiveHeaders(headers) {
   ]);
 }
 
+/**
+ * A second fixture prefix, serving the same bundle with `frame-ancestors`
+ * widened to `*`.
+ *
+ * `frame-ancestors` is what keeps a hostile page from framing the real
+ * renderer at all, which means it also hides whether the readiness message is
+ * addressed to anyone in particular: with no framer there is no one to receive
+ * a `"*"` broadcast, and replacing the readiness `targetOrigin` with `"*"`
+ * survives every other case here. Serving one path with the framing rule
+ * removed puts an adversary parent behind a mounted renderer, so the exact
+ * `targetOrigin` becomes the only thing standing between it and the handshake.
+ * It is a test fixture and never a deployable configuration.
+ */
+const OPEN_FRAMING_PREFIX = "/open-framing/";
+function openFramingHeaders(headers) {
+  return headers.map(([name, value]) => [
+    name,
+    name === "Content-Security-Policy"
+      ? value.replace(/frame-ancestors [^;]*/, "frame-ancestors *")
+      : value,
+  ]);
+}
+
 async function startRenderer(bundle, state) {
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     state.requests.push({ method: request.method, path: url.pathname });
     const permissive = url.pathname.startsWith(PERMISSIVE_PREFIX);
-    const raw = permissive ? `/${url.pathname.slice(PERMISSIVE_PREFIX.length)}` : url.pathname;
+    const openFraming = url.pathname.startsWith(OPEN_FRAMING_PREFIX);
+    const prefix = permissive ? PERMISSIVE_PREFIX : openFraming ? OPEN_FRAMING_PREFIX : "";
+    const raw = prefix === "" ? url.pathname : `/${url.pathname.slice(prefix.length)}`;
     const path = raw === "/" ? "/index.html" : raw;
     const body = bundle.files.get(path);
     const common = Object.fromEntries(
-      permissive ? permissiveHeaders(bundle.headers) : bundle.headers,
+      permissive
+        ? permissiveHeaders(bundle.headers)
+        : openFraming
+          ? openFramingHeaders(bundle.headers)
+          : bundle.headers,
     );
     if (body === undefined) {
       response.writeHead(404, { ...common, "Content-Type": "text/plain; charset=utf-8" });
@@ -755,6 +792,21 @@ async function startEvil(state, config) {
       response.end(
         '<!doctype html><meta charset="utf-8"><title>ready</title>'
         + '<script>parent.postMessage({ type: "archon:ready", v: 1 }, "*");<\/script>',
+      );
+      return;
+    }
+    if (url.pathname === "/listen.html") {
+      /* An adversary parent behind a renderer whose framing rule was removed.
+         It records every message it receives from anywhere; the assertion is
+         that the readiness handshake is not among them. */
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(
+        '<!doctype html><meta charset="utf-8"><title>listener</title>'
+        + "<script>window.__received = [];"
+        + 'addEventListener("message", function (event) {'
+        + " window.__received.push({ origin: event.origin, data: event.data });"
+        + "});<\/script>"
+        + `<iframe id="stolen" title="stolen renderer" src="${config.renderOrigin}${OPEN_FRAMING_PREFIX}"></iframe>`,
       );
       return;
     }
@@ -982,6 +1034,130 @@ async function assertBuildRefusesInjection() {
   );
 }
 
+/**
+ * The build refuses every target that would destroy the tree it is built from.
+ *
+ * `buildRenderer` opens with `rm -rf` on its output directory, so the argument
+ * that names that directory is the most dangerous input this repository takes.
+ * `--out .` and `--out ..` from `renderer/` delete the sources; `--out /` is the
+ * same shape and was, until this test, waved through by a prefix comparison
+ * that no absolute path can satisfy. Each of these must be refused *before*
+ * anything is removed, which is what makes it safe to assert them against the
+ * real working tree.
+ */
+async function assertBuildRefusesUnsafeTargets(tempRoot) {
+  const build = await import(pathToFileURL(join(ROOT, "renderer/scripts/build.mjs")).href);
+  const rendererRoot = join(ROOT, "renderer");
+  const env = { HOSTED_APP_ORIGIN: "https://app.example.com", HOSTED_RENDER_ORIGIN: "https://render.example.net" };
+
+  for (const outDir of ["/", rendererRoot, join(rendererRoot, "public"), join(rendererRoot, "scripts"), ROOT]) {
+    await assert.rejects(
+      build.buildRenderer({ outDir, production: true, env }),
+      (error) => error.name === "RendererBuildError" && /renderer tree/.test(error.message),
+      `the build accepted --out ${outDir}`,
+    );
+  }
+  /* And the sources are all still there, which is the assertion the ones above
+     exist to protect. */
+  assert.deepEqual(
+    (await readdir(join(rendererRoot, "public"))).sort(),
+    ["index.html", "renderer.css", "renderer.js"],
+    "the refused targets removed renderer sources anyway",
+  );
+
+  /* A legitimate sibling target is still accepted, so the guard above is a
+     rule about containment rather than a build that refuses everything. */
+  const ok = join(tempRoot, "dist-target-guard");
+  const result = await build.buildRenderer({ outDir: ok, production: true, env });
+  assert.equal(result.files.length, 5, "a legitimate --out was refused");
+  await rm(ok, { recursive: true, force: true });
+}
+
+/**
+ * A file in `public/` that the build does not declare is a build failure.
+ *
+ * `STATIC_FILES` is both what gets copied and what the output is checked
+ * against, so the two sides drift together in silence unless something holds
+ * the list equal to the directory. Proving that needs a `public/` with an
+ * undeclared file in it, so the whole renderer tree is copied and the copy's
+ * own `build.mjs` -- which resolves its root from its own location -- is the
+ * one that runs. Nothing is planted in the working tree.
+ */
+async function assertBuildRefusesUndeclaredPublicFile(tempRoot) {
+  const copy = join(tempRoot, "renderer-copy");
+  await rm(copy, { recursive: true, force: true });
+  await cp(join(ROOT, "renderer"), copy, { recursive: true });
+  const build = await import(pathToFileURL(join(copy, "scripts", "build.mjs")).href);
+  const env = { HOSTED_APP_ORIGIN: "https://app.example.com", HOSTED_RENDER_ORIGIN: "https://render.example.net" };
+  const outDir = join(tempRoot, "dist-undeclared");
+
+  /* The copy builds, so a failure below is about the planted file and not
+     about the copy. */
+  const before = await build.buildRenderer({ outDir, production: true, env });
+  assert.equal(before.files.length, 5, "the copied renderer tree does not build");
+
+  await writeFile(join(copy, "public", "print.css"), "@media print { body { color: #000 } }\n", "utf8");
+  await assert.rejects(
+    build.buildRenderer({ outDir, production: true, env }),
+    (error) => error.name === "RendererBuildError" && /print\.css/.test(error.message),
+    "an undeclared file in public/ was published without being declared",
+  );
+
+  await rm(copy, { recursive: true, force: true });
+  await rm(outDir, { recursive: true, force: true });
+}
+
+/**
+ * `renderer/netlify.toml` says it declares no functions, no edge functions, no
+ * headers and no environment values. Until this ran, all four were prose.
+ *
+ * AHU-011 owns the deployment configuration and will inherit this file; what it
+ * should inherit is a guard rather than a promise, so that adding a function to
+ * the one origin that renders arbitrary HTML, or a second header authority that
+ * disagrees with the generated `_headers`, fails here first.
+ */
+async function assertRendererDeploymentConfig() {
+  const toml = await readFile(join(ROOT, "renderer", "netlify.toml"), "utf8");
+  /* Comments carry the words this checks for, and a rule that a comment can
+     satisfy is not a rule. */
+  const config = toml
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+
+  for (const [pattern, why] of [
+    [/^\s*\[functions[.\]]/m, "declares a [functions] block; this origin runs no server code"],
+    [/^\s*\[\[edge_functions\]\]/m, "declares an edge function; the legacy identity gate belongs to the root deploy"],
+    [/^\s*\[\[headers\]\]/m, "declares headers; the build owns them, and two authorities can disagree"],
+    [/^\s*\[context[.\]]/m, "declares a deploy context; the renderer is configured one way or not at all"],
+    [/x-frame-options/i, "names X-Frame-Options; SAMEORIGIN would forbid the framing this design requires"],
+  ]) {
+    assert.ok(!pattern.test(config), `renderer/netlify.toml ${why}`);
+  }
+
+  const environment = /\[build\.environment\]([\s\S]*?)(?=\n\[|$)/.exec(config);
+  const assigned = [...(environment ? environment[1] : "").matchAll(/^\s*([A-Za-z0-9_]+)\s*=/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(
+    assigned,
+    ["NODE_VERSION"],
+    "renderer/netlify.toml sets an environment value other than the Node version",
+  );
+  assert.match(config, /^\s*publish\s*=\s*"dist"$/m, "renderer/netlify.toml does not publish dist");
+  assert.match(
+    config,
+    /^\s*command\s*=\s*"node scripts\/build\.mjs"$/m,
+    "renderer/netlify.toml does not run the renderer build",
+  );
+
+  /* No lockfile and no manifest: the build imports `node:` builtins only, and a
+     dependency here would be a dependency on the origin that frames hostile
+     HTML. */
+  for (const name of ["package.json", "package-lock.json", "node_modules"]) {
+    assert.ok(!existsSync(join(ROOT, "renderer", name)), `renderer/${name} exists; the renderer takes no dependencies`);
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * The browser matrix.
  * ------------------------------------------------------------------ */
@@ -1049,6 +1225,7 @@ const MATRIX_CASES = Object.freeze([
   "served-response-policy",
   "standalone",
   "hostile-framer",
+  "readiness-target-origin",
   "happy-path",
   "hostile-payload",
   "fragment-links",
@@ -1211,6 +1388,43 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     assert.ok(state.evil.requests.length > evilBefore, named("the adversary origin is reachable at all"));
   });
 
+  /* ---- readiness is addressed, not broadcast ---- */
+
+  await withContext("readiness-target-origin", async (context) => {
+    /* `frame-ancestors` normally stops this page from framing the renderer, and
+       that is exactly why it hides the readiness `targetOrigin`: with nobody
+       able to frame it, a `"*"` broadcast has no audience and no case fails.
+       Here the framing rule alone is removed, so a mounted renderer sits inside
+       an adversary parent and the exact target origin is the only remaining
+       guard. The parent must hear nothing. */
+    const page = await context.newPage();
+    await page.goto(`${evilOrigin}/listen.html`);
+    const stolen = await waitFor(
+      () => rendererFrameOf(page, renderOrigin),
+      named("the renderer never loaded for the open-framing fixture"),
+    );
+
+    /* The positive control: the renderer really did mount and really did post
+       its readiness message. Without this the assertion below would also pass
+       for a renderer that never ran. */
+    await waitFor(
+      async () => (await rendererState(stolen)).state === "waiting",
+      named("the renderer never mounted inside the adversary frame"),
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    const received = await page.evaluate(() => window.__received.map((entry) => ({
+      origin: entry.origin,
+      type: entry.data && entry.data.type,
+    })));
+    assert.deepEqual(
+      received.filter((entry) => entry.type === "archon:ready"),
+      [],
+      named("readiness was broadcast to a parent that is not the configured origin"),
+    );
+    assert.deepEqual(received, [], named("the adversary parent received a message at all"));
+  });
+
   /* ---- the happy path: a real inline control, and a real DOM change ---- */
 
   await withContext("happy-path", async (context) => {
@@ -1237,10 +1451,20 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
         return meta ? meta.getAttribute("content") : "(none)";
       }),
     );
-    const before = await artifact.evaluate(() => {
-      const panel = document.getElementById("panel");
-      return { text: panel.textContent, background: getComputedStyle(panel).backgroundColor };
-    });
+    /* The artifact's stylesheet is only in effect once its document has
+       finished loading. Reading the computed background before that returns
+       `""` -- rarely, and only under load, which is the worst way for a test
+       to fail. Wait for the document rather than for a timer. */
+    const before = await waitFor(
+      () => artifact.evaluate(() => {
+        if (document.readyState !== "complete") return false;
+        const panel = document.getElementById("panel");
+        if (!panel) return false;
+        const background = getComputedStyle(panel).backgroundColor;
+        return background ? { text: panel.textContent, background } : false;
+      }),
+      named("the artifact document never finished loading"),
+    );
     assert.equal(before.text, "closed", named("the artifact starts closed"));
     /* The artifact's own `style` element, not a user-agent default: `#panel`
        has no background of its own, so this value exists only if the authored
@@ -1270,6 +1494,15 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
         .catch(() => false);
     }
     assert.ok(reached, named("the artifact frame is reachable from the keyboard"));
+
+    /* The artifact learns nothing about where it came from. This is the
+       viewer's `referrerpolicy="no-referrer"` doing the work: without it
+       Firefox hands `about:srcdoc` the application origin verbatim. */
+    assert.equal(
+      await artifact.evaluate(() => document.referrer),
+      "",
+      named("the artifact was told the application origin through document.referrer"),
+    );
 
     /* ---- isolation: the artifact has authority over nothing above it ---- */
     const isolation = await artifact.evaluate(() => {
@@ -1967,6 +2200,9 @@ async function worker() {
   const rendererModule = await import(pathToFileURL(join(ROOT, "renderer/public/renderer.js")).href);
   await assertContractParity(rendererModule);
   await assertBuildRefusesInjection();
+  await assertBuildRefusesUnsafeTargets(tempRoot);
+  await assertBuildRefusesUndeclaredPublicFile(tempRoot);
+  await assertRendererDeploymentConfig();
 
   const state = {
     app: { requests: [], contentRequests: [], contentReads: [], mutations: [] },

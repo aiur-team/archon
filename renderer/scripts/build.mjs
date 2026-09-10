@@ -43,7 +43,7 @@
  */
 
 import { cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -288,7 +288,14 @@ export async function buildRenderer({ outDir, env = process.env, production = tr
      emptied. */
   const forbidden = [RENDERER_ROOT, PUBLIC_DIR, resolve(RENDERER_ROOT, "scripts"), process.cwd()];
   for (const path of forbidden) {
-    if (target === path || path.startsWith(`${target}/`)) {
+    /* `path.startsWith(`${target}/`)` is the obvious spelling and it is wrong
+       for exactly one target: `--out /` resolves to `"/"`, the prefix becomes
+       `"//"`, no absolute path begins with that, and the guard waves through
+       the one argument it least wants to. `relative` has no such edge -- it
+       returns `""` for the same directory and a path with no leading `..`
+       for a descendant, on every target including the root. */
+    const inside = relative(target, path);
+    if (inside === "" || (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))) {
       throw new RendererBuildError("--out", "must not be the renderer tree or a directory containing it");
     }
   }

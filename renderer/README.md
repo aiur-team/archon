@@ -67,6 +67,15 @@ never `"*"`.
 No document identifier, title, owner, session or CSRF token is ever sent. There
 is nothing here for a compromised artifact to steal.
 
+**The viewer's frame must carry `referrerpolicy="no-referrer"`.** An
+`about:srcdoc` document inherits its parent's referrer, and the renderer
+document's referrer is whatever the viewer's frame element sent. Firefox sends
+the full application origin, so without this attribute the artifact can read the
+account origin out of `document.referrer` — the one fact about the account
+application that would otherwise cross the boundary. Chromium already sends
+nothing; `no-referrer` makes both engines agree, and it is the viewer's
+attribute to set because the renderer cannot set it on its own framing element.
+
 **The renderer's address must carry nothing either.** An `about:srcdoc` document
 inherits its parent's base URL, so anything in the renderer's query or fragment
 is readable by the artifact as `document.baseURI` — and the artifact's
