@@ -65,13 +65,14 @@ const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 const TRANSCRIPT = /^PASS {2}hosted owner viewer matrix \(chromium [\w.]+; (\d+) cases\)$/;
 
 /**
- * Every case the worker must complete: the HTTP surface plus the browser matrix.
+ * Every case the worker must complete: the viewer's own guards, the HTTP surface
+ * and the browser matrix.
  *
  * Checked by the supervisor rather than trusted, because the transcript line is
  * the only thing CI reads and a worker that returned early after four cases
  * would otherwise print a `PASS` that reads exactly like a full run.
  */
-const EXPECTED_CASES = 38;
+const EXPECTED_CASES = 73;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -389,7 +390,11 @@ async function startRenderer() {
 
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
-    state.requests.push({ method: request.method, path: url.pathname });
+    state.requests.push({
+      method: request.method,
+      path: url.pathname,
+      referer: request.headers.referer ?? null,
+    });
     const common = Object.fromEntries(headers);
 
     if (url.pathname === FORGE_PATH) {
@@ -451,12 +456,40 @@ async function startRenderer() {
   };
 }
 
+/** The adversary's page that asks, in the correct words, for the document. */
+const EVIL_READY_PATH = "/_ready.html";
+
 /** The adversary: it records, and it is never reached. */
 async function startEvil() {
   const state = { requests: [] };
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     state.requests.push({ method: request.method, path: url.pathname, search: url.search });
+
+    if (url.pathname === EVIL_READY_PATH) {
+      /* If this page is ever reached *as the renderer frame*, it holds the one
+         position from which the viewer's origin comparison is the only thing
+         between a private document and a foreign origin: its `event.source` is
+         the frame the viewer is waiting on, because it *is* that frame. So it
+         announces readiness in exactly the contract's words, repeatedly, and
+         reports every message it receives back to the top window -- the account
+         page cannot read across the boundary, so the report has to be posted. */
+      const script =
+        'window.__seen=[];'
+        + 'addEventListener("message",function(e){window.__seen.push(String(e.data&&e.data.type));'
+        + 'top.postMessage({archonEvilReport:window.__seen.slice()},"*");});'
+        + 'setInterval(function(){parent.postMessage({type:"archon:ready",v:1},"*");'
+        + 'top.postMessage({archonEvilReport:window.__seen.slice()},"*");},50);';
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      response.end(
+        `<!doctype html><meta charset="utf-8"><title>adversary</title><script>${script}<\/script>`,
+      );
+      return;
+    }
+
     response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
     response.end("recorded");
   });
@@ -1137,6 +1170,141 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       await tab.close();
     }],
 
+    ["the renderer frame cannot be moved to the adversary origin", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+
+      /* The renderer answers with a document that mounts nothing, so the frame's
+         own load *finishes* and then sits there saying nothing. That is the
+         state this case needs: the viewer has a frame, has the bytes, and is
+         waiting to be told the frame is ready, which is the only moment at which
+         a frame standing at a foreign origin could be handed a document.
+         Finishing the load matters -- an earlier version of this case held the
+         real renderer document in flight instead, and assigning `src` cancelled
+         that pending navigation, so the case failed on a renderer timeout before
+         it asserted anything about the adversary. */
+      let silent = true;
+      await tab.route(`${renderer.origin}/`, (route) =>
+        silent
+          ? route.fulfill({
+              status: 200,
+              contentType: "text/html; charset=utf-8",
+              headers: { "cache-control": "no-store" },
+              body: '<!doctype html><meta charset="utf-8"><title>silent renderer</title>',
+            })
+          : route.continue(),
+      );
+      await tab.addInitScript(() => {
+        window.__evilReports = [];
+        window.__violations = [];
+        window.addEventListener("message", (event) => {
+          const report = event.data && event.data.archonEvilReport;
+          if (Array.isArray(report)) window.__evilReports.push(...report);
+        });
+        document.addEventListener("securitypolicyviolation", (event) => {
+          window.__violations.push({
+            directive: event.effectiveDirective || event.violatedDirective,
+            blocked: event.blockedURI,
+          });
+        });
+      });
+
+      await tab.goto(page(`/docs/${ids.owned}`));
+
+      /* Setting `src` on the frame element is an ordinary same-origin DOM
+         operation on this page -- the element belongs to the account origin even
+         though its document does not -- so this stands in for the realistic
+         cause, a renderer origin that navigates itself somewhere else. */
+      const evilReady = `${evil.origin}${EVIL_READY_PATH}`;
+      await waitFor(
+        async () =>
+          await tab.evaluate((url) => {
+            const element = document.querySelector("[data-archon-renderer]");
+            if (element === null) return false;
+            element.setAttribute("src", url);
+            return true;
+          }, evilReady),
+        "the renderer frame element was never mounted",
+        { timeout: 15_000 },
+      );
+
+      /* The navigation is refused, and refused before the viewer is consulted.
+         This is the finding the case records: the page's own `frame-src` names
+         exactly one origin, so the adversary is never loaded, never speaks, and
+         the viewer's `event.origin` comparison is never reached. That comparison
+         is therefore unprovable from any browser probe on this page, and is
+         proven against a synthesised event in `assertViewerGuards` instead. */
+      const violations = await waitFor(
+        async () => {
+          const seen = await tab.evaluate(() => window.__violations ?? []);
+          return seen.some((entry) => entry.directive === "frame-src") ? seen : null;
+        },
+        async () =>
+          `the navigation to the adversary was not refused by frame-src ${JSON.stringify(
+            await tab.evaluate(() => window.__violations ?? []),
+          )}`,
+        { timeout: 10_000 },
+      );
+      assert.ok(violations.length > 0);
+
+      const reached = evil.state.requests.filter((entry) => entry.path === EVIL_READY_PATH);
+      assert.deepEqual(
+        reached,
+        [],
+        `the renderer frame was navigated to the adversary origin (${JSON.stringify(reached)})`,
+      );
+      const frameUrls = tab.frames().map((each) => each.url());
+      assert.ok(
+        !frameUrls.some((url) => url.startsWith(evil.origin)),
+        `a frame on the viewer page is at the adversary origin (${frameUrls.join(" ")})`,
+      );
+
+      /* Nothing the adversary could have received, it received -- including the
+         private document, which the hand-off would have posted to whatever
+         occupied the frame had the navigation succeeded. */
+      const seen = await tab.evaluate(() => window.__evilReports ?? []);
+      assert.deepEqual(seen, [], `the adversary origin observed viewer messages (${seen.join(",")})`);
+
+      /* The refused navigation is a denial of render, not a leak: the readiness
+         deadline fires and the page says so, with a retry that still works. */
+      await waitFor(
+        async () => (await tab.getAttribute("html", "data-archon-state")) === "renderer-timeout",
+        "the readiness deadline never fired after the refused navigation",
+        { timeout: 40_000 },
+      );
+      silent = false;
+      await tab.click("[data-archon-retry-button]");
+      const artifact = await waitFor(
+        async () => tab.frames().find((frame) => frame.url() === ARTIFACT_URL) ?? null,
+        async () =>
+          `the retry never recovered the document ${JSON.stringify({
+            state: await tab.getAttribute("html", "data-archon-state"),
+            status: await statusOf(tab),
+          })}`,
+        { timeout: 30_000 },
+      );
+      assert.equal(await artifact.locator("#heading").innerText(), "Quarterly figures");
+
+      /* `renderer/README.md` requires this attribute of the viewer specifically:
+         an `about:srcdoc` document inherits its parent's referrer, and in Firefox
+         the parent's referrer is whatever this element sent. The response header
+         and the shell's `<meta>` are exactly why the end-to-end observation below
+         cannot stand in for the attribute assertion -- either one alone already
+         empties the `Referer`. */
+      assert.equal(
+        await tab.getAttribute("[data-archon-renderer]", "referrerpolicy"),
+        "no-referrer",
+        "the renderer frame lost its no-referrer policy",
+      );
+      const rendererRequests = renderer.state.requests.filter((entry) => entry.path === "/");
+      assert.ok(rendererRequests.length > 0, "the renderer document was never requested");
+      for (const entry of rendererRequests) {
+        assert.equal(entry.referer, null, "the renderer was told which account page framed it");
+      }
+
+      await tab.close();
+    }],
+
     ["a renderer that never says it is ready fails visibly and recovers", async (context) => {
       await signIn(context, app.origin, tokens.owner);
       const tab = await context.newPage();
@@ -1291,6 +1459,213 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
 }
 
 /* ------------------------------------------------------------------ *
+ * The viewer's own guards, without a browser.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Lift one named function's source out of `viewer.js`.
+ *
+ * `viewer.js` is a committed static asset with no build step and no module
+ * graph -- that is the whole reason it restates the contract instead of
+ * importing it -- so there is nothing to `import` and nothing to spy on. The
+ * function text is pulled out by name and brace matching, and every failure
+ * mode of that extraction is a hard error rather than a skip: a rename, a move
+ * into another closure, or a rewrite into an arrow expression all stop the
+ * suite instead of silently testing nothing.
+ *
+ * @param {string} source
+ * @param {string} name
+ * @returns {string}
+ */
+function liftFunction(source, name) {
+  const signature = `function ${name}(`;
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `viewer.js no longer declares \`function ${name}(\``);
+  assert.equal(
+    source.indexOf(signature, start + 1),
+    -1,
+    `viewer.js declares \`function ${name}(\` more than once`,
+  );
+
+  const open = source.indexOf("{", source.indexOf(")", start));
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  return die(`viewer.js's \`${name}\` has unbalanced braces`);
+}
+
+/**
+ * The message shapes `isReadyMessage` and `validateReadyMessage` must agree on.
+ *
+ * The viewer restates the readiness half of the frozen contract because it
+ * cannot import it. A restatement with nothing holding it to the original is a
+ * fork waiting to happen, and the failure it produces is the quiet kind: the
+ * account origin accepting a handshake the contract rejects, on the one message
+ * whose acceptance causes a private document to be sent.
+ */
+function readyParityRows() {
+  return [
+    ["the readiness message", { type: "archon:ready", v: 1 }],
+    ["an extra key", { type: "archon:ready", v: 1, html: "<p>x</p>" }],
+    ["an extra undefined key", { type: "archon:ready", v: 1, extra: undefined }],
+    ["a missing version", { type: "archon:ready" }],
+    ["a missing type", { v: 1 }],
+    ["the render type", { type: "archon:render", v: 1 }],
+    ["an unknown type", { type: "archon:resize", v: 1 }],
+    ["a future version", { type: "archon:ready", v: 2 }],
+    ["a string version", { type: "archon:ready", v: "1" }],
+    ["a null version", { type: "archon:ready", v: null }],
+    ["a non-string type", { type: 1, v: 1 }],
+    ["an empty object", {}],
+    ["null", null],
+    ["undefined", undefined],
+    ["an array", ["archon:ready", 1]],
+    ["a string", "archon:ready"],
+    ["a number", 1],
+  ];
+}
+
+/**
+ * Prove the viewer's three sender-identity guards without a browser.
+ *
+ * Two of the three are unreachable from any browser probe, and that is a
+ * property of the page rather than a gap in the oracle. The viewer's own CSP
+ * carries `frame-src <renderOrigin>` exactly, so a conforming browser refuses
+ * to navigate the renderer frame anywhere else: the right-source/wrong-origin
+ * event simply cannot be produced on this page, and neither can a frame at a
+ * foreign origin be standing there when the document is handed off. The
+ * browser matrix demonstrates that refusal end to end; what it cannot do is
+ * show that the origin comparison is load-bearing, because CSP has already
+ * refused before the comparison is consulted.
+ *
+ * So the predicate is exercised directly, on synthesised events. This is the
+ * complement of the browser case, not a substitute for it: the browser proves
+ * the wrong-source forgery is refused in a real engine, and this proves the
+ * origin comparison would refuse the event CSP is currently preventing.
+ *
+ * @returns {Promise<number>} assertions made
+ */
+async function assertViewerGuards() {
+  const contracts = await import(pathToFileURL(join(ROOT, "hosted/lib/contracts.mjs")).href);
+  const source = await readFile(join(ROOT, "hosted", "public", "viewer.js"), "utf8");
+  let cases = 0;
+
+  /* The two message-type constants, before anything that uses them. A viewer
+     that restated `archon:ready` with a typo would refuse every real handshake,
+     and every table below would still agree with itself. */
+  for (const [name, expected] of [
+    ["READY", contracts.RENDER_MESSAGE_TYPES.READY],
+    ["RENDER", contracts.RENDER_MESSAGE_TYPES.RENDER],
+  ]) {
+    const match = new RegExp(`const ${name} = "([^"]*)";`).exec(source);
+    assert.notEqual(match, null, `viewer.js no longer declares a \`${name}\` message constant`);
+    assert.equal(match[1], expected, `viewer.js's \`${name}\` has drifted from the contract`);
+    cases += 1;
+  }
+
+  const build = new Function(
+    "READY",
+    `${liftFunction(source, "isReadyMessage")}\n${liftFunction(source, "acceptsReady")}\n`
+      + "return { isReadyMessage, acceptsReady };",
+  );
+  const { isReadyMessage, acceptsReady } = build(contracts.RENDER_MESSAGE_TYPES.READY);
+
+  for (const [label, value] of readyParityRows()) {
+    let canonical = true;
+    try {
+      contracts.validateReadyMessage(value);
+    } catch {
+      canonical = false;
+    }
+    assert.equal(
+      isReadyMessage(value),
+      canonical,
+      `viewer.js's \`isReadyMessage\` disagrees with \`validateReadyMessage\` on ${label}`,
+    );
+    cases += 1;
+  }
+
+  /* The sender identity, as a table. `frame` and `origin` stand for the two
+     expectations the listener passes in; every other row is a window or an
+     origin that is not them. */
+  const frameWindow = { name: "the renderer frame" };
+  const otherWindow = { name: "another frame on this page" };
+  const ready = { type: contracts.RENDER_MESSAGE_TYPES.READY, v: 1 };
+  const origin = "https://render.example.com";
+  const foreign = "https://evil.example";
+
+  for (const [label, event, expectedSource, accepted] of [
+    ["the renderer, from its own origin", { source: frameWindow, origin, data: ready }, frameWindow, true],
+    ["the right origin, the wrong window", { source: otherWindow, origin, data: ready }, frameWindow, false],
+    ["the right window, a foreign origin", { source: frameWindow, origin: foreign, data: ready }, frameWindow, false],
+    ["the right window, an opaque origin", { source: frameWindow, origin: "null", data: ready }, frameWindow, false],
+    ["the right window, an empty origin", { source: frameWindow, origin: "", data: ready }, frameWindow, false],
+    ["the right window, the origin with a trailing slash", { source: frameWindow, origin: `${origin}/`, data: ready }, frameWindow, false],
+    ["the right window, the origin in another case", { source: frameWindow, origin: origin.toUpperCase(), data: ready }, frameWindow, false],
+    ["both wrong", { source: otherWindow, origin: foreign, data: ready }, frameWindow, false],
+    ["no frame mounted yet", { source: frameWindow, origin, data: ready }, null, false],
+    ["a null source", { source: null, origin, data: ready }, frameWindow, false],
+    ["the renderer, with a malformed message", { source: frameWindow, origin, data: { type: "archon:ready" } }, frameWindow, false],
+    ["the renderer, echoing a render message", { source: frameWindow, origin, data: { type: "archon:render", v: 1, html: "x" } }, frameWindow, false],
+  ]) {
+    assert.equal(
+      acceptsReady(event, expectedSource, origin),
+      accepted,
+      `the readiness guard ${accepted ? "refused" : "accepted"} ${label}`,
+    );
+    cases += 1;
+  }
+
+  /* The hand-off's target origin, read off the call site.
+   *
+   * This one is a source assertion by necessity rather than by preference, and
+   * the necessity is the same `frame-src` rule as above: a `"*"` target only
+   * leaks a document to a frame standing at another origin, and this page's CSP
+   * refuses to put one there. There is no browser state in which the exact
+   * target is observably different from `"*"`, so the guard is proven by
+   * showing the call site passes the configured origin -- structurally, on the
+   * one call that carries the document, not by grepping the file for a string. */
+  const handOff = new RegExp(
+    String.raw`postMessage\(\s*\{\s*type:\s*RENDER,[^)]*\},\s*([A-Za-z0-9_."*]+)\s*\)`,
+  ).exec(source);
+  assert.notEqual(handOff, null, "viewer.js no longer posts the render message in a readable form");
+  assert.equal(
+    handOff[1],
+    "renderOrigin",
+    "the private document is posted to a target origin other than the configured renderer origin",
+  );
+  cases += 1;
+
+  /* The frame's referrer policy, which `renderer/README.md` requires of the
+     viewer specifically: an `about:srcdoc` document inherits its parent's
+     referrer, and in Firefox the parent's referrer is whatever this element
+     sent. The response header and the `<meta>` below do not cover it, which is
+     why all three exist. */
+  assert.match(
+    source,
+    /setAttribute\("referrerpolicy", "no-referrer"\)/,
+    "the renderer frame no longer carries referrerpolicy=\"no-referrer\"",
+  );
+  cases += 1;
+
+  const documents = await import(pathToFileURL(join(ROOT, "hosted/lib/documents.mjs")).href);
+  assert.match(
+    documents.viewerShell(origin),
+    /<meta name="referrer" content="no-referrer" \/>/,
+    "the viewer shell no longer declares a no-referrer policy",
+  );
+  cases += 1;
+
+  process.stdout.write(`INFO  viewer guards: ${cases} assertions with no browser\n`);
+  return cases;
+}
+
+/* ------------------------------------------------------------------ *
  * Worker.
  * ------------------------------------------------------------------ */
 
@@ -1428,6 +1803,10 @@ async function worker() {
   let cases = 0;
   let browser = null;
   try {
+    /* The guards the page's own CSP makes unreachable from a browser come
+       first: they need no server and no engine, so a drift between the viewer
+       and the frozen contract fails before a browser is even downloaded. */
+    cases += await assertViewerGuards();
     cases += await assertHttpSurface({ app, ids, tokens, records, markers, base });
 
     const entry = join(tempRoot, "node_modules", "playwright", "index.js");

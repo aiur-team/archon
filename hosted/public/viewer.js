@@ -477,13 +477,40 @@
     return data.type === READY && data.v === 1;
   }
 
+  /**
+   * Decide whether one `message` event is the renderer announcing readiness.
+   *
+   * Both halves of the sender identity, before the message is looked at.
+   * `source` first because it is the stricter of the two: another frame on this
+   * page reaches this window with a flawless `event.origin` and the wrong
+   * source, which is the one forgery an origin comparison alone cannot see.
+   * `origin` second because the converse -- the right window showing a
+   * different origin, after a navigation inside the frame -- is what the origin
+   * comparison alone can see.
+   *
+   * It takes the two expectations as arguments rather than closing over `frame`
+   * and `renderOrigin` so that it is a pure predicate over an event shape. That
+   * is not a decoration: the `frame-src` directive on this page refuses to
+   * navigate the renderer frame anywhere but the configured origin, so a
+   * conforming browser cannot produce the right-source/wrong-origin event at
+   * all, and the guard against it is unreachable from any browser probe. Being
+   * pure is what lets `scripts/test-hosted-owner-viewer.mjs` synthesise that
+   * event directly and prove the comparison is load-bearing rather than
+   * decorative. See the parity table there.
+   *
+   * @param {MessageEvent} event
+   * @param {Window|null} expectedSource
+   * @param {string} expectedOrigin
+   * @returns {boolean}
+   */
+  function acceptsReady(event, expectedSource, expectedOrigin) {
+    if (expectedSource === null || event.source !== expectedSource) return false;
+    if (event.origin !== expectedOrigin) return false;
+    return isReadyMessage(event.data);
+  }
+
   window.addEventListener("message", (event) => {
-    /* Both halves, before the message is looked at. `source` first because it is
-       the stricter: another frame on this page reaches this window with a
-       flawless `event.origin` and the wrong source. */
-    if (frame === null || event.source !== frame.contentWindow) return;
-    if (event.origin !== renderOrigin) return;
-    if (!isReadyMessage(event.data)) return;
+    if (!acceptsReady(event, frame === null ? null : frame.contentWindow, renderOrigin)) return;
     readySeen = true;
     maybeHandOff();
   });

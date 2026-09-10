@@ -31,7 +31,6 @@ import viewerHandler, {
 import { NOT_FOUND_PAGE, UNAVAILABLE_PAGE } from "../lib/documents.mjs";
 import {
   APP_ORIGIN,
-  MemoryBlobStore,
   fixedClock,
   hostedConfig,
   memoryAuthStore,
@@ -159,7 +158,13 @@ test("an owner gets a shell that carries no document data", async () => {
   const csp = response.headers.get("content-security-policy");
   assert.match(csp, /default-src 'none'/);
   assert.match(csp, /script-src 'self'/);
-  assert.match(csp, new RegExp(`frame-src ${RENDER_ORIGIN.replaceAll(".", "\\.")}`));
+  /* Exact directive equality, not a prefix match: `frame-src <origin> *`
+     contains the origin and permits everything, so a substring assertion
+     would pass on a policy that frames anything. */
+  assert.ok(
+    csp.split(";").map((part) => part.trim()).includes(`frame-src ${RENDER_ORIGIN}`),
+    `frame-src is not exactly the configured renderer origin (${csp})`,
+  );
   assert.match(csp, /frame-ancestors 'none'/);
   assert.match(csp, /base-uri 'none'/);
   assert.doesNotMatch(csp, /unsafe-inline/);
@@ -619,10 +624,4 @@ test("a revoked session reads nothing on the next request", async () => {
   assert.equal((await h.read(get(CONTENT, { token }))).status, 401);
   assert.equal((await h.read(get(METADATA, { token }))).status, 401);
   assert.equal((await h.viewer(get(PAGE, { token }))).status, 303);
-});
-
-/* Silences an unused-import complaint while keeping the fixture's identity in
-   view for a reader: this is the store the memory session double is built on. */
-test("the session fixture is a memory store", () => {
-  assert.equal(typeof MemoryBlobStore, "function");
 });
