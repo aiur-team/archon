@@ -17,7 +17,9 @@ In site mode (docbuild --site), docbuild discovers every publishable document
 in this repository, composes each one through the shared builder, and writes a
 clean-URL Netlify site into _site/: hosted copies, a deterministic root index,
 permanent /d/<id> and alias redirects, and a preview-only noindex header when
-CONTEXT is not production.
+CONTEXT is not production. It also publishes the repository's hosted static
+tree and, when HOSTED_APP_ORIGIN and HOSTED_RENDER_ORIGIN are set, the renderer
+shell under /_render/.
 `;
 
 /** Print help and leave, with 0 only when help is what was asked for. */
@@ -71,7 +73,7 @@ const root = repoRoot();
 
 try {
   if (site) {
-    const result = buildSite(root);
+    const result = await buildSite(root);
     console.log(`built ${result.documents.length} documents into ${relative(root, result.outDir)}/`);
     for (const doc of result.documents) console.log(`  /${doc.slug}/`);
   } else {

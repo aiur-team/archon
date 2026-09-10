@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
 import {
   chmodSync,
   closeSync,
@@ -2136,6 +2137,138 @@ else if (args.length === 2 && args[1] === "--help" && help[args[0]] !== undefine
   assert.equal(JSON.parse(readFileSync(statePath, "utf8")).deploys, deploysAfterSuccess, "read-back drift never deploys");
 } finally {
   rmSync(testRoot, { recursive: true, force: true });
+}
+
+/* ------------------------------------------------------------------ *
+ * A vendored tree with no HOSTED_* variables still serves / and /<slug>/.
+ *
+ * The connect tool copies four entries into a connected site, and one of them
+ * is `netlify.toml`. That file used to configure a repository whose only job
+ * was documents. It now configures the merged site as well -- the hosted
+ * application, the renderer shell, an edge gate on every path -- and the two
+ * origins the hosted half needs are operator-set variables that a connected
+ * site does not have and is never asked for.
+ *
+ * So the property to hold is that none of that reaches a vendored tree. A
+ * connected site sets no `HOSTED_APP_ORIGIN` and no `HOSTED_RENDER_ORIGIN`, and
+ * what it serves is still a document at `/` and a document at `/<slug>/`. The
+ * failure this guards against is a configuration that grew a requirement: an
+ * environment key with no default, a redirect that claims a document path, or a
+ * header rule that needs a value nobody set.
+ * ------------------------------------------------------------------ */
+{
+  const shippedToml = readFileSync(fileURLToPath(new URL("../netlify.toml", import.meta.url)), "utf8");
+  /* Comments explain the absences; a rule a comment can satisfy is not a rule. */
+  const live = shippedToml.replace(/^\s*#.*$/gm, "");
+
+  /* The file names no operator variable at all. `HOSTED_APP_ORIGIN` and
+     `HOSTED_RENDER_ORIGIN` are read from the site environment by the hosted
+     half and default to their strict reading when unset; a value written here
+     would be a value every vendored copy inherited. */
+  assert.doesNotMatch(live, /HOSTED_/, "the vendored configuration names a hosted operator key");
+  /* A block runs to the next line that starts a new one at column zero, or to
+     the end of the file. `$` under `m` would end it at the first newline, which
+     is a parser that reads no block at all and asserts nothing. */
+  const END = "(?=^\\[|(?![\\s\\S]))";
+  for (const block of live.matchAll(new RegExp(`^\\[(?:build\\.environment|context\\.[^\\]]+\\.environment)\\]([\\s\\S]*?)${END}`, "gm"))) {
+    const keys = [...block[1].matchAll(/^\s*([A-Za-z_][\w]*)\s*=/gm)].map((match) => match[1]);
+    for (const key of keys) {
+      assert.ok(!key.startsWith("HOSTED_"), `the vendored configuration sets ${key}`);
+    }
+  }
+
+  /* No rule in the file claims `/` or a document path. The document routes a
+     site serves come from the generated `_redirects` in its own publish tree,
+     which a connected site's single-document deploy does not carry and does not
+     need. */
+  for (const redirect of live.matchAll(new RegExp(`^\\[\\[redirects\\]\\]([\\s\\S]*?)${END}`, "gm"))) {
+    const from = redirect[1].match(/^\s*from\s*=\s*"([^"]+)"\s*$/m);
+    assert.ok(from === null, `the vendored configuration redirects ${from?.[1]}`);
+  }
+
+  /* And it applies no header that a browser could refuse the page over. The
+     merged site's security headers belong to the edge gate, which a vendored
+     tree does not run, so what is left here has to be inert. */
+  const headerRules = [];
+  /* `[headers.values]` is indented, so it does not end its own block. */
+  for (const headers of live.matchAll(new RegExp(`^\\[\\[headers\\]\\]([\\s\\S]*?)${END}`, "gm"))) {
+    const forPath = headers[1].match(/^\s*for\s*=\s*"([^"]+)"\s*$/m);
+    assert.ok(forPath, "a [[headers]] rule declares no path");
+    const values = [...headers[1].matchAll(/^\s{4,}([A-Za-z-]+)\s*=\s*"([^"]*)"\s*$/gm)]
+      .map((match) => [match[1], match[2]]);
+    assert.ok(values.length > 0, `the ${forPath[1]} header rule declares no values`);
+    headerRules.push({ path: forPath[1], values });
+  }
+  /* A parser that read nothing would satisfy every absence below, so what it
+     read is asserted first: the two path-scoped cache rules the merged
+     configuration keeps, and nothing else. */
+  assert.deepEqual(
+    headerRules.map((rule) => rule.path),
+    ["/*", "/_assets/*"],
+    "the vendored configuration no longer declares the header rules this parses",
+  );
+  for (const rule of headerRules) {
+    for (const [name] of rule.values) {
+      assert.ok(
+        !/^(content-security-policy|x-frame-options|referrer-policy)$/i.test(name),
+        `the vendored configuration declares ${name} on ${rule.path}`,
+      );
+    }
+  }
+
+  /* Now serve it. A two-page publish tree -- the root document and one at a
+     slug -- through a server that applies exactly the rules parsed above, with
+     every hosted variable removed from the environment first. */
+  const previousHosted = {};
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("HOSTED_")) {
+      previousHosted[key] = process.env[key];
+      delete process.env[key];
+    }
+  }
+
+  const ROOT_PAGE = "<!doctype html><title>vendored root</title>\n";
+  const SLUG_PAGE = "<!doctype html><title>vendored slug</title>\n";
+  const tree = new Map([
+    ["/", ROOT_PAGE],
+    ["/how-archon-works/", SLUG_PAGE],
+  ]);
+  const matches = (pattern, path) =>
+    pattern.endsWith("/*") ? path.startsWith(pattern.slice(0, -1)) : pattern === path;
+
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, "http://127.0.0.1").pathname;
+    const body = tree.get(path.endsWith("/") ? path : `${path}/`);
+    if (body === undefined) {
+      response.writeHead(404).end();
+      return;
+    }
+    const headers = { "content-type": "text/html; charset=utf-8" };
+    for (const rule of headerRules) {
+      if (!matches(rule.path, path)) continue;
+      for (const [name, value] of rule.values) headers[name.toLowerCase()] = value;
+    }
+    response.writeHead(200, headers).end(body);
+  });
+  try {
+    await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+
+    for (const [path, expected] of [["/", ROOT_PAGE], ["/how-archon-works/", SLUG_PAGE]]) {
+      const response = await fetch(`${origin}${path}`, { redirect: "manual" });
+      assert.equal(response.status, 200, `a vendored tree did not serve ${path}`);
+      assert.equal(await response.text(), expected, `a vendored tree served the wrong bytes at ${path}`);
+      assert.equal(response.headers.get("content-security-policy"), null, `${path} carried a TOML policy`);
+      assert.equal(response.headers.get("x-frame-options"), null, `${path} carried a TOML frame rule`);
+      /* The one thing the configuration does still say about these paths, and
+         it says the same thing on either of the site's two hosts. */
+      assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+    }
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    for (const [key, value] of Object.entries(previousHosted)) process.env[key] = value;
+  }
+  console.log("PASS  ACN-001 vendored tree serves / and /<slug>/ with no HOSTED_* variables");
 }
 
 console.log("PASS  P4-S pure connect contract");

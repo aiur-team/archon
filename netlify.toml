@@ -1,10 +1,29 @@
-# Fail-closed Netlify configuration for the repo-backed _site build.
+# Fail-closed Netlify configuration for the one Archon site.
 #
-# The site entry point is exactly one command (templates/build --site) and the
-# publish directory is the disposable _site/ tree the builder writes from
-# scratch. The edge gate below is declared before its implementation exists
-# (P2-A owns netlify/edge-functions/gate.ts); do not weaken it, add a
-# catch-all exclusion, or remove the block to make a pre-P2-A deploy pass.
+# This is the only netlify.toml in the repository, and there is no second or
+# third Netlify site behind it. The collaboration documents, the hosted
+# publishing application, the renderer shell under /_render/ and the served
+# agent files are all produced by one build command (templates/build --site)
+# into one publish directory (the disposable _site/ tree the builder writes from
+# scratch). A surface this file does not mention is a surface the builder either
+# copies or does not serve -- which is the property that makes a missed copy
+# step a missing page rather than a configuration that lies.
+#
+# Two absences are load-bearing:
+#
+#   * The edge gate below has no `excludedPath`. It runs on every path because
+#     it is the one thing that can tell the render host from the application
+#     host, and a path excluded from it is a path with no host classification
+#     and no headers at all.
+#   * There is no security header here. Not X-Frame-Options, not
+#     Content-Security-Policy, not Referrer-Policy. The gate owns every one of
+#     them, because the two hosts this site answers on need different answers
+#     and a TOML rule cannot ask which host it is on. Netlify emits every
+#     matching rule, and a browser handed two Content-Security-Policy headers
+#     enforces their intersection, so a policy left here could only make a page
+#     more dead, never more permissive. The Cache-Control rules stay: they are
+#     path-based, they say the same thing on either host, and they are harmless
+#     on renderer paths.
 
 [build]
   command = "templates/build --site"
@@ -26,15 +45,7 @@
 
 [[edge_functions]]
   path = "/*"
-  excludedPath = ["/login/*", "/api/*", "/_assets/*"]
   function = "gate"
-
-[[headers]]
-  for = "/*"
-  [headers.values]
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    X-Frame-Options = "SAMEORIGIN"
 
 [[headers]]
   for = "/*"

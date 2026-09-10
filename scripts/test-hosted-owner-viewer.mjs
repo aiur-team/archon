@@ -19,7 +19,11 @@
  *     identity store and AHU-004's complete-record fixtures, and serving the
  *     committed `viewer.js` and `viewer.css`;
  *   * the **renderer** origin, a different host serving exactly what
- *     `renderer/scripts/build.mjs` produced with its generated `_headers`;
+ *     `renderer/scripts/build.mjs` produced, under the header set that build
+ *     still spells out as `headersFile`. The build no longer writes a
+ *     `_headers` file: on one site answering on two hosts only the edge gate
+ *     can tell which host a request arrived on, so it is the one header
+ *     authority and a file beside it would be a second;
  *   * an **adversary** origin, which the artifact is invited to reach and which
  *     records every request that arrives, so "blocked" is proven by the absence
  *     of a request at a server rather than by the absence of an exception.
@@ -348,7 +352,14 @@ const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
 };
 
-/** The `_headers` the renderer build generated, replayed exactly. */
+/**
+ * The renderer's header set, replayed exactly.
+ *
+ * The text comes from the build's `headersFile`, not from a file in the
+ * published tree — nothing writes one any more. Reading it out of the build
+ * rather than hand-writing it here keeps this runner from being the copy that
+ * goes stale on the day somebody edits the policy.
+ */
 function parseHeadersFile(text) {
   const headers = [];
   const blocks = [];
@@ -445,11 +456,13 @@ async function startRenderer() {
     close,
     state,
     headers: () => headers,
-    async load(distDir) {
-      headers = parseHeadersFile(await readFile(join(distDir, "_headers"), "utf8"));
+    async load(distDir, headersText) {
+      headers = parseHeadersFile(headersText);
       files = new Map();
+      /* Every published file is served. There is no exclusion left to make: a
+         `_headers` file appearing here would be a second header authority
+         shipping to a live origin, which the inventory assertion refuses. */
       for (const name of await readdir(distDir)) {
-        if (name === "_headers") continue;
         files.set(`/${name}`, await readFile(join(distDir, name)));
       }
     },
@@ -1814,8 +1827,15 @@ async function worker() {
     production: false,
     env: { HOSTED_APP_ORIGIN: app.origin, HOSTED_RENDER_ORIGIN: renderer.origin },
   });
-  assert.equal(built.files.length, 5, "the renderer build did not publish its five files");
-  await renderer.load(distDir);
+  /* Four, not five. `_headers` is gone: the merged site's edge gate is the one
+     header authority, and a file here would ship a second one to a live
+     origin. */
+  assert.deepEqual(
+    built.files,
+    ["index.html", "renderer-config.js", "renderer.css", "renderer.js"],
+    "the renderer build did not publish exactly its four files",
+  );
+  await renderer.load(distDir, build.headersFile(app.origin));
 
   process.stdout.write(`INFO  app ${app.origin} renderer ${renderer.origin} adversary ${evil.origin}\n`);
   process.stdout.write(

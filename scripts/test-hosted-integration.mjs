@@ -43,7 +43,9 @@
  *   * **The person is a real browser.** A pinned Chromium drives the real
  *     `/publish/authorize` page and the real `/docs/<id>` viewer, and the
  *     renderer it frames is what `renderer/scripts/build.mjs` produced, served
- *     with its own generated `_headers`.
+ *     with that build's own header set -- which the merged site applies from its
+ *     edge gate rather than from a `_headers` file, because only the gate can
+ *     tell which of the site's two hosts a request arrived on.
  *   * **Only the identity provider upstream is controlled.** GitHub itself is a
  *     loopback fixture: it validates the client id, the redirect URI, the PKCE
  *     challenge and the client secret, it lets a person pick between two
@@ -456,7 +458,7 @@ const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
 };
 
-/** The `_headers` a Netlify build generated, replayed exactly. */
+/** A Netlify `_headers` body, replayed exactly. */
 function parseHeadersFile(text) {
   const headers = [];
   const blocks = [];
@@ -475,37 +477,74 @@ function parseHeadersFile(text) {
 }
 
 /**
- * The hosted deployment's own `[[headers]]` block and its one rewrite, read off
- * `hosted/netlify.toml` rather than restated here.
+ * The header set the hosted static tree is served under.
  *
- * Restating them would make this runner agree with a copy of the deployment
- * rather than with the deployment: a policy loosened in the TOML would leave
- * every case in this file green. Reading the file is what makes gate item 7 --
- * "real configured origin/headers are applied" -- a claim about the artifact
- * that is actually deployed.
+ * This used to be read off `hosted/netlify.toml`, which was the deployment that
+ * declared it. There is one site now, it answers on two hosts, and TOML cannot
+ * ask which host a request arrived on -- Netlify emits every matching rule and a
+ * browser handed two `Content-Security-Policy` headers enforces their
+ * intersection, so a policy left there could only make the sign-in and approval
+ * pages *more* dead. ACN-001 removed it; ACN-002's host-aware edge function is
+ * the authority that emits it, and holding this set equal to what that gate
+ * emits is ACN-002's to close.
  *
- * The model is Netlify's: a `[[headers]]` rule decorates responses the CDN
- * serves from the publish directory, and a function's own headers are the
- * function's. So these are applied to static paths only, and a header a
- * function set is never overwritten.
+ * Until then this is a declaration rather than a reading, and it is written out
+ * here so that the matrix below keeps enforcing the policy the pages actually
+ * need. Each entry is the minimum for one thing the sign-in page has to do:
+ * `script-src 'self'` loads `login.js`; `connect-src 'self'` lets the bootstrap
+ * call `/api/hosted/session` for the pre-login CSRF binding; and `form-action`
+ * names the provider's authorize origin because a browser checks a redirect
+ * target against it too, so the sign-in dies at the 303 without it.
+ *
+ * `assertNoSecondHeaderAuthority` below is the half that is still a reading, and
+ * it is the half that matters for the merge: no TOML rule may come back.
  */
-function readDeploymentHeaders() {
-  const toml = readFileSync(join(ROOT, "hosted", "netlify.toml"), "utf8")
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("#"))
-    .join("\n");
+const STATIC_HEADER_SET = [
+  ["X-Content-Type-Options", "nosniff"],
+  ["Referrer-Policy", "no-referrer"],
+  [
+    "Content-Security-Policy",
+    "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; " +
+      "frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com",
+  ],
+  ["Cache-Control", "private, no-store"],
+];
 
-  const block = toml.match(/\[\[headers\]\]\s*\n\s*for\s*=\s*"\/\*"\s*\n\s*\[headers\.values\]\n([\s\S]*?)(?=\n\[|\n*$)/);
-  assert.ok(block, "hosted/netlify.toml must declare a [[headers]] block for /*");
-  const values = [...block[1].matchAll(/^\s*([A-Za-z-]+)\s*=\s*"([^"]*)"\s*$/gm)]
-    .map(([, name, value]) => [name, value]);
-  assert.ok(values.length >= 4, "the hosted /* header block lost its entries");
+/**
+ * The one static rewrite, read off the builder that generates it.
+ *
+ * It moved out of TOML and into the publish tree's generated `_redirects`, so
+ * the builder's own declaration is where the deployment states it. Read rather
+ * than restated, for the reason the TOML was read before: a rewrite changed in
+ * one place and copied in another is a rewrite that goes stale silently, and the
+ * path it names is the one C3 freezes.
+ */
+async function readDeploymentHeaders() {
+  const compiled = join(ROOT, "templates/docbuild/dist/site.js");
+  let builder;
+  try {
+    builder = await import(pathToFileURL(compiled).href);
+  } catch (error) {
+    assert.fail(
+      `cannot read the generated redirects from ${compiled}: ${error.message}. ` +
+        "Run `npm --prefix templates/docbuild run build` first.",
+    );
+  }
+  const rules = builder.HOSTED_REWRITES;
+  assert.ok(Array.isArray(rules) && rules.length === 1, "the builder declares no single hosted rewrite");
+  const parsed = rules[0].match(/^(\S+) (\S+) 200$/);
+  assert.ok(parsed, `the hosted rewrite is not a 200 rewrite: ${rules[0]}`);
 
-  const rewrite = toml.match(
-    /\[\[redirects\]\]\s*\n\s*from\s*=\s*"([^"]+)"\s*\n\s*to\s*=\s*"([^"]+)"\s*\n\s*status\s*=\s*200/,
-  );
-  assert.ok(rewrite, "hosted/netlify.toml must rewrite the contract's approval path");
-  return { values, rewrite: { from: rewrite[1], to: rewrite[2] } };
+  /* And no second authority for the header set. A `[[headers]]` rule naming any
+     of these on the merged configuration is the exact intersection failure the
+     consolidation removed. */
+  const live = readFileSync(join(ROOT, "netlify.toml"), "utf8").replace(/^\s*#.*$/gm, "");
+  for (const [name] of STATIC_HEADER_SET) {
+    if (name === "Cache-Control") continue;
+    assert.doesNotMatch(live, new RegExp(name, "i"), `netlify.toml declares ${name}; the gate is the authority`);
+  }
+
+  return { values: STATIC_HEADER_SET, rewrite: { from: parsed[1], to: parsed[2] } };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1141,11 +1180,14 @@ async function startRenderer() {
       stalled = null;
       for (const { request, response } of held) server.emit("request", request, response);
     },
-    async load(distDir) {
-      headers = parseHeadersFile(await readFile(join(distDir, "_headers"), "utf8"));
+    /* The build no longer writes a `_headers` file -- on the merged site the
+       edge gate is the only thing that can tell the render host from the
+       application host, so it is the only place the set can be decided. The set
+       itself is still the build's `headersFile`, which is what this replays. */
+    async load(distDir, headersText) {
+      headers = parseHeadersFile(headersText);
       files = new Map();
       for (const name of await readdir(distDir)) {
-        if (name === "_headers") continue;
         files.set(`/${name}`, await readFile(join(distDir, name)));
       }
     },
@@ -1512,7 +1554,7 @@ async function assemble(tempRoot) {
      routing table is a mutable array the server already holds and the handlers
      are pushed into it once the origins are known. */
   const routes = [];
-  const deployment = readDeploymentHeaders();
+  const deployment = await readDeploymentHeaders();
   const app = await startApp({ routes, deployment });
 
   /* The operator environment, mutable so that C6's publish switch can be turned
@@ -1600,7 +1642,7 @@ async function assemble(tempRoot) {
     production: false,
     env: { HOSTED_APP_ORIGIN: app.origin, HOSTED_RENDER_ORIGIN: renderer.origin },
   });
-  await renderer.load(rendererDist);
+  await renderer.load(rendererDist, rendererBuild.headersFile(app.origin));
 
   return {
     app, renderer, adversary, provider, blobs, routes, env, deployment, built, rendererDist,
@@ -3313,16 +3355,24 @@ async function deploymentConnection(world, owned) {
   const context = owned.ownerContext;
   const cookie = owned.ownerCookie;
 
-  /* 8.1 The header block `hosted/netlify.toml` declares reaches every static
-         surface, and the document routes carry their own policy on top of the
-         private header set. Both are read off the deployment rather than
-         restated here. */
+  /* 8.1 The header set the hosted static surfaces are served under, and the
+         document routes' own policy on top of the private header set.
+
+     Read this one honestly. It used to be a *reading*: `readDeploymentHeaders`
+     parsed `hosted/netlify.toml`, so asserting the directives here constrained
+     the artifact Netlify served from. That deployment is gone and its
+     replacement authority -- the host-aware edge gate -- is ACN-002, which has
+     not landed. `STATIC_HEADER_SET` is therefore a declaration in this file, and
+     these assertions currently constrain that declaration and the harness that
+     serves it, not anything deployed. They are kept, and kept explicit, because
+     they are what the browser cases below run against and what ACN-002 has to
+     make the gate emit; the half that is still a reading about the deployment is
+     `readDeploymentHeaders`' check that `netlify.toml` declares no policy of its
+     own, so a second authority cannot come back while this one is pending.
+
+     The document routes' half below is unaffected: those headers come from the
+     real handlers, not from a deployment file. */
   const declared = Object.fromEntries(world.deployment.values.map(([name, value]) => [name.toLowerCase(), value]));
-  /* The directives are asserted on what the deployment *declares*, because that
-     is the artifact Netlify serves from. Comparing the served response to the
-     same block would only prove this runner echoes its own input. The served
-     check below is kept for the one thing it does prove: that the block is
-     applied to the contract's approval path at all. */
   assert.equal(declared["x-content-type-options"], "nosniff");
   assert.equal(declared["referrer-policy"], "no-referrer");
   assert.equal(declared["cache-control"], "private, no-store");

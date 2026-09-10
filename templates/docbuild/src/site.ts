@@ -13,6 +13,15 @@
  * `_site/` is disposable deploy output. It is never committed, and every
  * expected failure happens in a preflight pass before the previous `_site/`
  * is touched or any committed artifact is rebuilt.
+ *
+ * One site, one build command, one publish tree. This module is the only thing
+ * that writes `_site/`, so every surface the deployment serves is produced here
+ * or it is not served at all: the composed documents, the root static pages, the
+ * hosted application's static tree, the committed homepage and agent files, the
+ * renderer shell under `/_render/`, and the generated index and redirects.
+ * Nothing about that inventory is expressed in `netlify.toml`, which is what
+ * keeps a missed copy step a visibly missing page rather than a configuration
+ * that disagrees with a build.
  */
 
 import { createHash } from "node:crypto";
@@ -25,6 +34,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { build, BuildError, check } from "./index.js";
 
@@ -54,13 +64,54 @@ const osError = (e: unknown): string => (e as NodeJS.ErrnoException).message;
 
 const ID_RE = /^[0-9a-f]{6}$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const RESERVED_ROUTES = new Set(["api", "d", "login", "invite", "skills", "_assets"]);
+/**
+ * Top-level names the one site owns, so no document slug or alias can shadow
+ * one. `docs` and `publish` are the only additions a slug can actually claim —
+ * `_render`, `viewer.js` and `viewer.css` are not spellable as a slug, since
+ * `SLUG_RE` admits neither a leading underscore nor a dot, and a document that
+ * tries fails on the slug grammar before it ever reaches this set. They are
+ * listed anyway: this set is where a reader looks for "what does the publish
+ * tree already serve at the root", and a route that is reserved only by an
+ * accident of another regular expression is one edit away from not being.
+ */
+const RESERVED_ROUTES = new Set([
+  "api",
+  "d",
+  "login",
+  "invite",
+  "skills",
+  "docs",
+  "publish",
+  "_assets",
+  "_render",
+  "viewer.js",
+  "viewer.css",
+]);
 const NEVER_DESCEND = new Set(["_site", "node_modules", "dist", "netlify"]);
 
 /**
  * Root static page trees, copied under their own name: `_site/login/...`.
  */
 const STATIC_PAGES = ["login", "invite"];
+
+/**
+ * The hosted application's static tree. Its contents land at the root of the
+ * publish tree, so `netlify/public/viewer.js` becomes `_site/viewer.js` and
+ * `netlify/public/login/index.html` becomes `_site/login/index.html`.
+ *
+ * It is copied after `STATIC_PAGES`, which is the whole reason the two can both
+ * carry a `login/index.html`: the hosted sign-in page is the one a merged site
+ * has to serve, and the later write is what decides that rather than a rule
+ * written down somewhere else.
+ */
+const HOSTED_TREE = "netlify/public";
+
+/**
+ * The renderer shell's home inside the publish tree. `buildRenderer` deletes
+ * its own target before writing, so this must be a subdirectory of `_site/` and
+ * never `_site/` itself.
+ */
+const RENDER_DIR = "_render";
 
 /**
  * The hand-written homepage tree. Its contents land at the root of the publish
@@ -321,6 +372,39 @@ function copyStaticTree(root: string, outDir: string, rel: string, destRel: stri
 // ----------------------------------------------------------- served content
 
 /**
+ * Hold `RESERVED_ROUTES` equal to what the hosted tree actually publishes.
+ *
+ * The hosted tree is copied over the same root the documents were written into,
+ * and a copy overwrites without asking. So a hosted page whose top-level name no
+ * document may claim, but which nobody added to `RESERVED_ROUTES`, is a document
+ * that disappears from the site on a green build with no diagnostic -- exactly
+ * the class of silent loss a rebuilt-from-scratch publish tree is prone to.
+ *
+ * Reading the directory rather than trusting the list is what makes adding
+ * `netlify/public/status/` a build failure until the route is declared. It is
+ * the same shape as the renderer build holding `STATIC_FILES` equal to
+ * `renderer/public/`, and for the same reason: a list that is both the input and
+ * the check drifts in silence.
+ */
+function preflightHostedRoutes(root: string): void {
+  const stat = lstat(root, HOSTED_TREE);
+  if (stat === null) return;
+  let names: string[];
+  try {
+    names = readdirSync(join(root, HOSTED_TREE));
+  } catch (e) {
+    return fail(`${HOSTED_TREE}: ${osError(e)}`);
+  }
+  const undeclared = names.filter((name) => !RESERVED_ROUTES.has(name)).sort();
+  if (undeclared.length > 0) {
+    fail(
+      `${HOSTED_TREE} publishes ${undeclared.join(", ")} at the site root, ` +
+        "which RESERVED_ROUTES does not reserve: a document slug could claim it and be overwritten",
+    );
+  }
+}
+
+/**
  * Preflight everything the repository serves as committed content, before the
  * previous `_site/` is deleted: the homepage tree, the skill tree, and each
  * served root file. Every one of them is optional, so a repository that carries
@@ -364,6 +448,100 @@ function copyServedContent(root: string, outDir: string): void {
     } catch (e) {
       return fail(`_site/${rel}: ${osError(e)}`);
     }
+  }
+}
+
+// ------------------------------------------------------------- render shell
+
+/** The two keys the renderer build reads. It reads no others, and no secrets. */
+const RENDERER_KEYS = ["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN"] as const;
+
+const RENDERER_BUILD = "renderer/scripts/build.mjs";
+
+/** The part of `renderer/scripts/build.mjs` this builder calls. */
+interface RendererBuild {
+  buildRenderer(options: {
+    outDir: string;
+    env: NodeJS.ProcessEnv;
+    production: boolean;
+  }): Promise<{ files: string[] }>;
+  readOrigin(env: NodeJS.ProcessEnv, key: string, production: boolean): string;
+}
+
+/**
+ * Load the renderer build, or decide there is no renderer shell to publish.
+ *
+ * The module is loaded by path rather than imported, for two reasons that both
+ * have to hold. It lives outside this package, so a static import would put a
+ * file the published tarball does not carry on the package's module graph; and
+ * an installed consumer building their own repository has no `renderer/` at all,
+ * which is an absence to skip rather than a build failure.
+ *
+ * The other skip is configuration: a repository with neither `HOSTED_APP_ORIGIN`
+ * nor `HOSTED_RENDER_ORIGIN` set is a self-hosted document site, and it gets the
+ * site it got before the renderer existed. Setting exactly one of them is not
+ * that case — it is a half-configured deployment, and `readOrigin` below fails
+ * it by name.
+ *
+ * Both origins are parsed here, in the preflight pass, so a malformed one costs
+ * nothing: the previous `_site/` is still on disk when it throws.
+ */
+async function preflightRenderShell(root: string, production: boolean): Promise<RendererBuild | null> {
+  const stat = lstat(root, RENDERER_BUILD);
+  if (stat === null) return null;
+  if (!stat.isFile()) return fail(`${RENDERER_BUILD}: expected a regular file when present`);
+  if (RENDERER_KEYS.every((key) => (process.env[key] ?? "") === "")) return null;
+
+  let module: RendererBuild;
+  try {
+    module = (await import(pathToFileURL(join(root, RENDERER_BUILD)).href)) as RendererBuild;
+  } catch (e) {
+    return fail(`${RENDERER_BUILD}: ${osError(e)}`);
+  }
+  if (typeof module.buildRenderer !== "function" || typeof module.readOrigin !== "function") {
+    return fail(`${RENDERER_BUILD}: expected buildRenderer and readOrigin exports`);
+  }
+  const origins: string[] = [];
+  for (const key of RENDERER_KEYS) {
+    try {
+      origins.push(module.readOrigin(process.env, key, production));
+    } catch (e) {
+      return fail(`${RENDERER_BUILD}: ${(e as Error).message}`);
+    }
+  }
+  /* `buildRenderer` refuses two equal origins itself, and that refusal is the
+     authority -- it is what a `--out` invocation from a shell hits, and its
+     message is the one quoted everywhere. It just refuses too late for this
+     builder: by the time it runs, `_site/` has been deleted and every document
+     rebuilt, so a typo in one operator variable costs the previous publish tree.
+     Asking the same question here is a duplicated *check*, not a duplicated
+     rule; the message defers to the one that owns it. */
+  if (origins[0] === origins[1]) {
+    fail(`${RENDERER_BUILD}: HOSTED_RENDER_ORIGIN must not be the same origin as HOSTED_APP_ORIGIN`);
+  }
+  return module;
+}
+
+/**
+ * Write the renderer shell into `_site/_render/`.
+ *
+ * Every rule the renderer build already makes survives the change of output
+ * directory: it refuses two equal origins, it refuses a target that contains its
+ * own source tree, it holds `renderer/public/` equal to its declared file list,
+ * and it reads the written directory back and requires it to be exactly the
+ * expected set. What it no longer writes is `_headers`: on one site the edge
+ * gate is the only header authority, and a `_headers` file beside it would be a
+ * second one that a reader of either cannot see.
+ */
+async function buildRenderShell(
+  module: RendererBuild,
+  outDir: string,
+  production: boolean,
+): Promise<void> {
+  try {
+    await module.buildRenderer({ outDir: join(outDir, RENDER_DIR), env: process.env, production });
+  } catch (e) {
+    return fail(`_site/${RENDER_DIR}: ${(e as Error).message}`);
   }
 }
 
@@ -413,9 +591,39 @@ ${rows}
 `;
 }
 
+/**
+ * The one static rewrite the merged site carries, and it exists because a
+ * contract names an exact path.
+ *
+ * C3 freezes the browser URL at `/publish/authorize` with no query string, and
+ * `validateStartResponse` refuses a start response whose URL is anything else.
+ * The page is committed at `netlify/public/publish/authorize.html`, and serving
+ * a flat `.html` asset at its extensionless path is Netlify *post-processing* —
+ * which `[build.processing] skip_processing = true` turns off. Relying on it
+ * would make the one path the contract names 404, and the whole approval flow
+ * unreachable, on a setting whose stated purpose is unrelated.
+ *
+ * Status 200 is a rewrite rather than a redirect: the visitor stays on the
+ * contract path, so no token-bearing fragment is carried through a `Location`
+ * and no extra hop appears in history.
+ *
+ * It is generated here rather than declared in `netlify.toml` because the
+ * publish tree already carries a generated `_redirects` and a rule split across
+ * two files is a rule nobody reads in one place. Netlify applies `_redirects`
+ * after the TOML rules, and the document routes below cannot match this path:
+ * `/publish` is a reserved route.
+ *
+ * It is emitted only when the hosted tree was actually copied. A repository
+ * without one -- an installed consumer building their own documents -- would
+ * otherwise get a rewrite pointing at a file that is not in its publish tree,
+ * which turns a page that simply does not exist into a page that exists and
+ * 404s through a rule.
+ */
+export const HOSTED_REWRITES = ["/publish/authorize /publish/authorize.html 200"];
+
 /** Permanent-ID and alias redirects, grouped in ascending slug order. */
-function renderRedirects(docs: SiteMetadata[]): string {
-  const lines: string[] = [];
+function renderRedirects(docs: SiteMetadata[], hosted: boolean): string {
+  const lines: string[] = hosted ? [...HOSTED_REWRITES] : [];
   for (const doc of docs) {
     lines.push(`/d/${doc.id} /${doc.slug}/ 301`);
     lines.push(`/d/${doc.id}/* /${doc.slug}/ 301`);
@@ -449,11 +657,18 @@ function preflightEnhancer(root: string): Enhancer | null {
 }
 
 /** Build the complete repo-backed site and refresh each artifact copy. */
-export function buildSite(root: string): SiteBuildResult {
+export async function buildSite(root: string): Promise<SiteBuildResult> {
+  // Previews and branch deploys are not production, and the renderer build
+  // holds its origins to https in production exactly as the application does.
+  const context = process.env.CONTEXT ?? "production";
+  const production = context === "production";
+
   // Preflight everything before the previous _site/ is deleted or any
-  // committed artifact is rebuilt: enhancer type, the document inventory, and
-  // every entry in an existing login/ or invite/ tree.
+  // committed artifact is rebuilt: enhancer type, the document inventory,
+  // every entry in an existing login/ or invite/ tree, and the two renderer
+  // origins.
   const enhancer = preflightEnhancer(root);
+  const renderer = await preflightRenderShell(root, production);
 
   const instances = collectDocuments(root);
   if (instances.length === 0) {
@@ -465,6 +680,8 @@ export function buildSite(root: string): SiteBuildResult {
   validateInventory(docs);
 
   for (const page of STATIC_PAGES) validateStaticTree(root, page);
+  validateStaticTree(root, HOSTED_TREE);
+  preflightHostedRoutes(root);
   preflightServedContent(root);
 
   const outDir = resolve(root, "_site");
@@ -502,6 +719,14 @@ export function buildSite(root: string): SiteBuildResult {
   }
 
   for (const page of STATIC_PAGES) copyStaticTree(root, outDir, page);
+  // After the root pages, so the hosted sign-in page wins `login/index.html`.
+  // The tree's *contents* land at the root: `netlify/public/viewer.js` is
+  // `/viewer.js`, `netlify/public/publish/authorize.html` is
+  // `/publish/authorize.html`, which is the path the rewrite above names.
+  const hosted = lstat(root, HOSTED_TREE) !== null;
+  copyStaticTree(root, outDir, HOSTED_TREE, "");
+
+  if (renderer !== null) await buildRenderShell(renderer, outDir, production);
 
   if (enhancer !== null) {
     const assetsDir = join(outDir, "_assets");
@@ -515,7 +740,7 @@ export function buildSite(root: string): SiteBuildResult {
 
   try {
     writeFileSync(join(outDir, "index.html"), renderIndex(root, docs));
-    writeFileSync(join(outDir, "_redirects"), renderRedirects(docs));
+    writeFileSync(join(outDir, "_redirects"), renderRedirects(docs, hosted));
   } catch (e) {
     return fail(`_site: ${osError(e)}`);
   }
@@ -525,8 +750,7 @@ export function buildSite(root: string): SiteBuildResult {
 
   // Previews and branch deploys must not be indexed; production output has no
   // _headers file (the clean rebuild already removed any stale one).
-  const context = process.env.CONTEXT ?? "production";
-  if (context !== "production") {
+  if (!production) {
     try {
       writeFileSync(join(outDir, "_headers"), "/*\n  X-Robots-Tag: noindex\n");
     } catch (e) {
