@@ -47,7 +47,7 @@ import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -696,11 +696,20 @@ section("the census carries its own Netlify credentials", async () => {
     hostedBlobsSpecifier().includes("/hosted/node_modules/@netlify/blobs/"),
     "the census must load @netlify/blobs from hosted/node_modules, not the root install",
   );
-  assert.throws(
-    () => hostedBlobsSpecifier(new URL("./nowhere/package.json", import.meta.url)),
-    /npm --prefix hosted ci/,
-    "a missing install must name the command that fixes it",
-  );
+  /* Resolved from a fresh temporary directory, not from a path inside the repo:
+     the root install also carries `@netlify/blobs`, so a `from` under `scripts/`
+     would walk up and find it, and this assertion would pass for the wrong
+     reason on a machine that had run `npm ci` at the root. */
+  const empty = await mkdtemp(join(tmpdir(), "archon-census-noinstall-"));
+  try {
+    assert.throws(
+      () => hostedBlobsSpecifier(pathToFileURL(join(empty, "package.json"))),
+      /npm --prefix hosted ci/,
+      "a missing install must name the command that fixes it",
+    );
+  } finally {
+    await rm(empty, { recursive: true, force: true });
+  }
 });
 
 /* ------------------------------------------------------------------ */
