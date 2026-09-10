@@ -55,11 +55,39 @@
  *     rather than by the file, and that manifest is not something this gate
  *     reads. Refusing both by extension keeps the rule where a reviewer can see
  *     it, in the filename.
+ *  6. **No hosted module acquires a CommonJS `require`.** Rule 5 stops a
+ *     `.cjs` file; it does not stop an allowed `.mjs` one from importing
+ *     `createRequire` out of `node:module` and requiring
+ *     `../../netlify/lib/legacy.cjs` through it. That is the same escape by a
+ *     different door, so this rule shuts all three of them. Builtin imports are
+ *     an allowlist, which refuses `node:module` and fails closed for every
+ *     builtin nobody has argued for yet. The two names that hand out a builtin
+ *     namespace without going through the resolver at all - `createRequire`
+ *     itself and `process.getBuiltinModule` - are refused lexically, like rule
+ *     4 and for the same reason: an acquisition inside a function body the gate
+ *     never calls is invisible to any hook. And the hook is synchronous, so a
+ *     `require()` that does execute is journaled and judged by rules 1 to 3
+ *     like any other edge.
  *
- * The import graph comes from `scripts/hosted-module-loader.mjs`, a resolution
- * hook that records what Node actually resolved. An earlier version of this
- * gate scanned the source text instead, and got it wrong in both directions -
- * see that file's header for the two inputs that broke it.
+ * The import graph comes from a `module.registerHooks` resolution hook that
+ * records what Node actually resolved. An earlier version of this gate scanned
+ * the source text instead, and got it wrong in both directions: a regular
+ * expression has no state for regex literals, so `/\/\//` made the scanner
+ * treat the rest of the line as a comment and drop a real import, while
+ * `/["']/` flipped it into string state and turned a sentence in a doc comment
+ * into a phantom specifier. Asking the resolver is exact by construction.
+ *
+ * The hook is the synchronous kind rather than the `register()` kind on
+ * purpose. Asynchronous hooks run on their own thread and are consulted only
+ * for ESM, so a `require()` edge never reached them and the boundary rules
+ * simply did not apply to it; synchronous hooks run in-thread and see both
+ * module systems, which is what makes rule 6's third door a fault rather than a
+ * blind spot. They need Node 22.15 or newer; on anything older `registerHooks`
+ * is not a function, which the handler at the foot of this file turns into a
+ * one-line FAIL. That is the right answer and it needs no guard of its own: a
+ * gate that cannot see the whole graph must not report PASS, and an explicit
+ * version check here would be a branch no test on a supported Node could ever
+ * reach.
  *
  * Functions must also present the shape Netlify invokes - a callable default
  * export and a `config` object - and must be routed under `/api/hosted/`,
@@ -88,9 +116,8 @@
  * silent. It narrows nothing and skips nothing: CI passes no flag.
  */
 
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { register } from "node:module";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -138,6 +165,38 @@ const REFUSED = Object.freeze({
   ".cts": "TypeScript is not JavaScript this gate can load",
   ".tsx": "TypeScript is not JavaScript this gate can load",
 });
+
+/**
+ * The Node builtins a hosted deploy module may import. An allowlist rather than
+ * a denylist, so a builtin nobody has argued for is refused rather than
+ * silently permitted the day Node adds it.
+ *
+ * `node:module` is the entry that matters and it can never join this list: it
+ * exports `createRequire`, and a `require` built from it resolves CommonJS,
+ * which is how an allowed `.mjs` file reached `netlify/lib/legacy.cjs` while
+ * this gate printed PASS. The rest of the list is what the hosted tree actually
+ * imports plus the neighbours a handler would reach for; adding one is a
+ * deliberate edit a reviewer can see, which is the whole point of the shape.
+ */
+const ALLOWED_BUILTINS = Object.freeze(["node:buffer", "node:crypto", "node:url", "node:util"]);
+
+/**
+ * Identifiers that hand out a builtin namespace without the resolver seeing it,
+ * refused lexically wherever they are spelled.
+ *
+ * `createRequire` is the function that turns an ESM module into a CommonJS
+ * requirer, and `process.getBuiltinModule` fetches `node:module` off a global
+ * with no import at all - so the builtin allowlist above, which reads
+ * resolutions, cannot see the second one coming. Both are refused on raw source
+ * for rule 4's reason: an acquisition inside a function body this gate never
+ * calls is observed by no hook, synchronous or otherwise.
+ *
+ * `process.binding` is not here. It is deprecated, restricted to a handful of
+ * internal tables, and none of them yields a `require`; banning the word
+ * `binding` would fail builds over ordinary prose, which is the failure mode
+ * the text-scanning version of this gate was replaced for.
+ */
+const REQUIRE_ESCAPES = Object.freeze(["createRequire", "getBuiltinModule"]);
 
 /** Extensions the placement and shape rules apply to at all. */
 const SCANNED = Object.freeze([LOADABLE, ...Object.keys(REFUSED)]);
@@ -225,6 +284,27 @@ function usesDynamicImport(source) {
     if (before !== undefined && IDENTIFIER_PART.test(before)) continue;
     if (source[afterTrivia(source, from)] === "(") return true;
   }
+}
+
+/**
+ * The require-granting names `source` spells, as whole identifiers.
+ *
+ * Whole identifiers, so a property named `createRequireToken` is not one, and
+ * the same over-approximation as rule 4 otherwise: strings and comments count,
+ * because a check that respected them could be fed the name through a template
+ * literal. Both names are terms of art rather than English, so the cost of the
+ * over-approximation in a tree this size is a sentence rewritten in a comment.
+ */
+function requireEscapes(source) {
+  return REQUIRE_ESCAPES.filter((name) => {
+    for (let at = source.indexOf(name); at !== -1; at = source.indexOf(name, at + name.length)) {
+      const before = source[at - 1];
+      const after = source[at + name.length];
+      const bounded = (character) => character === undefined || !IDENTIFIER_PART.test(character);
+      if (bounded(before) && bounded(after)) return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -317,7 +397,14 @@ function resolutionFault(record, { hostedRoot, hostedModules, fixtureDir, depend
   if (!hostedModules.has(parent)) return null;
 
   const from = relative(repoRoot, parent);
-  if (url.startsWith("node:")) return null;
+  if (url.startsWith("node:")) {
+    /* Rule 6, read off a resolution: `node:module` hands out `createRequire`,
+       and a require built from it resolves a CommonJS graph. The list is an
+       allowlist so an unargued builtin fails closed. */
+    return ALLOWED_BUILTINS.includes(url)
+      ? null
+      : `${from} imports ${url}, which is not one of the builtins the hosted deploy tree may import (${ALLOWED_BUILTINS.join(", ")})`;
+  }
   if (!url.startsWith("file:")) {
     return `${from} imports ${specifier}, which resolves to a non-file URL`;
   }
@@ -405,10 +492,15 @@ async function main(argv) {
       continue;
     }
 
-    /* Rule 4, on raw source including comments. See the header: this is the
-       only spelling of the rule that a template literal cannot slip past. */
-    if (usesDynamicImport(readFileSync(path, "utf8"))) {
+    /* Rules 4 and 6, on raw source including comments. See the header: this is
+       the only spelling of either rule that a template literal cannot slip
+       past, and the only one that reaches a function body nothing calls. */
+    const source = readFileSync(path, "utf8");
+    if (usesDynamicImport(source)) {
       faults.push(`${shown} uses dynamic import; the hosted deploy tree is static imports only`);
+    }
+    for (const name of requireEscapes(source)) {
+      faults.push(`${shown} names ${name}; the hosted deploy tree may not acquire a CommonJS require`);
     }
 
     deployModules.push(path);
@@ -426,11 +518,17 @@ async function main(argv) {
   }
 
   /* Record what Node resolves, then reason about resolved URLs rather than
-     about source text. */
-  const journalDir = mkdtempSync(join(tmpdir(), "hosted-modules-"));
-  const journal = join(journalDir, "resolutions.jsonl");
-  writeFileSync(journal, "");
-  register("./hosted-module-loader.mjs", { parentURL: import.meta.url, data: { journal } });
+     about source text. Synchronous hooks run in-thread and are consulted for
+     `require()` as well as `import`, so the records below are the whole graph
+     rather than its ESM half. */
+  const records = [];
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const result = nextResolve(specifier, context);
+      records.push({ specifier, parentURL: context.parentURL ?? null, url: result.url });
+      return result;
+    },
+  });
 
   const hostedModules = new Set(deployModules);
   const routes = new Map();
@@ -458,18 +556,6 @@ async function main(argv) {
       if (owner !== undefined) faults.push(`${shown} claims ${route}, already claimed by ${owner}`);
       else routes.set(route, shown);
     }
-  }
-
-  let records = [];
-  try {
-    records = readFileSync(journal, "utf8")
-      .split("\n")
-      .filter((line) => line !== "")
-      .map((line) => JSON.parse(line));
-  } catch (error) {
-    faults.push(`the resolution journal could not be read: ${error.message.split("\n")[0]}`);
-  } finally {
-    rmSync(journalDir, { recursive: true, force: true });
   }
 
   const seen = new Set();

@@ -56,6 +56,13 @@ the build if it ever does. Nothing about the root deployment or
   rules above are read off an ESM resolution hook, which Node never consults for
   a CommonJS `require()`, and a `.js` file's module system is decided by the
   nearest `package.json` rather than by the file itself.
+- **No CommonJS `require`, however it is obtained.** `.mjs` alone does not stop
+  `createRequire`, so builtin imports are an allowlist (`node:buffer`,
+  `node:crypto`, `node:url`, `node:util`) that `node:module` can never join, and
+  the names `createRequire` and `getBuiltinModule` are refused anywhere in the
+  source for the same reason dynamic `import(` is: an acquisition inside a
+  function body nothing calls is invisible to any hook. Needing another builtin
+  is a one-line reviewed change to `ALLOWED_BUILTINS`.
 
 ## Modules
 

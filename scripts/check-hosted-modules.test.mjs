@@ -383,6 +383,73 @@ test("a CommonJS module cannot smuggle a require() past the resolution hook", ()
   );
 });
 
+test("an .mjs module cannot build a require() with createRequire", () => {
+  /* Rule 5 stops `leak.cjs`; it does not stop an allowed `.mjs` file from
+     importing `createRequire` out of `node:module` and requiring the same
+     legacy file through it. That tree printed PASS. All three doors of rule 6
+     are asserted here, because each one closes a case the others do not: the
+     lexical name reaches a function body nothing calls, the builtin allowlist
+     is what makes `node:module` unreachable by import, and the resolution fault
+     is the synchronous hook seeing a `require()` edge at all - the thing the
+     asynchronous hook this gate used to register could not do. */
+  const stderr = assertRejected(
+    (root, hosted) => {
+      write(join(root, "netlify", "lib", "legacy.cjs"), "module.exports = { legacy: true };\n");
+      write(
+        join(hosted, "lib", "leak.mjs"),
+        'import { createRequire } from "node:module";\n' +
+          "const require = createRequire(import.meta.url);\n" +
+          'export const leak = require("../../netlify/lib/legacy.cjs").legacy;\n',
+      );
+    },
+    /leak\.mjs names createRequire; the hosted deploy tree may not acquire a CommonJS require/,
+  );
+  assert.match(stderr, /leak\.mjs imports node:module, which is not one of the builtins/);
+  assert.match(stderr, /leak\.mjs imports \.\.\/\.\.\/netlify\/lib\/legacy\.cjs, which resolves outside hosted\//);
+});
+
+test("a require() acquired inside a function nothing calls is still refused", () => {
+  /* No hook, synchronous or otherwise, observes this: the module links, the
+     body never runs, and the escape waits for the first production request.
+     Which is why rule 6 is spelled lexically as well as read off resolutions.
+     `process.getBuiltinModule` is the sharper half of the pair - it reaches
+     `node:module` off a global, so there is no resolution for the builtin
+     allowlist to judge even when the code does run. */
+  for (const [name, body] of [
+    ["createRequire", "const build = createRequire;"],
+    ["getBuiltinModule", 'const { createRequire: build } = process.getBuiltinModule("node:module");'],
+  ]) {
+    assertRejected(
+      (root, hosted) => {
+        write(join(root, "netlify", "lib", "legacy.cjs"), "module.exports = { legacy: true };\n");
+        write(
+          join(hosted, "lib", "later.mjs"),
+          "export async function onRequest() {\n" +
+            `  ${body}\n` +
+            '  return build(import.meta.url)("../../netlify/lib/legacy.cjs");\n' +
+            "}\n",
+        );
+      },
+      new RegExp(`later\\.mjs names ${name}; the hosted deploy tree may not acquire a CommonJS require`),
+    );
+  }
+});
+
+test("a builtin nobody argued for is refused rather than allowed by default", () => {
+  /* The rule is an allowlist so that the next builtin with a hole in it is
+     refused before anyone notices it exists. `node:child_process` is the
+     illustration: nothing in a hosted deploy needs it, and a denylist written
+     around `node:module` would have let it through. */
+  assertRejected(
+    (root, hosted) =>
+      write(
+        join(hosted, "lib", "spawner.mjs"),
+        'import { spawnSync } from "node:child_process";\nexport const run = spawnSync;\n',
+      ),
+    /spawner\.mjs imports node:child_process, which is not one of the builtins the hosted deploy tree may import/,
+  );
+});
+
 test("a .js module is refused, because its module system is not in the filename", () => {
   /* `.js` is whatever the nearest `package.json` says it is, and that manifest
      is not a file this gate reads - a nested `{"type":"commonjs"}` would turn
