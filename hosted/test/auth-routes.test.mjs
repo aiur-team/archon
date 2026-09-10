@@ -368,7 +368,12 @@ test("an empty destination field is the default, not a refusal", async () => {
       form: { destination: "" },
     }),
   );
-  assert.equal(response.status, 303, "a form submits an empty string, not an absent field");
+  assert.equal(response.status, 303);
+  assert.equal(
+    new URL(response.headers.get("location")).origin,
+    "https://github.com",
+    "a form submits an empty string, not an absent field, and empty means the default",
+  );
 });
 
 test("the destination never travels to GitHub", async () => {

@@ -132,7 +132,11 @@ test("the credential travels in the body, and the redirect_uri is the configured
 });
 
 test("an unexpected granted scope is refused rather than used", async () => {
-  for (const scope of ["repo", "read:user", "repo,workflow"]) {
+  /* A scope in a shape this code cannot read is not a "no". `["repo"]` is not a
+     non-empty string, so a `typeof === "string"` test would wave it through and
+     the service would use a token carrying permissions the consent screen never
+     showed. */
+  for (const scope of ["repo", "read:user", "repo,workflow", ["repo"], { repo: true }, 1]) {
     const provider = githubProvider({
       token: { access_token: "t", token_type: "bearer", scope },
     });
