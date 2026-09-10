@@ -308,6 +308,17 @@ export const WRITE_CASES = Object.freeze([
   { name: "an address is not a domain", input: ["ann@example.com"], reason: "invalid_domain" },
   { name: "a URL is not a domain", input: ["https://example.com"], reason: "invalid_domain" },
   { name: "a homoglyph domain is refused", input: ["exаmple.com"], reason: "invalid_domain" },
+  {
+    /* The one homoglyph the label pattern would *not* catch on its own, and
+       therefore the reason the grammar rejects non-ASCII before it lower-cases
+       rather than after. U+212A KELVIN SIGN lower-cases to an ASCII `k`, so
+       `booK.example` would fold into `book.example` - a domain nobody
+       typed, spelled identically to one somebody may have listed. Every other
+       non-ASCII scalar is refused twice over; this one is refused once, here. */
+    name: "a character that lower-cases into ASCII is refused before it can fold",
+    input: [`boo\u212A.example`],
+    reason: "invalid_domain",
+  },
   { name: "an empty string is not a domain", input: [""], reason: "invalid_domain" },
   { name: "whitespace inside is not a domain", input: ["exa mple.com"], reason: "invalid_domain" },
   { name: "a hyphen may not end a label", input: ["example-.com"], reason: "invalid_domain" },

@@ -343,8 +343,20 @@ test("the grammar is the one the collaboration tree uses", () => {
   /* The whole point of lifting it: `netlify/lib/access.mjs` now calls this, so
      a spelling that one tree admits is a spelling the other admits. These are
      the payloads the domain rules depend on being refused upstream. */
-  for (const value of ["ann@exаmple.com", "ann@example.com.", "ann@localhost", "a@@b.com", ""]) {
-    assert.equal(normalizeEmailOrNull(value), null, value);
+  for (const value of [
+    "ann@exаmple.com",
+    "ann@example.com.",
+    "ann@localhost",
+    "a@@b.com",
+    "",
+    /* U+212A KELVIN SIGN lower-cases to an ASCII `k`, so an address at
+       `book.example` would fold into one at `book.example` and exact-match a
+       listed domain nobody at that domain issued. This is the case that makes
+       "refuse non-ASCII, then lower-case" the right order rather than a
+       stylistic one. */
+    `ann@boo\u212A.example`,
+  ]) {
+    assert.equal(normalizeEmailOrNull(value), null, JSON.stringify(value));
   }
   assert.equal(normalizeEmailOrNull("  Ann@Example.COM "), "ann@example.com");
 });

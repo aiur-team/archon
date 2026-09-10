@@ -284,6 +284,54 @@ test("the contract lifetimes are the contract's, not whatever the fixtures say",
   assert.equal(HOSTED_LIMITS.TITLE_MAX_SCALARS, 160);
 });
 
+test("a stored domain list must already be normalized, sorted and unique", () => {
+  /* `validatePublication` validates the *stored* form and normalizes nothing,
+     for the same reason `requireNormalizedEmail` does not: `Example.COM` in a
+     record has not been through `normalizeDomainList`, and lower-casing it here
+     would make two spellings of one policy both valid at this boundary and
+     different at the `===` that decides who reads the document. Sorted and
+     unique is enforced rather than assumed because the store compares records
+     as canonical values - two orderings of one list would be two records, and a
+     transition would refuse itself. */
+  const withList = (allowedDomains) =>
+    validatePublication(replacing(PUBLICATION_FIXTURES.complete, { allowedDomains }));
+
+  assert.deepEqual(withList(["a.example.com", "b.example.com"]).allowedDomains, [
+    "a.example.com",
+    "b.example.com",
+  ]);
+  assert.deepEqual(withList([]).allowedDomains, []);
+
+  for (const list of [
+    ["Example.COM"],
+    [" example.com "],
+    ["example.com."],
+    ["localhost"],
+    ["exаmple.com"],
+    ["b.example.com", "a.example.com"],
+    ["example.com", "example.com"],
+    ["example.com", 7],
+    "example.com",
+    Array.from({ length: 21 }, (_, index) => `d${index}.example.net`),
+  ]) {
+    rejects(() => withList(list), { field: "publication.allowedDomains" });
+  }
+});
+
+test("an absent domain list reads as an empty one, and never as a fault", () => {
+  /* The upgrade-on-read half of the version rule. A record written before
+     ACN-007 has no `allowedDomains`, and `publication-store.mjs` turns a record
+     it cannot interpret into a 503 - so reading this as a fault would take every
+     already-stored document offline. */
+  const { allowedDomains, ...legacy } = validatePublication(PUBLICATION_FIXTURES.complete);
+  for (const value of [undefined, null]) {
+    const record = validatePublication({ ...legacy, v: 1, allowedDomains: value });
+    assert.deepEqual(record.allowedDomains, []);
+    assert.equal(record.v, 2);
+  }
+  assert.deepEqual(validatePublication({ ...legacy, v: 1 }).allowedDomains, []);
+});
+
 test("the fixture lifetimes are the declared lifetimes", () => {
   /* A hand-written timestamp drifted to 720 seconds against a declared
      600-second upload TTL, so the constants and the fixtures now have to agree
