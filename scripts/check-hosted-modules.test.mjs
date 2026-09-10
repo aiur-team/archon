@@ -212,6 +212,38 @@ test("dynamic import is refused however its specifier is spelled", () => {
   }
 });
 
+test("dynamic import is refused when a comment separates the two tokens", () => {
+  /* `import` and `(` are separate tokens, so every form below is the same
+     dynamic import as `import(`. A whitespace-only text search reads them as
+     prose, and because the expression sits in a function nobody calls, the
+     resolution hook never sees the escape out of `hosted/` either - the file
+     would deploy with both the ban and the boundary rules bypassed. */
+  for (const body of [
+    'export async function load() { return import/* legacy */("../../netlify/lib/identity.mjs"); }\n',
+    'export async function load() { return import /*\n multi\n line\n*/ ("../test/fixtures.mjs"); }\n',
+    'export async function load() { return import // trailing\n("../../netlify/lib/identity.mjs"); }\n',
+    'export async function load() { return import/*a*/ /*b*/\t("../test/fixtures.mjs"); }\n',
+  ]) {
+    assertRejected(
+      (root, hosted) => write(join(hosted, "lib", "commented.mjs"), body),
+      /uses dynamic import/,
+    );
+  }
+});
+
+test("a name merely ending in import is not a dynamic import", () => {
+  /* The clean tree must stay clean: a rule that fires on `reimport(` would make
+     the gate fail on ordinary code, and a gate that fails on everything teaches
+     everyone to ignore it. */
+  const root = cleanTree();
+  write(
+    join(root, HOSTED_DIR, "lib", "named.mjs"),
+    "function reimport(x) { return x; }\nexport const v = reimport(1);\n",
+  );
+  const { status, stderr } = runGate(root);
+  assert.equal(status, 0, stderr);
+});
+
 test("deployable code outside lib/ and functions/ is refused rather than unscanned", () => {
   for (const where of ["edge-functions", "handlers", "middleware"]) {
     assertRejected(

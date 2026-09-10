@@ -40,8 +40,11 @@
  *     cannot save us, since the specifier can be a template literal or a
  *     computed expression. Banning the construct outright is the only rule that
  *     actually holds, so this one is enforced on raw source and applies even
- *     inside a comment. Hosted deploy modules have no need for one; write
- *     "dynamic import" in prose if you must mention it.
+ *     inside a comment. It is lexical rather than a text search, because
+ *     `import` and `(` are two tokens and JavaScript lets a comment sit between
+ *     them: a whitespace-only pattern reads `import/*x*\/("...")` as prose.
+ *     Hosted deploy modules have no need for one; write "dynamic import" in
+ *     prose if you must mention it.
  *
  * The import graph comes from `scripts/hosted-module-loader.mjs`, a resolution
  * hook that records what Node actually resolved. An earlier version of this
@@ -132,6 +135,52 @@ function packageOf(specifier) {
 /** Whether a specifier addresses a path rather than a package. */
 function isRelative(specifier) {
   return specifier.startsWith(".") || specifier.startsWith("/");
+}
+
+/**
+ * The index of the next thing after `index` that is not between-token filler.
+ *
+ * JavaScript allows whitespace *and* both comment forms wherever it allows a
+ * space, so `import` and its `(` may legally be separated by either. The
+ * pattern is sticky so it consumes filler from exactly `index` onward, and
+ * every alternative is optional, so it always matches - possibly emptily, when
+ * the next character is already real code. An unterminated comment matches no
+ * alternative and simply ends the run at its opening slash, which is not a `(`
+ * either way, so there is no separate case for it.
+ */
+function afterTrivia(source, index) {
+  const filler = /(?:\s+|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*/y;
+  filler.lastIndex = index;
+  filler.exec(source);
+  return filler.lastIndex;
+}
+
+/** A character that can continue an identifier, so `reimport` is not `import`. */
+const IDENTIFIER_PART = /[\p{ID_Continue}$\u200C\u200D]/u;
+
+/**
+ * Whether the raw source spells a dynamic `import(` anywhere.
+ *
+ * This is rule 4, and it is deliberately lexical rather than syntactic: it runs
+ * on raw source including strings and comments, because an over-approximation
+ * fails closed and a scanner that understood string context could be fed the
+ * construct through a template literal. What it does understand is the one
+ * thing a text search got wrong - `import` and `(` are separate tokens, so
+ * a comment between them is the same dynamic import as `import(`, and a
+ * whitespace-only text search let that spelling through into a function body
+ * the resolution hook never observes.
+ */
+function usesDynamicImport(source) {
+  const token = "import";
+  let from = 0;
+  for (;;) {
+    const at = source.indexOf(token, from);
+    if (at === -1) return false;
+    from = at + token.length;
+    const before = source[at - 1];
+    if (before !== undefined && IDENTIFIER_PART.test(before)) continue;
+    if (source[afterTrivia(source, from)] === "(") return true;
+  }
 }
 
 /**
@@ -314,7 +363,7 @@ async function main(argv) {
 
     /* Rule 4, on raw source including comments. See the header: this is the
        only spelling of the rule that a template literal cannot slip past. */
-    if (/\bimport\s*\(/.test(readFileSync(path, "utf8"))) {
+    if (usesDynamicImport(readFileSync(path, "utf8"))) {
       faults.push(`${shown} uses dynamic import; the hosted deploy tree is static imports only`);
     }
 
