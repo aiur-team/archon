@@ -205,22 +205,29 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The sniff that separates an HTML artifact from bytes that are not markup.
  *
- * One start tag, not a document element. `docbuild` composes an artifact as a
+ * Markup, not a document element. `docbuild` composes an artifact as a
  * *fragment* — its own `layout.html` begins at `<meta name="doc-id">` and never
  * emits `<html>`, `<head>` or a doctype — because the hosted renderer supplies
  * the document element itself and drops the artifact into a sandboxed `srcdoc`
  * body. Requiring `<html>` here therefore refused every artifact this package
  * can build, which is a refusal no user could act on: the file was correct and
  * the check was wrong. What the check is actually for is catching a person who
- * pointed `--file` at a PDF, a JSON dump or their notes, and one start tag
+ * pointed `--file` at a PDF, a JSON dump or their notes, and the rule below
  * still catches all three.
  *
  * `hosted/lib/contracts.mjs` applies the same rule to the uploaded body. The
  * two have to agree: a client-side refusal is an actionable local error, and
  * the same bytes refused only by the server would be a failed upload after a
  * person had already approved it.
+ *
+ * A *closing* tag rather than any start tag, because "looks like a tag" is not
+ * a property prose lacks: `a<b and c>d` satisfies a start-tag pattern and is
+ * plainly not markup. Requiring `</name>` (or a doctype, or a self-closing
+ * element) costs a real document nothing -- an artifact with no closing tag
+ * anywhere is not a document -- and refuses the notes file somebody pointed
+ * `--file` at by mistake.
  */
-const HTML_MARKUP = /<[a-z][a-z0-9-]*[\s>/]/i;
+const HTML_MARKUP = /<!doctype\s+html|<\/[a-z][a-z0-9-]*\s*>|<[a-z][a-z0-9-]*(\s[^<>]*)?\/>/i;
 
 /** U+0000 and U+FEFF, spelled as escapes so this file holds no control characters. */
 const NUL = "\u0000";
@@ -413,7 +420,15 @@ export function selectServiceOrigin(
   env: NodeJS.ProcessEnv,
   localTest: boolean,
 ): string {
-  const configured = flag ?? env[SERVICE_ORIGIN_ENV] ?? RELEASED_SERVICE_ORIGIN;
+  /* An empty or whitespace-only environment variable is *unset*, not a value.
+     `??` alone treats `ARCHON_PUBLISH_SERVICE=` as configured-to-nothing, which
+     both contradicts the documented precedence -- flag, then environment, then
+     the release -- and turns a stray `export ARCHON_PUBLISH_SERVICE=` in a
+     shell profile into an unexplainable exit 22 on a release that knows its own
+     origin. */
+  const fromEnv = env[SERVICE_ORIGIN_ENV];
+  const configured =
+    flag ?? (fromEnv === undefined || fromEnv.trim() === "" ? null : fromEnv) ?? RELEASED_SERVICE_ORIGIN;
   if (configured === null || configured === undefined || configured === "") {
     throw localError(
       `no service origin configured: pass --service <https-origin> or set ${SERVICE_ORIGIN_ENV}`,

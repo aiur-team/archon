@@ -651,7 +651,14 @@ test("start refuses input that is missing, oversized or not HTML", async (t: Tes
   assert.equal(missing.code, 22);
   assert.equal(onlyObject(missing.stdout)["code"], "input_unreadable");
 
-  for (const notMarkup of ["just words\n", '{"title":"not html"}\n', "a < b and c > d\n"]) {
+  /* The unspaced comparison is the case a start-tag sniff gets wrong: `<b ` in
+     `a<b and c>d` looks exactly like the opening of an element. */
+  for (const notMarkup of [
+    "just words\n",
+    '{"title":"not html"}\n',
+    "a < b and c > d\n",
+    "if a<b and c>d then stop\n",
+  ]) {
     const notHtml = join(space.root, "plain.txt");
     writeFileSync(notHtml, notMarkup);
     const plain = await startVia({ ...space, file: notHtml }, service.origin);
@@ -1430,6 +1437,22 @@ test("selectServiceOrigin never reads anything but explicit configuration", () =
     "https://flag.example.com",
     "an explicit flag wins over the environment",
   );
+  /* An empty or whitespace-only variable is unset, not configured-to-nothing.
+     `export ARCHON_PUBLISH_SERVICE=` in a shell profile must not be able to
+     suppress a release's own origin, and it must not be reported as a
+     different failure from having set nothing at all. */
+  for (const blank of ["", "   ", "\t"]) {
+    assert.throws(
+      () => selectServiceOrigin(undefined, { ARCHON_PUBLISH_SERVICE: blank }, false),
+      (error: unknown) => {
+        assert.ok(error instanceof PublishError);
+        assert.equal(error.code, "missing_service_origin");
+        return true;
+      },
+      `a blank ${JSON.stringify(blank)} must read as unset`,
+    );
+  }
+
   assert.throws(() => selectServiceOrigin(undefined, {}, false), (error: unknown) => {
     assert.ok(error instanceof PublishError);
     assert.equal(error.code, "missing_service_origin");

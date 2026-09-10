@@ -55,22 +55,50 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
   guardedTempRoot,
   installSignalCleanup,
   removeTempRoots,
+  retainEvidenceRoot,
   sweepStaleTempRoots,
 } from "./lib/temp-roots.mjs";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The server's own descriptor validator, imported rather than restated.
+ *
+ * The fixture below is the only implementation of the agent routes this runner
+ * can reach, and a fixture that accepts whatever the client sends proves the
+ * client talks to *itself*. Holding the start body against the real
+ * `validateDescriptor` is what makes it prove the client talks to the service:
+ * a renamed, dropped or added descriptor key fails here instead of on somebody's
+ * first real publish. `scripts/test-hosted-renderer.mjs` binds the renderer to
+ * the same module for the same reason.
+ *
+ * It resolves out of `hosted/node_modules`, which CI installs several steps
+ * before this one; the message says so rather than letting an import error
+ * surface as an unexplained crash.
+ */
+let validateDescriptor;
+try {
+  ({ validateDescriptor } = await import("../hosted/lib/contracts.mjs"));
+} catch (error) {
+  process.stderr.write(
+    "FAIL  package consumer proof: cannot load hosted/lib/contracts.mjs" +
+      ` (${error.message.split("\n")[0]});` +
+      " run `npm --prefix hosted ci --ignore-scripts --no-audit --no-fund` first\n",
+  );
+  process.exit(1);
+}
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PACKAGE_DIR = join(ROOT, "templates", "docbuild");
@@ -115,7 +143,19 @@ const TEMP_PREFIX = "archon-pkg-";
  * would pass for the wrong reason.
  */
 function checkoutFallbackAbove(dir) {
-  for (let at = resolve(dir); ; at = dirname(at)) {
+  /* Resolved, not merely absolute. `dirname()` walks the *spelling* of a path,
+     so a `TMPDIR` (or a `/tmp`) that is a symlink into a checkout walks a chain
+     of ancestors that does not exist on disk and finds nothing -- while the
+     child process, whose `cwd` is the resolved path, walks the real ancestors,
+     finds `templates/base/layout.html` and builds from the repository. That is
+     the one assertion this whole file rests on, bypassed by a symlink. */
+  let start;
+  try {
+    start = realpathSync(dir);
+  } catch {
+    start = resolve(dir);
+  }
+  for (let at = start; ; at = dirname(at)) {
     if (statSafe(join(at, "templates", "base", "layout.html")) !== null) {
       return `${at}/templates/base/layout.html`;
     }
@@ -235,7 +275,18 @@ function envelope(state, expiresAt, result) {
  */
 async function startFixture() {
   const publications = new Map();
+  const violations = [];
   let plan = { kind: "approve" };
+
+  /* Recorded, never thrown. An `assert` inside the request callback is an
+     uncaught exception rather than a test failure: the process dies where it
+     stands, `main`'s cleanup never runs, the temp root leaks, and the message
+     names the fixture instead of the publisher invocation that caused it. The
+     list is asserted on the main path once the lifecycle is done. */
+  const require = (condition, message) => {
+    if (!condition) violations.push(message);
+    return condition;
+  };
 
   const server = createServer((request, response) => {
     const chunks = [];
@@ -249,8 +300,29 @@ async function startFixture() {
         response.end(JSON.stringify(json));
       };
 
-      if (url === "/api/hosted/publications" && request.method === "POST") {
-        const descriptor = JSON.parse(body.toString("utf8"));
+      if (url === "/api/hosted/publications") {
+        if (!require(request.method === "POST", `start must be POST, was ${request.method}`)) {
+          send(405, wireError("invalid_request", "only POST is supported"));
+          return;
+        }
+        if (!require(
+          request.headers["content-type"] === "application/json",
+          `start must send application/json, sent ${request.headers["content-type"]}`,
+        )) {
+          send(415, wireError("unsupported_media_type", "expected application/json"));
+          return;
+        }
+        /* The server's own validator, not a hand copy: an added, dropped or
+           renamed descriptor key is refused here exactly as production would
+           refuse it, rather than being echoed back and called a pass. */
+        let descriptor;
+        try {
+          descriptor = validateDescriptor(JSON.parse(body.toString("utf8")));
+        } catch (error) {
+          violations.push(`start descriptor is not a valid C2 descriptor: ${error.message}`);
+          send(400, wireError("invalid_request", "descriptor rejected"));
+          return;
+        }
         const publicationId = randomBytes(16).toString("hex");
         const agentSecret = randomBytes(32).toString("base64url");
         secrets.add(agentSecret);
@@ -259,7 +331,7 @@ async function startFixture() {
           descriptor,
           agentSecret,
           uploaded: false,
-          statusCalls: 0,
+          uploads: 0,
         });
         send(201, {
           v: 1,
@@ -279,6 +351,27 @@ async function startFixture() {
         return;
       }
       const [, publicationId, route] = match;
+      /* The real handlers refuse a wrong method with 405 and any browser
+         credential with 403 before they look at the bearer. A fixture that
+         answered 200 to a `GET /status` or to a request carrying `Origin`
+         would let exactly that regression ship green. */
+      const expectedMethod = route === "artifact" ? "PUT" : "POST";
+      if (!require(
+        request.method === expectedMethod,
+        `${route} must be ${expectedMethod}, was ${request.method}`,
+      )) {
+        send(405, wireError("invalid_request", `only ${expectedMethod} is supported`));
+        return;
+      }
+      for (const header of ["cookie", "origin"]) {
+        if (!require(
+          request.headers[header] === undefined,
+          `${route} must not send a ${header} header`,
+        )) {
+          send(403, wireError("forbidden", "agent endpoints do not accept browser credentials"));
+          return;
+        }
+      }
       const record = publications.get(publicationId);
       if (record === undefined) {
         send(404, wireError("not_found", "no such publication"));
@@ -304,22 +397,20 @@ async function startFixture() {
       }
 
       if (route === "artifact") {
-        assert.equal(
-          request.headers["content-type"],
-          ARTIFACT_MEDIA_TYPE,
-          "the artifact upload must carry the C3 media type",
+        require(
+          request.headers["content-type"] === ARTIFACT_MEDIA_TYPE,
+          `the artifact upload must carry ${ARTIFACT_MEDIA_TYPE}, sent ${request.headers["content-type"]}`,
         );
-        assert.equal(
-          createHash("sha256").update(body).digest("hex"),
-          record.descriptor.contentSha256,
-          "the uploaded bytes must be the approved bytes",
+        require(
+          createHash("sha256").update(body).digest("hex") === record.descriptor.contentSha256,
+          "the uploaded bytes are not the bytes the descriptor described",
         );
         record.uploaded = true;
+        record.uploads += 1;
         send(201, envelope("complete", expiresAt, receipt()));
         return;
       }
 
-      record.statusCalls += 1;
       switch (record.plan.kind) {
         case "approve":
           send(200, envelope(record.uploaded ? "complete" : "approved", expiresAt, record.uploaded ? receipt() : undefined));
@@ -345,6 +436,12 @@ async function startFixture() {
   await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
   return {
     origin: `http://127.0.0.1:${server.address().port}`,
+    /** Every protocol rule the client broke, asserted on the main path. */
+    violations,
+    /** How many times the artifact route accepted bytes for one publication. */
+    uploads(publicationId) {
+      return publications.get(publicationId)?.uploads ?? 0;
+    },
     /** The plan every publication started from now on will follow. */
     plan(next) {
       plan = next;
@@ -393,6 +490,17 @@ async function packTarball(into) {
     "npm pack left staged skill assets in the checkout; postpack did not clean up",
   );
   return join(into, tarballs[0]);
+}
+
+/** Every file under `dir`, as paths relative to it, recursively. */
+function filesUnder(dir, prefix = "") {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...filesUnder(join(dir, entry.name), relative));
+    else out.push(relative);
+  }
+  return out.sort();
 }
 
 function statSafe(path) {
@@ -454,7 +562,34 @@ function assertInstalledLayout(consumer) {
     createHash("sha256").update(canonical).digest("hex"),
     "the packaged skill is not byte-identical to skills/archon-doc/SKILL.md",
   );
-  console.log("PASS  installed layout: builder, publisher, skeleton, base assets, packaged skill");
+
+  /* Every staged asset, not one file per directory. `templates/base` is read
+     through two different helpers: `read()` hard-fails on a missing file, but
+     `slot()` returns "" for one, so a tarball that shipped `layout.html` and
+     dropped `history.js` or `theme.css` builds green and hands the consumer a
+     document with no changelog and no styling. Worse, the "no remote font, no
+     legacy client" assertions further down are satisfied *most* strongly by an
+     empty asset set -- so stopping at one `statSafe` would make a stripped
+     tarball look like the best possible pass. */
+  let staged = 0;
+  for (const [source, installed] of [
+    [join(ROOT, "templates", "base"), join(consumer, INSTALLED.package, "dist", "base")],
+    [join(ROOT, "templates", "skeleton"), join(consumer, INSTALLED.package, "dist", "skeleton")],
+  ]) {
+    for (const relative of filesUnder(source)) {
+      const shipped = statSafe(join(installed, relative));
+      assert.notEqual(shipped, null, `the tarball is missing the staged asset ${relative}`);
+      assert.equal(
+        createHash("sha256").update(readFileSync(join(installed, relative))).digest("hex"),
+        createHash("sha256").update(readFileSync(join(source, relative))).digest("hex"),
+        `the staged asset ${relative} differs from its canonical source`,
+      );
+      staged += 1;
+    }
+  }
+  console.log(
+    `PASS  installed layout: builder, publisher, packaged skill and ${staged} staged assets, all byte-identical`,
+  );
 }
 
 /**
@@ -486,7 +621,13 @@ async function assertSkillMatchesPackage(consumer) {
   }
   const flags = [...new Set([...skill.matchAll(/(?<![\w-])--[a-z][a-z-]+/g)].map((m) => m[0]))];
   for (const flag of flags) {
-    assert.ok(help.includes(flag), `the skill names ${flag}, which neither installed command's --help documents`);
+    /* Word-bounded, not a substring: `help.includes("--time")` is satisfied by
+       `--timeout-seconds`, so a flag the skill invented would pass by being a
+       prefix of a real one. */
+    assert.ok(
+      new RegExp(`${flag}(?![a-z-])`).test(help),
+      `the skill names ${flag}, which neither installed command's --help documents`,
+    );
   }
   for (const code of Object.values(EXIT)) {
     assert.ok(
@@ -563,6 +704,20 @@ async function buildDocument(consumer) {
 
   const html = readFileSync(expected, "utf8");
   assert.ok(html.includes(DOCUMENT_SENTINEL), "the hosted artifact does not contain the document's own content");
+
+  /* Positive markers first, because every check below this is a *negative* one
+     and an empty artifact satisfies all of them. Each of these comes from a
+     different staged asset routed through a different builder helper, so a
+     silently-dropped one fails here instead of shipping. */
+  for (const [marker, from] of [
+    ['<meta name="doc-id" content="a41c07">', "doc.json metadata"],
+    ["<title>Payments review</title>", "the document title"],
+    ["--bg", "templates/base/theme.css"],
+    ["scanBlocks", "the compiled anchor core"],
+    ["runHistory", "templates/base/history.js"],
+  ]) {
+    assert.ok(html.includes(marker), `the hosted artifact carries nothing from ${from} (${marker})`);
+  }
   for (const remote of ["fonts.googleapis.com", "fonts.gstatic.com"]) {
     assert.ok(!html.includes(remote), `the hosted artifact still references ${remote}`);
   }
@@ -630,6 +785,7 @@ async function publishLifecycle(consumer, artifact, fixture, stateDir) {
   const observed = await runExpecting(EXIT.CHECKPOINT, publish, ["status", "--request", start.requestFile, "--json"], { cwd: consumer, env });
   const publicationId = stdoutJson(observed).publicationId;
   assert.equal(stdoutJson(observed).state, "pending");
+  assert.equal(fixture.uploads(publicationId), 0, "status must never upload");
 
   /* 3. resume with a one-second window: still pending, still exit 10, and it
         says so rather than reporting a failure. */
@@ -656,6 +812,8 @@ async function publishLifecycle(consumer, artifact, fixture, stateDir) {
     "the receipt must describe the bytes on disk",
   );
   assert.notEqual(statSafe(artifact), null, "completing must not remove the local HTML");
+  assert.equal(fixture.uploads(publicationId), 1, "the approved bytes must be uploaded exactly once");
+  assert.deepEqual(fixture.violations, [], "the client broke the C3 request contract");
 
   console.log("PASS  installed publisher: start → checkpoint → resume → complete, in four separate processes");
 }
@@ -691,12 +849,33 @@ async function assertRefusals(consumer, artifact, fixture, stateDir) {
   const badService = await runExpecting(EXIT.LOCAL, publish, start(["--service", "http://docs.example.com"]), { cwd: consumer, env });
   assert.equal(stdoutJson(badService).code, "invalid_service_origin");
 
-  const noService = await runExpecting(EXIT.LOCAL, publish, start([]), { cwd: consumer, env });
-  assert.equal(stdoutJson(noService).code, "missing_service_origin");
-  assert.ok(
-    stdoutJson(noService).message.includes("ARCHON_PUBLISH_SERVICE"),
-    "an unconfigured destination must name the two ways to configure one",
+  /* Only safe to run while the release bakes in no origin. Once AHU-013 sets
+     `RELEASED_SERVICE_ORIGIN`, an invocation with no `--service` and no
+     environment value stops refusing and starts POSTing a real descriptor to
+     the production service from CI on every push -- creating a real pending
+     publication and only then failing the assertion. So the constant is read
+     out of the *installed* package and decides which claim is checked. */
+  const { RELEASED_SERVICE_ORIGIN, resolveServiceOrigin } = await import(
+    pathToFileURL(join(consumer, INSTALLED.package, "dist", "publish.js")).href
   );
+  if (RELEASED_SERVICE_ORIGIN === null) {
+    const noService = await runExpecting(EXIT.LOCAL, publish, start([]), { cwd: consumer, env });
+    assert.equal(stdoutJson(noService).code, "missing_service_origin");
+    assert.ok(
+      stdoutJson(noService).message.includes("ARCHON_PUBLISH_SERVICE"),
+      "an unconfigured destination must name the two ways to configure one",
+    );
+  } else {
+    /* No network call: the released origin is validated locally by the same
+       function `start` would use, which is the whole of what this runner can
+       honestly claim about a destination it must not contact. */
+    assert.equal(
+      resolveServiceOrigin(RELEASED_SERVICE_ORIGIN, false),
+      RELEASED_SERVICE_ORIGIN,
+      "the released service origin is not a canonical https origin",
+    );
+    console.log(`NOTE  a released service origin is set; the unconfigured-destination case is checked offline`);
+  }
 
   /* A human declining is terminal and is not a transport failure. */
   fixture.plan({ kind: "deny" });
@@ -732,7 +911,12 @@ async function assertRefusals(consumer, artifact, fixture, stateDir) {
     "the Check publication link must be built from the pinned origin and the saved publication ID",
   );
   assert.ok(/^Check publication:/.test(lostBody.nextAction), "the recovery link must be labelled Check publication");
-  assert.ok(!/\bcomplete\b/.test(lostBody.state), "an expired receipt must never be reported as complete");
+  assert.equal(lostBody.state, "error", "an expired receipt is an error envelope, not a state envelope");
+  assert.equal(lostBody.result, undefined, "an expired receipt must never carry a completion result");
+  assert.ok(
+    !lost.stdout.includes('"documentId"') && !lost.stderr.includes("published "),
+    "an expired receipt must never be reported as a completed publication",
+  );
   assert.ok(
     lost.stderr.includes("not proof the document exists"),
     "the recovery link must be described as a sign-in destination rather than a receipt",
@@ -756,7 +940,12 @@ function assertNoLeaks() {
       assert.ok(!streams.includes(secret), `${entry.argv} printed an operation bearer`);
     }
     assert.ok(!streams.includes(DOCUMENT_SENTINEL), `${entry.argv} printed the document's content`);
-    assert.ok(!/<!doctype html/i.test(streams), `${entry.argv} printed HTML`);
+    /* Markers the artifact under test actually contains. `<!doctype html` was
+       the obvious spelling and it is exactly the one a docbuild artifact never
+       has -- the guard could not fire for the bytes it was guarding. */
+    for (const markup of ["<title>", '<meta name="doc-id"', "<section", "</html>"]) {
+      assert.ok(!streams.includes(markup), `${entry.argv} printed artifact markup (${markup})`);
+    }
   }
   console.log(`PASS  no bearer and no document content in ${transcript.length} captured invocations`);
 }
@@ -765,7 +954,14 @@ function assertNoLeaks() {
 
 async function main() {
   const directory = isolatedTmpdir();
-  sweepStaleTempRoots([TEMP_PREFIX], { directory });
+  /* Best effort. On a shared or self-hosted runner another user's leftover
+     directory answers `EACCES`, and failing this gate over somebody else's
+     stale temp directory would be a spurious red on a green change. */
+  try {
+    sweepStaleTempRoots([TEMP_PREFIX], { directory });
+  } catch (error) {
+    process.stderr.write(`NOTE  could not sweep stale temp roots: ${error.message}\n`);
+  }
   installSignalCleanup(roots);
 
   const workRoot = guardedTempRoot(TEMP_PREFIX, { directory });
@@ -797,10 +993,26 @@ async function main() {
 
 try {
   await main();
+  removeTempRoots(roots);
 } catch (error) {
   process.stderr.write(`FAIL  package consumer proof: ${error.message}\n`);
   if (error.stack !== undefined) process.stderr.write(`${error.stack}\n`);
   process.exitCode = 1;
-} finally {
-  removeTempRoots(roots);
+  /* A red run is the one run whose tree is worth having. Deleting the consumer,
+     the tarball and the built artifact on the way out leaves nothing but the
+     assertion message, and an intermittent `npm pack` or `npm install` failure
+     is then undiagnosable -- which is how a gate ends up disabled rather than
+     fixed. `retainEvidenceRoot` renames it aside under mode 0700 and keeps only
+     the last few. */
+  for (const root of roots) {
+    try {
+      const { locator } = retainEvidenceRoot(root, "AHU-010 package consumer proof failed", {
+        directory: dirname(root),
+      });
+      process.stderr.write(`NOTE  evidence retained; see ${locator}\n`);
+    } catch (retainError) {
+      process.stderr.write(`NOTE  could not retain evidence: ${retainError.message}\n`);
+      removeTempRoots([root]);
+    }
+  }
 }

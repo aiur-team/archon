@@ -662,7 +662,14 @@ test("stored HTML must be a non-empty document, well-formed and free of NUL", ()
   validatePublication(replacing(complete, { descriptor: descriptorFor(fragment), html: fragment }));
 
   /* What the rule is actually for: bytes that are not markup at all. */
-  for (const notMarkup of ["just some words", '{"title":"not html"}', "a < b and c > d"]) {
+  /* The unspaced comparison is the case a start-tag sniff gets wrong: `<b ` in
+     `a<b and c>d` looks exactly like the opening of an element. */
+  for (const notMarkup of [
+    "just some words",
+    '{"title":"not html"}',
+    "a < b and c > d",
+    "if a<b and c>d then stop",
+  ]) {
     rejects(
       () =>
         validatePublication(

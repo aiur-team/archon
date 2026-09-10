@@ -54,7 +54,7 @@ const BYTE_ORDER_MARK = "\uFEFF";
 /**
  * The sniff that separates an HTML artifact from bytes that are not markup.
  *
- * One start tag, not a document element. An artifact is a *fragment*:
+ * Markup, not a document element. An artifact is a *fragment*:
  * `docbuild`'s `layout.html` opens at `<meta name="doc-id">` and emits no
  * doctype and no `<html>` element, because `renderer/public/renderer.js`
  * supplies the document element itself and places the stored bytes inside a
@@ -62,12 +62,19 @@ const BYTE_ORDER_MARK = "\uFEFF";
  * builder can produce, and rejected it *after* an owner had approved the
  * descriptor \u2014 the worst point in the flow to discover a disagreement about
  * shape. What the rule is for is refusing a PDF, a JSON dump or a page of
- * notes, and one start tag still refuses all three.
+ * notes, and the rule below still refuses all three.
  *
  * `templates/docbuild/src/publish.ts` applies the identical rule locally,
  * before anything is sent, so the two never disagree about the same bytes.
+ *
+ * A *closing* tag rather than any start tag, because "looks like a tag" is not
+ * a property prose lacks: `a<b and c>d` satisfies a start-tag pattern and is
+ * plainly not markup. Requiring `</name>` (or a doctype, or a self-closing
+ * element) costs a real document nothing -- an artifact with no closing tag
+ * anywhere is not a document -- and refuses the notes file somebody pointed
+ * `--file` at by mistake.
  */
-const HTML_MARKUP = /<[a-z][a-z0-9-]*[\s>/]/i;
+const HTML_MARKUP = /<!doctype\s+html|<\/[a-z][a-z0-9-]*\s*>|<[a-z][a-z0-9-]*(\s[^<>]*)?\/>/i;
 
 /**
  * Characters that must never appear in text a human reads to make a decision.
