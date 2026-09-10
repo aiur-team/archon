@@ -2,15 +2,20 @@
  * Regressions for the four frozen auth routes, exercised as HTTP.
  *
  * These are real `Request` objects through the real handlers behind the real
- * error boundary, with only the store, the clock and the provider injected. That
- * matters for the cookie assertions in particular: C1's cookie rules are
- * properties of a response header, and a test that inspected a helper's return
- * value instead would pass while the handler forgot to attach it.
+ * error boundary, with only the store, the clock, the token endpoint and the
+ * JWKS injected. That matters for the cookie assertions in particular: C1's
+ * cookie rules are properties of a response header, and a test that inspected a
+ * helper's return value instead would pass while the handler forgot to attach
+ * it.
  *
  * The suite asserts effects rather than rendered text - which token still works,
  * which record is dead, which cookie was not touched - because "the sign-in page
  * says you are signed in" is exactly the assertion that survives every
- * interesting bug.
+ * interesting bug. The provider is an Auth0 token endpoint that hands back a
+ * genuine RS256 ID token signed by the fixture and verified against a local
+ * JWKS, so the whole round trip runs with no live tenant and no network. The
+ * nonce a token must echo is the one the start route minted into the authorize
+ * URL, so each helper threads it from there.
  *
  *   node --test netlify/test/hosted/auth-routes.test.mjs
  */
@@ -19,6 +24,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AuthStore, SESSION_TTL_SECONDS, TRANSIENT_TTL_SECONDS } from "../../lib/hosted/auth-store.mjs";
+import { buildLogoutUrl, principalFromClaims } from "../../lib/hosted/auth0-oidc.mjs";
 import { withErrorBoundary } from "../../lib/hosted/http.mjs";
 import {
   BINDING_COOKIE,
@@ -30,37 +36,63 @@ import {
   deriveCsrfToken,
   identifyHosted,
 } from "../../lib/hosted/identity.mjs";
-import startHandler, { createStartRoute } from "../../functions/hosted-auth-github-start.mjs";
-import { createCallbackRoute } from "../../functions/hosted-auth-github-callback.mjs";
+import startHandler, { createStartRoute } from "../../functions/hosted-auth-start.mjs";
+import { createCallbackRoute } from "../../functions/hosted-auth-callback.mjs";
 import { createLogoutRoute } from "../../functions/hosted-auth-logout.mjs";
 import { createSessionRoute } from "../../functions/hosted-session.mjs";
 import { hashToken } from "../../lib/hosted/secrets.mjs";
 import {
-  PRINCIPAL_ALPHA,
-  PRINCIPAL_BETA,
+  AUDIENCE,
+  CLAIMS_GITHUB_NO_EMAIL,
+  CLAIMS_GOOGLE,
+  TENANT_DOMAIN,
+  auth0Provider,
   browserRequest,
   cookieValue,
   fixedClock,
-  githubProvider,
   hostedConfig,
+  localKeySet,
   memoryAuthStore,
   setCookies,
+  signHs256Token,
+  signIdToken,
 } from "./fixtures/auth.mjs";
 
-/** One deployment: a store, a clock, a configuration and the four routes. */
-function deployment({ clock = fixedClock(), provider = githubProvider() } = {}) {
+/** The principal the default happy-path claim set produces. */
+const PRINCIPAL_GOOGLE = principalFromClaims(CLAIMS_GOOGLE);
+/** A second, distinct principal for the rotation and multi-account cases. */
+const PRINCIPAL_GITHUB = principalFromClaims(CLAIMS_GITHUB_NO_EMAIL);
+
+/** The authorize origin the start route redirects a browser to. */
+const AUTHORIZE_ORIGIN = `https://${TENANT_DOMAIN}`;
+
+/**
+ * One deployment: a store, a clock, a configuration and the four routes.
+ *
+ * The token endpoint is behind a mutable reference so a sign-in helper can set
+ * the ID token to return *after* the start route has minted the nonce it must
+ * carry. `getKeySet` is the deterministic seam: the callback verifies against
+ * the fixture's local JWKS.
+ */
+function deployment({ clock = fixedClock() } = {}) {
   const { store, blobs } = memoryAuthStore(clock);
   const config = hostedConfig();
+  const providerRef = { impl: auth0Provider({ idToken: "unused-until-a-sign-in-sets-it" }) };
+  const fetchImpl = (url, request) => providerRef.impl(url, request);
   const deps = { store, config };
   return {
     store,
     blobs,
     clock,
     config,
-    provider,
+    providerRef,
+    /** The token endpoint's recorded calls, whichever impl is current. */
+    get providerCalls() {
+      return providerRef.impl.calls;
+    },
     session: withErrorBoundary(createSessionRoute(deps)),
     start: withErrorBoundary(createStartRoute(deps)),
-    callback: withErrorBoundary(createCallbackRoute({ ...deps, fetchImpl: provider })),
+    callback: withErrorBoundary(createCallbackRoute({ ...deps, fetchImpl, getKeySet: localKeySet })),
     logout: withErrorBoundary(createLogoutRoute(deps)),
   };
 }
@@ -71,30 +103,39 @@ async function bootstrap(app) {
   return cookieValue(setCookies(response).get(LOGIN_COOKIE));
 }
 
-/** Start one authorization and return both halves of the browser binding. */
+/** Start one authorization and return the binding, state and nonce. */
 async function start(app, { destination, cookies = {}, form = {} } = {}) {
   const login = await bootstrap(app);
   const response = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       cookies: { ...cookies, [LOGIN_COOKIE]: login },
       form: destination === undefined ? form : { ...form, destination },
     }),
   );
-  if (response.status !== 303) return { response, binding: null, state: null };
+  if (response.status !== 303) return { response, binding: null, state: null, nonce: null };
+  const location = new URL(response.headers.get("location"));
   return {
     response,
     binding: cookieValue(setCookies(response).get(OAUTH_COOKIE)),
-    state: new URL(response.headers.get("location")).searchParams.get("state"),
+    state: location.searchParams.get("state"),
+    nonce: location.searchParams.get("nonce"),
   };
 }
 
+/** Point the token endpoint at an ID token signed for this transaction's nonce. */
+async function armProvider(app, started, { claims = CLAIMS_GOOGLE, sign = {} } = {}) {
+  const idToken = await signIdToken(claims, { nonce: started.nonce, ...sign });
+  app.providerRef.impl = auth0Provider({ idToken });
+}
+
 /** Drive one whole sign-in and return the session cookie the browser is left with. */
-async function signIn(app, { destination, cookies = {} } = {}) {
+async function signIn(app, { destination, cookies = {}, claims = CLAIMS_GOOGLE } = {}) {
   const started = await start(app, { destination, cookies });
   assert.equal(started.response.status, 303);
+  await armProvider(app, started, { claims });
   const landed = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${started.state}&code=fixture-code`, {
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=fixture-code`, {
       cookies: { ...cookies, [OAUTH_COOKIE]: started.binding },
     }),
   );
@@ -103,6 +144,7 @@ async function signIn(app, { destination, cookies = {} } = {}) {
     landed,
     state: started.state,
     binding: started.binding,
+    nonce: started.nonce,
     token: cookieValue(setCookies(landed).get(SESSION_COOKIE)),
   };
 }
@@ -155,18 +197,15 @@ test("a signed-in visitor is issued a usable pre-login binding too", async () =>
   const login = cookieValue(setCookies(response).get(LOGIN_COOKIE));
   assert.match(login ?? "", /^[A-Za-z0-9_-]{32,}$/, "the authenticated branch must issue one");
 
-  /* The whole point: the primary button on the sign-in page is a form POST, and
-     for a signed-in visitor it used to arrive with no binding at all and bounce
-     off `/login/?status=expired` with nothing to act on. */
   const started = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       cookies: { [SESSION_COOKIE]: token, [LOGIN_COOKIE]: login },
       form: {},
     }),
   );
   assert.equal(started.status, 303);
-  assert.ok(started.headers.get("location").startsWith("https://github.com/login/oauth/authorize"));
+  assert.ok(started.headers.get("location").startsWith(`${AUTHORIZE_ORIGIN}/authorize`));
 });
 
 test("a dead session cookie is cleared by the signed-out answer", async () => {
@@ -187,7 +226,11 @@ test("a bootstrap does not consume an existing OAuth state or publication bindin
   const app = deployment();
   const binding = await createPendingBinding(app.store, { operation: "b".repeat(43) });
   const bindingToken = cookieValue(binding.setCookie);
-  const oauth = await app.store.createTransient("oauth", { codeVerifier: "v", destination: "/publish/authorize" });
+  const oauth = await app.store.createTransient("oauth", {
+    codeVerifier: "v",
+    destination: "/publish/authorize",
+    nonce: "n",
+  });
 
   await app.session(
     browserRequest("/api/hosted/session", {
@@ -214,10 +257,10 @@ test("the signed-in session body names the account and carries no secret materia
     "login",
     "v",
   ]);
-  assert.equal(body.accountId, PRINCIPAL_ALPHA.accountId);
-  assert.equal(body.login, "alpha-example");
-  assert.equal(body.email, null);
-  assert.equal(body.emailVerified, false);
+  assert.equal(body.accountId, PRINCIPAL_GOOGLE.accountId);
+  assert.equal(body.login, PRINCIPAL_GOOGLE.login);
+  assert.equal(body.email, "ann@example.com");
+  assert.equal(body.emailVerified, true);
   assert.equal(body.csrfToken, deriveCsrfToken(token));
 
   const rendered = JSON.stringify(body);
@@ -253,25 +296,27 @@ test("every auth response is uncacheable and framed nowhere", async () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* POST /api/hosted/auth/github/start                                  */
+/* POST /api/hosted/auth/start                                         */
 /* ------------------------------------------------------------------ */
 
-test("a start redirects to GitHub with the state that is in the cookie", async () => {
+test("a start redirects to Auth0 with the OIDC parameters and the state in the cookie", async () => {
   const app = deployment();
   const login = await bootstrap(app);
   const response = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
+    browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
   );
   assert.equal(response.status, 303);
 
   const url = new URL(response.headers.get("location"));
-  assert.equal(url.origin + url.pathname, "https://github.com/login/oauth/authorize");
-  assert.equal(url.searchParams.has("scope"), false);
+  assert.equal(url.origin + url.pathname, `${AUTHORIZE_ORIGIN}/authorize`);
+  assert.equal(url.searchParams.get("response_type"), "code");
+  assert.equal(url.searchParams.get("scope"), "openid profile email");
   assert.equal(url.searchParams.has("prompt"), false);
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+  assert.ok(url.searchParams.get("nonce"), "the authorize URL carries a nonce");
   assert.equal(
     url.searchParams.get("redirect_uri"),
-    "https://app.archon.example.com/api/hosted/auth/github/callback",
+    "https://app.archon.example.com/api/hosted/auth/callback",
   );
 
   const cookies = setCookies(response);
@@ -281,34 +326,34 @@ test("a start redirects to GitHub with the state that is in the cookie", async (
     url.searchParams.get("state"),
     "the cookie and the wire state must be two different secrets",
   );
+  assert.notEqual(binding, url.searchParams.get("nonce"), "the nonce is a third distinct secret");
   assert.match(cookies.get(OAUTH_COOKIE), /Max-Age=900; Secure; HttpOnly; SameSite=Lax; Path=\/$/);
   assert.equal(cookieValue(cookies.get(LOGIN_COOKIE)), "", "the consumed binding is cleared");
 
-  /* Nothing recoverable from the URL alone: neither the cookie nor its stored
-     hash appears anywhere GitHub, a log or a history entry will see it. */
+  /* Neither the binding cookie nor the nonce is recoverable from the URL: the
+     record stores the binding's hash and the nonce, and only `state` travels. */
   const record = app.blobs.entries.get(`auth/oauth/${hashToken(url.searchParams.get("state"))}`);
   assert.equal(record.data.payload.bindingHash, hashToken(binding));
+  assert.equal(record.data.payload.nonce, url.searchParams.get("nonce"));
   assert.ok(!response.headers.get("location").includes(binding));
 });
 
 test("knowing the callback URL is not enough to redeem the code", async () => {
   const app = deployment();
   const started = await start(app);
+  await armProvider(app, started);
 
-  /* Everything an attacker can learn from a function access log, an APM trace or
-     a synced history entry - and nothing the victim's browser holds. */
   const replay = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${started.state}&code=fixture-code`, {
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=fixture-code`, {
       cookies: { [OAUTH_COOKIE]: "an-attacker-supplied-binding-value" },
     }),
   );
   assert.equal(replay.headers.get("location"), "/login/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
-  assert.equal(app.provider.calls.length, 0, "the code must not be redeemed");
+  assert.equal(app.providerCalls.length, 0, "the code must not be redeemed");
 
-  /* And the victim's transaction is untouched: an unbound caller cannot burn it. */
   const landed = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${started.state}&code=fixture-code`, {
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=fixture-code`, {
       cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
@@ -321,7 +366,7 @@ test("an unbound callback clears no cookie", async () => {
   const started = await start(app);
   for (const cookies of [{}, { [OAUTH_COOKIE]: "not-the-binding" }]) {
     const response = await app.callback(
-      browserRequest(`/api/hosted/auth/github/callback?state=${started.state}&code=c`, { cookies }),
+      browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, { cookies }),
     );
     assert.equal(
       setCookies(response).size,
@@ -335,17 +380,14 @@ test("a start from the wrong origin, or with no origin, is refused before anythi
   const app = deployment();
   const login = await bootstrap(app);
   for (const origin of [null, "https://evil.example.com"]) {
-    /* A JSON caller gets the C3 envelope... */
     const api = await app.start(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {}, origin }),
+      browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {}, origin }),
     );
     assert.equal(api.status, 403);
     assert.equal((await api.json()).error.code, "forbidden");
 
-    /* ...and a form navigation gets a page, because the response *is* the page
-       the visitor is looking at. */
     const page = await app.start(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {}, origin }),
+      browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {}, origin }),
     );
     assert.equal(page.status, 303);
     assert.equal(page.headers.get("location"), "/login/?status=expired");
@@ -360,23 +402,19 @@ test("a start from the wrong origin, or with no origin, is refused before anythi
 
 test("a start with no binding cookie, or a replayed one, is refused", async () => {
   const app = deployment();
-  const bare = await app.start(browserRequest("/api/hosted/auth/github/start", { method: "POST", json: {} }));
+  const bare = await app.start(browserRequest("/api/hosted/auth/start", { method: "POST", json: {} }));
   assert.equal(bare.status, 403);
   assert.equal((await bare.json()).error.code, "csrf_failed");
 
   const login = await bootstrap(app);
   const first = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {} }),
+    browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {} }),
   );
   assert.equal(first.status, 303);
-  assert.equal(
-    await app.store.readTransient("login", login),
-    null,
-    "the first use consumes the issued record",
-  );
+  assert.equal(await app.store.readTransient("login", login), null, "the first use consumes the record");
 
   const replay = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {} }),
+    browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {} }),
   );
   assert.equal(replay.status, 403, "a captured binding must not be replayable");
   assert.equal((await replay.json()).error.code, "csrf_failed");
@@ -384,11 +422,9 @@ test("a start with no binding cookie, or a replayed one, is refused", async () =
 
 test("a malformed or fabricated binding cookie is refused without writing anything", async () => {
   const app = deployment();
-  /* The last one is well-formed and simply was never issued by this deployment:
-     the binding is provenance, not a shape check. */
   for (const binding of ["", "short", "not/base64url/at/all", "x".repeat(300), "c".repeat(43)]) {
     const response = await app.start(
-      browserRequest("/api/hosted/auth/github/start", {
+      browserRequest("/api/hosted/auth/start", {
         method: "POST",
         cookies: { [LOGIN_COOKIE]: binding },
         json: {},
@@ -399,20 +435,32 @@ test("a malformed or fabricated binding cookie is refused without writing anythi
   assert.deepEqual(app.blobs.keys(), []);
 });
 
-test("a start accepts only the two internal destinations", async () => {
+test("a start accepts the internal destinations, including a collaboration slug", async () => {
   const app = deployment();
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
-  for (const destination of ["/publish/authorize", docs]) {
+  for (const destination of ["/publish/authorize", docs, "/how-archon-works/"]) {
     const login = await bootstrap(app);
     const response = await app.start(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination } }),
+      browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination } }),
     );
-    assert.equal(response.status, 303);
+    assert.equal(response.status, 303, `destination ${destination}`);
   }
-  for (const destination of ["//evil.example.com", "https://evil.example.com", "/\\evil.example.com", "/admin", "%2Fpublish%2Fauthorize"]) {
+  for (const destination of [
+    "//evil.example.com",
+    "https://evil.example.com",
+    "/\\evil.example.com",
+    "/docs/%2e%2e/x",
+    "/publish/authorize?next=x",
+    "/admin",
+    "%2Fpublish%2Fauthorize",
+    "/login/",
+    "/api/",
+    "/_render/",
+    "/how/archon/works/",
+  ]) {
     const login = await bootstrap(app);
     const response = await app.start(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: { destination } }),
+      browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: { destination } }),
     );
     assert.equal(response.status, 400, `destination ${destination}`);
     assert.equal((await response.json()).error.code, "invalid_request");
@@ -423,7 +471,7 @@ test("an empty destination field is the default, not a refusal", async () => {
   const app = deployment();
   const login = await bootstrap(app);
   const response = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       cookies: { [LOGIN_COOKIE]: login },
       form: { destination: "" },
@@ -432,24 +480,24 @@ test("an empty destination field is the default, not a refusal", async () => {
   assert.equal(response.status, 303);
   assert.equal(
     new URL(response.headers.get("location")).origin,
-    "https://github.com",
+    AUTHORIZE_ORIGIN,
     "a form submits an empty string, not an absent field, and empty means the default",
   );
 });
 
-test("the destination never travels to GitHub", async () => {
+test("the destination never travels to Auth0", async () => {
   const app = deployment();
   const login = await bootstrap(app);
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
   const response = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination: docs } }),
+    browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination: docs } }),
   );
   assert.ok(!response.headers.get("location").includes("docs"));
 });
 
 test("the start route answers POST only", async () => {
   const app = deployment();
-  const response = await app.start(browserRequest("/api/hosted/auth/github/start"));
+  const response = await app.start(browserRequest("/api/hosted/auth/start"));
   assert.equal(response.status, 405);
   assert.equal(response.headers.get("allow"), "POST");
 });
@@ -458,21 +506,21 @@ test("the start route answers POST only", async () => {
 /* the different-account action                                        */
 /* ------------------------------------------------------------------ */
 
-test("switching accounts revokes the Archon session and asks GitHub which account", async () => {
+test("switching accounts revokes the Archon session and asks Auth0 which account", async () => {
   const app = deployment();
   const { token } = await signIn(app);
   const binding = await createPendingBinding(app.store, { operation: "b".repeat(43) });
   const bindingToken = cookieValue(binding.setCookie);
 
   const response = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       cookies: { [SESSION_COOKIE]: token, [BINDING_COOKIE]: bindingToken },
       form: { switchAccount: "true", csrfToken: deriveCsrfToken(token) },
     }),
   );
   assert.equal(response.status, 303);
-  assert.equal(new URL(response.headers.get("location")).searchParams.get("prompt"), "select_account");
+  assert.equal(new URL(response.headers.get("location")).searchParams.get("prompt"), "login");
 
   assert.equal(await app.store.readSession(token), null, "the old Archon session is dead");
   assert.equal(cookieValue(setCookies(response).get(SESSION_COOKIE)), "");
@@ -489,7 +537,7 @@ test("an account switch cannot be forged", async () => {
   const { token } = await signIn(app);
 
   const noCsrf = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       cookies: { [SESSION_COOKIE]: token },
       json: { switchAccount: "true" },
@@ -499,7 +547,7 @@ test("an account switch cannot be forged", async () => {
   assert.equal((await noCsrf.json()).error.code, "csrf_failed");
 
   const noSession = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
+    browserRequest("/api/hosted/auth/start", {
       method: "POST",
       json: { switchAccount: "true", csrfToken: deriveCsrfToken(token) },
     }),
@@ -510,7 +558,7 @@ test("an account switch cannot be forged", async () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* GET /api/hosted/auth/github/callback                                */
+/* GET /api/hosted/auth/callback                                       */
 /* ------------------------------------------------------------------ */
 
 test("a whole sign-in lands on the requested destination as the right account", async () => {
@@ -523,7 +571,7 @@ test("a whole sign-in lands on the requested destination as the right account", 
   const cookies = setCookies(landed);
   assert.match(
     cookies.get(SESSION_COOKIE),
-    /^__Host-archon_session=[A-Za-z0-9_-]+; Max-Age=604800; Secure; HttpOnly; SameSite=Lax; Path=\/$/,
+    /^__Host-archon_session=[A-Za-z0-9_-]+; Max-Age=86400; Secure; HttpOnly; SameSite=Lax; Path=\/$/,
   );
   assert.equal(cookieValue(cookies.get(OAUTH_COOKIE)), "", "the consumed state is cleared");
 
@@ -531,58 +579,80 @@ test("a whole sign-in lands on the requested destination as the right account", 
     browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } }),
     { store: app.store },
   );
-  assert.deepEqual(principal, PRINCIPAL_ALPHA);
+  assert.deepEqual(principal, PRINCIPAL_GOOGLE);
+  assert.equal(principal.email, "ann@example.com");
+  assert.equal(principal.emailVerified, true);
 });
 
-test("the session cookie lifetime is the seven-day absolute expiry", async () => {
-  /* Both numbers are written out rather than read from the modules under
-     test. Advancing the clock by the production constant would pass for any
-     value of it: a thirty-day server record and a seven-day cookie would look
-     consistent here while a copied token outlived the cookie by three weeks. */
-  const SEVEN_DAYS = 604800;
-  assert.equal(SESSION_TTL_SECONDS, SEVEN_DAYS, "C1 freezes the record at seven days");
-  assert.equal(SESSION_COOKIE_MAX_AGE, SEVEN_DAYS, "the cookie may not outlive the record");
+test("a GitHub identity with no email claim is a valid session with email null", async () => {
+  const app = deployment();
+  const { token } = await signIn(app, { claims: CLAIMS_GITHUB_NO_EMAIL });
+  const principal = await identifyHosted(
+    browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } }),
+    { store: app.store },
+  );
+  assert.deepEqual(principal, PRINCIPAL_GITHUB);
+  assert.equal(principal.email, null);
+  assert.equal(principal.emailVerified, false);
+});
+
+test("the session cookie lifetime is the 24-hour absolute expiry", async () => {
+  /* Both numbers are written out rather than read from the modules under test.
+     Advancing the clock by the production constant would pass for any value of
+     it: a seven-day server record and a 24-hour cookie would look consistent
+     here while a copied token outlived the cookie by six days. */
+  const ONE_DAY = 86400;
+  assert.equal(SESSION_TTL_SECONDS, ONE_DAY, "C1 v2 freezes the record at 24 hours");
+  assert.equal(SESSION_COOKIE_MAX_AGE, ONE_DAY, "the cookie may not outlive the record");
   assert.equal(SESSION_COOKIE_MAX_AGE, SESSION_TTL_SECONDS);
 
   const app = deployment();
   const { token } = await signIn(app);
-  app.clock.advanceSeconds(SEVEN_DAYS - 1);
+  app.clock.advanceSeconds(ONE_DAY - 1);
   assert.notEqual(await app.store.readSession(token), null);
   app.clock.advanceSeconds(2);
-  assert.equal(await app.store.readSession(token), null);
+  assert.equal(await app.store.readSession(token), null, "the session route refuses an aged record");
 });
 
 test("a callback with no binding cookie or a mismatched state signs nobody in", async () => {
   const app = deployment();
-  const login = await bootstrap(app);
-  const started = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
-  );
-  const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
-  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  const started = await start(app);
+  await armProvider(app, started);
 
   for (const [query, cookies] of [
-    [state, {}],
-    [state, { [OAUTH_COOKIE]: "a-different-state" }],
-    ["a-different-state", { [OAUTH_COOKIE]: state }],
-    [null, { [OAUTH_COOKIE]: state }],
+    [started.state, {}],
+    [started.state, { [OAUTH_COOKIE]: "a-different-state" }],
+    ["a-different-state", { [OAUTH_COOKIE]: started.state }],
+    [null, { [OAUTH_COOKIE]: started.state }],
   ]) {
     const path = query === null
-      ? "/api/hosted/auth/github/callback?code=c"
-      : `/api/hosted/auth/github/callback?state=${query}&code=c`;
+      ? "/api/hosted/auth/callback?code=c"
+      : `/api/hosted/auth/callback?state=${query}&code=c`;
     const response = await app.callback(browserRequest(path, { cookies }));
     assert.equal(response.status, 303);
     assert.equal(response.headers.get("location"), "/login/?status=expired");
     assert.equal(setCookies(response).has(SESSION_COOKIE), false);
   }
-  assert.notEqual(await app.store.readTransient("oauth", state), null, "a refused callback consumes nothing");
+  assert.notEqual(await app.store.readTransient("oauth", started.state), null, "a refused callback consumes nothing");
+});
+
+test("a replayed state in a cookie-less browser signs nobody in and writes nothing", async () => {
+  const app = deployment();
+  const { state } = await signIn(app);
+  const before = app.blobs.keys().length;
+  const replay = await app.callback(
+    browserRequest(`/api/hosted/auth/callback?state=${state}&code=fixture-code`, {}),
+  );
+  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
+  assert.equal(app.blobs.keys().length, before, "a cookie-less replay writes nothing");
 });
 
 test("a state is consumed once: a replayed callback signs nobody in", async () => {
   const app = deployment();
   const { state, binding } = await signIn(app);
   const replay = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=fixture-code`, {
+    browserRequest(`/api/hosted/auth/callback?state=${state}&code=fixture-code`, {
       cookies: { [OAUTH_COOKIE]: binding },
     }),
   );
@@ -592,15 +662,11 @@ test("a state is consumed once: a replayed callback signs nobody in", async () =
 
 test("two simultaneous callbacks with one state create at most one session", async () => {
   const app = deployment();
-  const login = await bootstrap(app);
-  const started = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
-  );
-  const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
-  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  const started = await start(app);
+  await armProvider(app, started);
   const request = () =>
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=fixture-code`, {
-      cookies: { [OAUTH_COOKIE]: binding },
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=fixture-code`, {
+      cookies: { [OAUTH_COOKIE]: started.binding },
     });
 
   const [a, b] = await Promise.all([app.callback(request()), app.callback(request())]);
@@ -611,15 +677,11 @@ test("two simultaneous callbacks with one state create at most one session", asy
 
 test("a denied consent is a normal outcome with an actionable retry", async () => {
   const app = deployment();
-  const login = await bootstrap(app);
-  const started = await app.start(
-    browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
-  );
-  const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
-  const state = new URL(started.headers.get("location")).searchParams.get("state");
+  const started = await start(app);
+  await armProvider(app, started);
   const response = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&error=access_denied&error_description=nope`, {
-      cookies: { [OAUTH_COOKIE]: binding },
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&error=access_denied&error_description=nope`, {
+      cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
   assert.equal(
@@ -628,49 +690,68 @@ test("a denied consent is a normal outcome with an actionable retry", async () =
     "a retry must land back where the visitor was going",
   );
   assert.equal(setCookies(response).has(SESSION_COOKIE), false);
-  assert.equal(app.provider.calls.length, 0, "a denied consent never redeems a code");
+  assert.equal(app.providerCalls.length, 0, "a denied consent never redeems a code");
 
-  /* The transaction is over, so the state must be spent. While it stayed live,
-     anyone holding a copy of the cookie and the callback URL could redeem it
-     with any code for the rest of the fifteen-minute window - and the visitor
-     who pressed Cancel is the one person known not to want that. */
-  assert.equal(await app.store.readTransient("oauth", state), null, "the state is consumed");
+  assert.equal(await app.store.readTransient("oauth", started.state), null, "the state is consumed");
   const replay = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=c`, {
-      cookies: { [OAUTH_COOKIE]: binding },
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
+      cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
   assert.equal(replay.headers.get("location"), "/login/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
-  assert.equal(app.provider.calls.length, 0);
+  assert.equal(app.providerCalls.length, 0);
 });
 
-test("a provider that refuses, or misbehaves, signs nobody in", async () => {
-  for (const [fixture, status] of [
-    [{ token: { error: "bad_verification_code" } }, "expired"],
-    [{ token: { access_token: "t", token_type: "bearer", scope: "repo" } }, "expired"],
-    [{ token: "malformed" }, "expired"],
-    [{ user: { id: "1010", login: "alpha-example" } }, "expired"],
-    [{ token: "timeout" }, "unavailable"],
-    [{ userStatus: 503, user: {} }, "unavailable"],
+test("a token endpoint outage is unavailable and a refusal is expired", async () => {
+  for (const [provider, status] of [
+    [{ body: { error: "server_error" }, status: 500 }, "unavailable"],
+    [{ idToken: "timeout" }, "unavailable"],
+    [{ body: { error: "invalid_grant" }, status: 400 }, "expired"],
+    [{ body: { access_token: "t", token_type: "Bearer" } }, "expired"],
+    [{ body: "malformed" }, "expired"],
   ]) {
-    const app = deployment({ provider: githubProvider(fixture) });
-    const login = await bootstrap(app);
-    const started = await app.start(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {} }),
-    );
-    const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
-  const state = new URL(started.headers.get("location")).searchParams.get("state");
+    const app = deployment();
+    const started = await start(app);
+    app.providerRef.impl = auth0Provider(provider);
     const response = await app.callback(
-      browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=c`, { cookies: { [OAUTH_COOKIE]: binding } }),
+      browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
+        cookies: { [OAUTH_COOKIE]: started.binding },
+      }),
     );
     assert.equal(
       response.headers.get("location"),
       `/login/?status=${status}&destination=%2Fpublish%2Fauthorize`,
-      JSON.stringify(fixture),
+      JSON.stringify(provider),
     );
     assert.equal(setCookies(response).has(SESSION_COOKIE), false);
     assert.deepEqual(app.blobs.keys().filter((key) => key.startsWith("sessions/")), []);
+  }
+});
+
+test("a token that fails verification signs nobody in", async () => {
+  for (const label of ["nonce", "audience", "issuer", "alg"]) {
+    const app = deployment();
+    const started = await start(app);
+    let idToken;
+    if (label === "nonce") idToken = await signIdToken(CLAIMS_GOOGLE, { nonce: "not-the-minted-nonce" });
+    else if (label === "audience") idToken = await signIdToken(CLAIMS_GOOGLE, { nonce: started.nonce, audience: "wrong-client" });
+    else if (label === "issuer") idToken = await signIdToken(CLAIMS_GOOGLE, { nonce: started.nonce, issuer: "https://evil.example.com/" });
+    else idToken = await signHs256Token(CLAIMS_GOOGLE, { nonce: started.nonce });
+    app.providerRef.impl = auth0Provider({ idToken });
+
+    const response = await app.callback(
+      browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
+        cookies: { [OAUTH_COOKIE]: started.binding },
+      }),
+    );
+    assert.equal(
+      response.headers.get("location"),
+      "/login/?status=expired&destination=%2Fpublish%2Fauthorize",
+      `verification failure: ${label}`,
+    );
+    assert.equal(setCookies(response).has(SESSION_COOKIE), false, label);
+    assert.deepEqual(app.blobs.keys().filter((key) => key.startsWith("sessions/")), [], label);
   }
 });
 
@@ -679,35 +760,24 @@ test("signing in over an existing session revokes the old token first", async ()
   const first = await signIn(app);
   assert.notEqual(await app.store.readSession(first.token), null);
 
-  app.provider = githubProvider({ user: { id: 2020, login: "alpha-example" } });
-  const app2 = { ...app, callback: withErrorBoundary(createCallbackRoute({ store: app.store, config: app.config, fetchImpl: app.provider })) };
-
-  const login = await bootstrap(app);
-  const started = await app.start(
-    browserRequest("/api/hosted/auth/github/start", {
-      method: "POST",
-      cookies: { [LOGIN_COOKIE]: login, [SESSION_COOKIE]: first.token },
-      form: {},
-    }),
-  );
-  const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
-  const state = new URL(started.headers.get("location")).searchParams.get("state");
-  const landed = await app2.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=c`, {
-      cookies: { [OAUTH_COOKIE]: binding, [SESSION_COOKIE]: first.token },
+  const started = await start(app, { cookies: { [SESSION_COOKIE]: first.token } });
+  await armProvider(app, started, { claims: CLAIMS_GITHUB_NO_EMAIL });
+  const landed = await app.callback(
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
+      cookies: { [OAUTH_COOKIE]: started.binding, [SESSION_COOKIE]: first.token },
     }),
   );
 
   assert.equal(await app.store.readSession(first.token), null, "the rotated-out token is dead");
   const second = cookieValue(setCookies(landed).get(SESSION_COOKIE));
-  assert.deepEqual((await app.store.readSession(second)).principal, PRINCIPAL_BETA);
+  assert.deepEqual((await app.store.readSession(second)).principal, PRINCIPAL_GITHUB);
 });
 
 test("a callback that cannot revoke the old session signs nobody in", async () => {
   const app = deployment();
   const first = await signIn(app);
   const started = await start(app);
-  const { binding, state } = started;
+  await armProvider(app, started);
 
   /* The fault is armed on the *old* session's exact key, not on the `sessions/`
      prefix. A prefix fault is consumed by `createSession` instead, which
@@ -716,8 +786,8 @@ test("a callback that cannot revoke the old session signs nobody in", async () =
      deleted. This one fails unless the old session is revoked first. */
   app.blobs.fail(AuthStore.sessionKey(first.token), "write");
   const landed = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=c`, {
-      cookies: { [OAUTH_COOKIE]: binding, [SESSION_COOKIE]: first.token },
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
+      cookies: { [OAUTH_COOKIE]: started.binding, [SESSION_COOKIE]: first.token },
     }),
   );
   assert.equal(
@@ -736,11 +806,12 @@ test("a callback that cannot revoke the old session signs nobody in", async () =
 test("a corrupted stored destination is a failed sign-in, not an open redirect", async () => {
   const app = deployment();
   const started = await start(app);
+  await armProvider(app, started);
   const record = app.blobs.entries.get(`auth/oauth/${hashToken(started.state)}`);
   record.data.payload.destination = "https://evil.example.com/";
 
   const landed = await app.callback(
-    browserRequest(`/api/hosted/auth/github/callback?state=${started.state}&code=c`, {
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=c`, {
       cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
@@ -750,7 +821,7 @@ test("a corrupted stored destination is a failed sign-in, not an open redirect",
 
 test("the callback route answers GET only", async () => {
   const app = deployment();
-  const response = await app.callback(browserRequest("/api/hosted/auth/github/callback", { method: "POST" }));
+  const response = await app.callback(browserRequest("/api/hosted/auth/callback", { method: "POST" }));
   assert.equal(response.status, 405);
   assert.equal(response.headers.get("allow"), "GET");
 });
@@ -786,7 +857,7 @@ test("a forged logout revokes nothing", async () => {
   }
 });
 
-test("a valid logout makes the prior cookie unusable", async () => {
+test("a valid logout revokes, clears the cookie, and redirects to the Auth0 logout URL", async () => {
   const app = deployment();
   const { token } = await signIn(app);
   const response = await app.logout(
@@ -796,15 +867,45 @@ test("a valid logout makes the prior cookie unusable", async () => {
       csrf: deriveCsrfToken(token),
     }),
   );
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { v: 1, authenticated: false });
+  assert.equal(response.status, 303);
+  assert.equal(
+    response.headers.get("location"),
+    buildLogoutUrl({
+      domain: TENANT_DOMAIN,
+      clientId: AUDIENCE,
+      returnTo: "https://app.archon.example.com/",
+    }),
+    "the Auth0 session is ended with the exact allowlisted returnTo",
+  );
   assert.equal(cookieValue(setCookies(response).get(SESSION_COOKIE)), "");
 
   const copied = browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } });
   assert.equal(await identifyHosted(copied, { store: app.store }), null, "a copied old cookie must fail");
 });
 
-test("a logout that cannot revoke does not claim success or clear the cookie", async () => {
+test("a fetch sign-out revokes server-side and returns the signed-out body, no cross-origin redirect", async () => {
+  /* A `fetch` cannot follow a cross-origin redirect, so an in-page sign-out that
+     asks for JSON gets the signed-out body and clears its own view; the Archon
+     session is still revoked server-side first. */
+  const app = deployment();
+  const { token } = await signIn(app);
+  const response = await app.logout(
+    browserRequest("/api/hosted/auth/logout", {
+      method: "POST",
+      cookies: { [SESSION_COOKIE]: token },
+      csrf: deriveCsrfToken(token),
+      headers: { accept: "application/json" },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { v: 1, authenticated: false });
+  assert.equal(response.headers.get("location"), null, "a fetch caller gets no redirect it cannot follow");
+  assert.equal(cookieValue(setCookies(response).get(SESSION_COOKIE)), "");
+  const copied = browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } });
+  assert.equal(await identifyHosted(copied, { store: app.store }), null, "the token is dead server-side");
+});
+
+test("a logout that cannot revoke does not redirect or clear the cookie", async () => {
   const app = deployment();
   const { token } = await signIn(app);
   app.blobs.fail("sessions/", "write");
@@ -817,7 +918,7 @@ test("a logout that cannot revoke does not claim success or clear the cookie", a
   );
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, "unavailable");
-  assert.equal(setCookies(response).size, 0, "clearing the cookie here would report a logout that did not happen");
+  assert.equal(setCookies(response).size, 0, "clearing here would report a logout that did not happen");
   assert.notEqual(await app.store.readSession(token), null);
 });
 
@@ -843,17 +944,18 @@ test("a logout leaves a pending publication binding alone", async () => {
 test("an invalid configuration refuses the route without naming the key", async () => {
   const saved = { ...process.env };
   try {
-    delete process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.AUTH0_CLIENT_SECRET;
     process.env.HOSTED_APP_ORIGIN = "https://app.archon.example.com";
     process.env.HOSTED_RENDER_ORIGIN = "https://render.archon.example.net";
-    process.env.GITHUB_CLIENT_ID = "Iv1.fixture0client";
+    process.env.AUTH0_DOMAIN = "tenant.archon.example.com";
+    process.env.AUTH0_CLIENT_ID = "exampleAuth0ClientId0000000000000";
     const response = await startHandler(
-      browserRequest("/api/hosted/auth/github/start", { method: "POST", form: {} }),
+      browserRequest("/api/hosted/auth/start", { method: "POST", form: {} }),
     );
     assert.equal(response.status, 503);
     const body = await response.json();
     assert.equal(body.error.code, "unavailable");
-    assert.ok(!body.error.message.includes("GITHUB_CLIENT_SECRET"));
+    assert.ok(!body.error.message.includes("AUTH0_CLIENT_SECRET"));
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);

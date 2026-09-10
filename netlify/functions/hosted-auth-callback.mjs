@@ -1,6 +1,5 @@
 /**
- * `GET /api/hosted/auth/github/callback` - complete one authorization, exactly
- * once.
+ * `GET /api/hosted/auth/callback` - complete one authorization, exactly once.
  *
  * ## The order of operations is the security property
  *
@@ -8,7 +7,7 @@
  *     it**, and the `__Host-archon_oauth` cookie must hash to the binding the
  *     record stores. Cookie and `state` are two different secrets: the cookie
  *     never leaves the browser, only its SHA-256 is stored, and `state` is the
- *     only half that travels through GitHub and into logs and history. So a
+ *     only half that travels through Auth0 and into logs and history. So a
  *     stolen callback URL is not enough to redeem the code, and - because
  *     nothing is written before this check passes - a stranger who guesses at
  *     the endpoint cannot burn a victim's in-flight transaction either.
@@ -16,7 +15,9 @@
  *     Two callbacks arriving with the same state race on that one write, and
  *     exactly one can win. The loser is told nothing was there.
  *  3. Only then is the code redeemed, with the PKCE verifier that was stored
- *     server-side at start - never one supplied by the request.
+ *     server-side at start - never one supplied by the request - and the ID
+ *     token that comes back is verified against the tenant keys, issuer,
+ *     audience, and the nonce the record stored, before any session is created.
  *  4. Any existing session is revoked **before** the new one is created. That is
  *     C1's callback rotation: a visitor signing in over an old session must not
  *     leave the old token usable, and a revocation attempted after the new
@@ -44,7 +45,11 @@
  */
 
 import { AuthUnavailableError } from "../lib/hosted/auth-errors.mjs";
-import { exchangeCodeForIdentity } from "../lib/hosted/github-oauth.mjs";
+import {
+  exchangeCodeForIdToken,
+  principalFromClaims,
+  verifyIdToken,
+} from "../lib/hosted/auth0-oidc.mjs";
 import { methodNotAllowed, redirectResponse, serve } from "../lib/hosted/http.mjs";
 import { constantTimeEqual, hashToken } from "../lib/hosted/secrets.mjs";
 import {
@@ -57,7 +62,7 @@ import {
   validateDestination,
 } from "../lib/hosted/identity.mjs";
 
-export const config = { path: "/api/hosted/auth/github/callback" };
+export const config = { path: "/api/hosted/auth/callback" };
 
 /** Where a failed sign-in lands. A fixed internal path with a closed-set word. */
 const SIGN_IN_PATH = "/login/";
@@ -84,7 +89,7 @@ function failed(status, { clear = true, destination = null } = {}) {
 }
 
 /** The route, over injected dependencies. */
-export function createCallbackRoute({ store, config: hostedConfig, fetchImpl }) {
+export function createCallbackRoute({ store, config: hostedConfig, fetchImpl, getKeySet }) {
   return async function callbackRoute(request) {
     if (request.method !== "GET") return methodNotAllowed("GET");
 
@@ -146,9 +151,14 @@ export function createCallbackRoute({ store, config: hostedConfig, fetchImpl }) 
        second of two simultaneous arrivals. */
     if (transaction === null) return failed("expired", { destination });
 
+    /* The code is redeemed for an ID token, then the token is verified before it
+       becomes an identity. The exchange can be an outage - a tenant 5xx or a
+       timeout - and is `unavailable`; a verification failure is never an outage,
+       so a bad signature, a wrong issuer or audience, `alg: HS256`, or a nonce
+       that does not match the record are all `expired` with nothing written. */
     let principal;
     try {
-      principal = await exchangeCodeForIdentity(
+      const idToken = await exchangeCodeForIdToken(
         {
           code: url.searchParams.get("code") ?? "",
           codeVerifier: transaction.payload.codeVerifier,
@@ -156,6 +166,11 @@ export function createCallbackRoute({ store, config: hostedConfig, fetchImpl }) 
         },
         fetchImpl === undefined ? {} : { fetchImpl },
       );
+      const claims = await verifyIdToken(
+        { idToken, nonce: transaction.payload.nonce, config: hostedConfig },
+        getKeySet === undefined ? {} : { getKeySet },
+      );
+      principal = principalFromClaims(claims);
     } catch (error) {
       return failed(error instanceof AuthUnavailableError ? "unavailable" : "expired", {
         destination,

@@ -112,10 +112,15 @@ test("the CSRF token is derived from the session and is not the session", () => 
   assert.throws(() => deriveCsrfToken(""), TypeError);
 });
 
-test("only the two frozen internal destinations are reachable", () => {
+test("the three internal destination shapes are reachable", () => {
   assert.equal(validateDestination("/publish/authorize"), "/publish/authorize");
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
   assert.equal(validateDestination(docs), docs);
+  /* The one added shape: a single collaboration document slug with a trailing
+     slash whose one segment is not a reserved route name. */
+  assert.equal(validateDestination("/how-archon-works/"), "/how-archon-works/");
+  assert.equal(validateDestination("/a/"), "/a/");
+  assert.equal(validateDestination(`/${"z".repeat(64)}/`), `/${"z".repeat(64)}/`);
 });
 
 test("every redirect-injection spelling is refused", () => {
@@ -138,6 +143,22 @@ test("every redirect-injection spelling is refused", () => {
     "/docs/short",
     "/",
     "",
+    /* Collaboration-slug near misses: a reserved first segment, two segments,
+       an uppercase letter, an underscore, no trailing slash, an over-long
+       segment, and a query on an otherwise legal slug. */
+    "/login/",
+    "/invite/",
+    "/publish/",
+    "/docs/",
+    "/api/",
+    "/_assets/",
+    "/_render/",
+    "/how/archon/works/",
+    "/How-Archon/",
+    "/how_archon/",
+    "/how-archon-works",
+    `/${"z".repeat(65)}/`,
+    "/how-archon-works/?x=1",
     null,
     12,
   ]) {
