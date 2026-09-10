@@ -113,7 +113,7 @@ const TRANSCRIPT = /^PASS {2}hosted integration matrix \(chromium [\w.]+; (\d+) 
  * caught somewhere forgiving would otherwise print a line that reads like a
  * full run.
  */
-const EXPECTED_CASES = 90;
+const EXPECTED_CASES = 96;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -379,7 +379,7 @@ async function toRequest(nodeRequest, origin) {
 }
 
 /** Write a `Response` back out over Node's HTTP server. */
-async function writeResponse(response, nodeResponse, { head = false, rewriteLocation = null } = {}) {
+async function writeResponse(response, nodeResponse, { head = false } = {}) {
   const headers = {};
   const cookies = response.headers.getSetCookie();
   for (const [name, value] of response.headers) {
@@ -387,9 +387,6 @@ async function writeResponse(response, nodeResponse, { head = false, rewriteLoca
     headers[name] = value;
   }
   if (cookies.length > 0) headers["set-cookie"] = cookies;
-  if (rewriteLocation !== null && typeof headers.location === "string") {
-    headers.location = rewriteLocation(headers.location);
-  }
   nodeResponse.writeHead(response.status, headers);
   if (head || response.body === null) {
     nodeResponse.end();
@@ -607,6 +604,11 @@ async function startBlobs(directory) {
     weakGetStore: weakFactory,
     faults,
     calls,
+    /* How many times the provider was asked to write one key. The difference
+       between "the state machine resolved this against what is stored" and "it
+       tried again" is a count of writes, and it is the only instrument that can
+       see it from outside. */
+    writesTo: (key) => calls.filter((one) => one.key === key && one.method === "setJSON").length,
     edgeURL,
     close: () => server.stop(),
   };
@@ -684,6 +686,11 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
   const tokens = new Map();
 
   const violate = (message) => state.violations.push(message);
+  /* The consent page echoes back the redirect URI, the state and the challenge
+     the application sent. They are this run's own values, but a fixture that
+     interpolates them raw is a fixture that teaches the wrong thing and would
+     break confusingly on a value containing a quote. */
+  const attr = (value) => String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
   const base64url = (input) => createHash("sha256").update(input).digest("base64url");
 
   const server = createServer((request, response) => {
@@ -727,9 +734,9 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
           `<!doctype html><meta charset="utf-8"><title>Sign in to GitHub</title>`
             + `<h1>Authorize Archon</h1>`
             + `<form id="consent" method="GET" action="/login/oauth/decide">`
-            + `<input type="hidden" name="redirect_uri" value="${redirectUri}">`
-            + `<input type="hidden" name="state" value="${stateValue}">`
-            + `<input type="hidden" name="code_challenge" value="${challenge}">`
+            + `<input type="hidden" name="redirect_uri" value="${attr(redirectUri)}">`
+            + `<input type="hidden" name="state" value="${attr(stateValue)}">`
+            + `<input type="hidden" name="code_challenge" value="${attr(challenge)}">`
             + `${button("first")}${button("second")}</form>${script}`,
         );
       }
@@ -921,7 +928,6 @@ async function startApp({ routes, deployment }) {
          than a 404 from the static tree. */
       for (const route of routes) {
         if (!route.match.regexp.test(url.pathname)) continue;
-        if (url.pathname === "/api/hosted/publications" && method === "PUT") break;
         const request = await toRequest(nodeRequest, "http://127.0.0.1");
         if (url.pathname.endsWith("/artifact")) state.artifactUploads += 1;
         const response = await route.handler(request);
@@ -953,6 +959,16 @@ async function startApp({ routes, deployment }) {
     });
   });
 
+  /* A WebSocket handshake is an `upgrade`, not a `request`, so a recorder that
+     listens only for `request` cannot see one -- and the hostile artifact tries
+     exactly that vector. Without this listener the assertion that nothing
+     reached the adversary would be true of a channel it was never watching. */
+  server.on("upgrade", (request, socket) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    state.requests.push({ method: "UPGRADE", path: url.pathname, search: url.search });
+    socket.destroy();
+  });
+
   const close = trackSockets(server);
   const origin = await listen(server, "127.0.0.1");
   return { origin, close, state };
@@ -970,6 +986,7 @@ async function startRenderer() {
   const state = { requests: [] };
 
   let available = true;
+  let stalled = null;
 
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
@@ -979,6 +996,15 @@ async function startRenderer() {
       cookie: request.headers.cookie ?? "",
     });
     const common = Object.fromEntries(headers);
+
+    /* Held open, never answered. This is what puts the viewer in the state the
+       forged-readiness case needs: the document is fetched and waiting to be
+       handed over, and the *real* renderer has not spoken yet. Answering later
+       is what lets the same case then prove the genuine handshake still works. */
+    if (stalled !== null && url.pathname !== FORGE_PATH) {
+      stalled.push({ request, response });
+      return;
+    }
 
     /* A renderer deployment that is simply not there. The viewer has to reach a
        readable failure state without having sent anything. */
@@ -1031,6 +1057,14 @@ async function startRenderer() {
     headers: () => headers,
     setAvailable(flag) {
       available = flag;
+    },
+    stall() {
+      stalled = [];
+    },
+    release() {
+      const held = stalled ?? [];
+      stalled = null;
+      for (const { request, response } of held) server.emit("request", request, response);
     },
     async load(distDir) {
       headers = parseHeadersFile(await readFile(join(distDir, "_headers"), "utf8"));
@@ -1442,9 +1476,14 @@ async function assemble(tempRoot) {
   declare(authLogout, bounded(authLogout.createLogoutRoute(authDeps())));
   declare(session, bounded(session.createSessionRoute({ store: authStore })));
   declare(viewer, bounded(viewer.createViewerRoute(authDeps())));
+  /* Rebuilt per request, like every other route. A snapshot taken once at
+     startup would make the operator switch unreachable from these routes, and
+     the cases that turn publishing off and require an owner's reads to survive
+     would then be true of a configuration nothing could change. */
   declare(
     documentRead,
-    bounded(documentRead.createDocumentReadRoutes({ store: authStore, publications: publications() })),
+    bounded((request) =>
+      documentRead.createDocumentReadRoutes({ store: authStore, publications: publications() })(request)),
   );
   routes.sort((left, right) => Number(right.match.literal) - Number(left.match.literal));
 
@@ -1536,7 +1575,11 @@ async function publishThroughBrowser(world, context, { title, html, account = "f
   assert.equal(uploaded.status, 201, `the artifact upload returned ${uploaded.status}`);
   const receipt = await uploaded.json();
   await page.close();
-  return { publication, review, receipt };
+  /* The browser secret is the fragment of the approval link. It is returned so
+     the leak assertion can look for it: it is a capability, and a capability
+     nobody searches for is a capability nobody would notice in a log. */
+  const browserSecret = publication.verificationUriComplete.split("#")[1] ?? "";
+  return { publication, review, receipt, browserSecret };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1551,8 +1594,13 @@ async function publishThroughBrowser(world, context, { title, html, account = "f
  * deeper in an opaque-origin sandbox.
  */
 async function artifactFrame(page, rendererOrigin) {
+  /* Matched on the renderer's exact document URL rather than on its origin.
+     Two cases put a *second* page from that origin on this tab -- the forge
+     page that impersonates a renderer -- and an origin prefix would find
+     whichever came first, then wait forever for a state attribute that page
+     never sets. */
   const renderer = await waitFor(
-    () => page.frames().find((candidate) => candidate.url().startsWith(rendererOrigin)) ?? null,
+    () => page.frames().find((candidate) => candidate.url() === `${rendererOrigin}/`) ?? null,
     "the renderer frame",
   );
   await waitFor(
@@ -1600,9 +1648,12 @@ async function happyPath(world, browser, client) {
   const context = await openContext(world, browser);
   const page = await context.newPage();
   if (process.env.AHU012_DEBUG === "1") {
-    page.on("console", (m) => process.stderr.write(`DEBUG console ${m.type()} ${m.text()}\n`));
-    page.on("requestfailed", (r) => process.stderr.write(`DEBUG failed ${r.url()} ${r.failure()?.errorText}\n`));
-    page.on("response", (r) => process.stderr.write(`DEBUG response ${r.status()} ${r.url()}\n`));
+    /* The approval link carries the browser secret in its fragment, and a
+       diagnostic that printed it would put a live capability in a CI log. */
+    const safe = (url) => String(url).split("#")[0];
+    page.on("console", (m) => process.stderr.write(`DEBUG console ${m.type()} ${safe(m.text())}\n`));
+    page.on("requestfailed", (r) => process.stderr.write(`DEBUG failed ${safe(r.url())} ${r.failure()?.errorText}\n`));
+    page.on("response", (r) => process.stderr.write(`DEBUG response ${r.status()} ${safe(r.url())}\n`));
   }
   const review = await approveInBrowser(page, started.verificationUrl);
 
@@ -1697,13 +1748,18 @@ async function worker() {
 
   const world = { tempRoot, ...(await assemble(tempRoot)) };
   world.tempRoot = tempRoot;
-  /* The browser resolves `github.com` to the provider fixture's TLS listener.
-     Nothing else about the browser is relaxed, and the rule names one host. */
-  const browser = await playwright[ENGINE].launch({
-    args: [`--host-resolver-rules=${world.provider.resolverRule}`],
-  });
 
+  /* Everything below runs inside this, so a failure anywhere -- including the
+     browser launch itself -- still stops five servers and a blob server rather
+     than leaving them for the supervisor's process-group kill. */
+  let browser = null;
   try {
+    /* The browser resolves `github.com` to the provider fixture's TLS listener.
+       Nothing else about the browser is relaxed, and the rule names one host. */
+    browser = await playwright[ENGINE].launch({
+      args: [`--host-resolver-rules=${world.provider.resolverRule}`],
+    });
+
     const consumer = await installClient(tempRoot);
     const document = await buildDocument(consumer);
     record("package: the installed builder produced a navigable hosted artifact");
@@ -1723,12 +1779,24 @@ async function worker() {
     await accessibility(world, browser, owned);
     await owned.ownerContext.close();
 
+    /* Last, and over the whole run: every OAuth round trip any matrix made had
+       to carry the contract's client id, redirect URI and PKCE challenge. Read
+       here rather than after the auth matrix, because five later matrices sign
+       people in too and a check placed earlier would never see them. */
+    assert.deepEqual(
+      world.provider.state.violations,
+      [],
+      "the application broke the OAuth request contract",
+    );
+    assert.ok(world.provider.state.tokenCalls > 0, "no OAuth exchange happened in this run");
+    record("auth: every provider round trip carried the contract's client id, redirect and PKCE");
+
     process.stdout.write(`NONCE ${nonce}\n`);
     process.stdout.write(
       `PASS  hosted integration matrix (chromium ${browser.version()}; ${CASES.length} cases)\n`,
     );
   } finally {
-    await browser.close();
+    if (browser !== null) await browser.close();
     await world.close();
   }
 }
@@ -1991,8 +2059,6 @@ async function providerFailures(world, browser) {
   record("auth: a grant carrying an unexpected scope signs nobody in");
 
   provider.state.plan = "ok";
-  assert.deepEqual(provider.state.violations, [], "the application broke the OAuth request contract");
-  record("auth: every provider round trip carried the contract's client id, redirect and PKCE");
 
   await outage.close();
   await context.close();
@@ -2131,7 +2197,6 @@ async function uploadAndReceipt(world, browser) {
 
   await page.close();
   await context.close();
-  return { publication, receipt, context: null };
 }
 
 /* ------------------------------------------------------------------ *
@@ -2168,6 +2233,7 @@ async function ownerRead(world, browser) {
   provider.state.account = "first";
   const published = await publishThroughBrowser(world, ownerContext, { title, html, account: "first" });
   const documentId = published.receipt.result.documentId;
+  const publication = published.publication;
   const digest = published.publication.descriptor.contentSha256;
   const markers = [title, digest, "Private figures"];
 
@@ -2287,7 +2353,18 @@ async function ownerRead(world, browser) {
   record("read: legacy DOC_OWNERS, org defaults and PUBLIC_DEFAULT_ROLE cannot widen a hosted read");
 
   await strangerContext.close();
-  return { ownerContext, documentId, title, digest, markers, strangerCookie, ownerCookie };
+  return {
+    ownerContext,
+    documentId,
+    title,
+    digest,
+    markers,
+    strangerCookie,
+    ownerCookie,
+    publication,
+    browserSecret: published.browserSecret,
+    sessionCookie: ownerCookie.split("=").slice(1).join("="),
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -2347,27 +2424,40 @@ async function storageAndRaces(world, browser) {
   await approveInBrowser(ambiguousPage, ambiguous.verificationUriComplete);
   await ambiguousPage.close();
 
-  blobs.faults.ambiguousNextWrite = `publications/${ambiguous.publicationId}`;
+  const ambiguousKey = `publications/${ambiguous.publicationId}`;
+  const writesBefore = blobs.writesTo(ambiguousKey);
+  blobs.faults.ambiguousNextWrite = ambiguousKey;
   const lost = await uploadArtifact(world, ambiguous);
-  assert.ok(
-    lost.status === 200 || lost.status === 201 || lost.status === 503,
-    `an ambiguous completion was answered ${lost.status}`,
-  );
   blobs.faults.ambiguousNextWrite = null;
+
+  /* A success, not a 503. The record is stored; reporting an outage for a write
+     that committed is the failure this readback exists to prevent, and
+     accepting 503 here would have made that outcome indistinguishable from the
+     correct one. */
+  assert.ok(
+    lost.status === 200 || lost.status === 201,
+    `an ambiguous but committed completion was answered ${lost.status}`,
+  );
+  const lostBody = await lost.json();
 
   const afterLoss = await publicationStatus(world, ambiguous);
   assert.equal(afterLoss.status, 200);
   const settled = await afterLoss.json();
   assert.equal(settled.state, "complete", "an ambiguous write left the publication unrecoverable");
   assert.equal(settled.result.documentId, ambiguous.publicationId, "a second document id appeared");
-  if (lost.status !== 503) {
-    assert.deepEqual(
-      (await lost.json()).result,
-      settled.result,
-      "the ambiguous response and the recovered receipt name different documents",
-    );
-  }
-  record("storage: a committed write whose answer was lost recovers as one document");
+  assert.deepEqual(
+    lostBody.result,
+    settled.result,
+    "the ambiguous response and the recovered receipt name different documents",
+  );
+  /* One write reached the provider. The state machine resolved the lost answer
+     by reading back what is stored, rather than by writing again. */
+  assert.equal(
+    blobs.writesTo(ambiguousKey) - writesBefore,
+    1,
+    "the lost write answer was resolved by writing again rather than by reading back",
+  );
+  record("storage: a committed write whose answer was lost is resolved by one readback");
 
   /* And a retry after recovery is still the same document rather than a new
      one, so a client that could not read its answer never creates a second. */
@@ -2464,11 +2554,121 @@ async function storageAndRaces(world, browser) {
   );
   record("storage: a cancel racing an upload leaves exactly one terminal state");
 
+  /* 6.7 A committed-but-unanswered write on the *approval*, which is where the
+   *     readback is load-bearing in a way a completion cannot show.
+   *
+   * A completion is idempotent: whichever way an ambiguous write resolves, a
+   * retry finds the document and returns it. An approval is not. If the state
+   * machine treats a lost answer as a refusal, its next attempt re-reads a
+   * record that is now `approved` and reports `state_conflict` -- telling a
+   * person their successful approval failed, on a publication that is in fact
+   * theirs. So this drives the real approval, in the real browser, with the
+   * write's answer thrown away, and requires the person to be told it worked.
+   */
+  const ambiguousApproval = await startPublication(world, {
+    title: "Ambiguous approval",
+    html: "<!doctype html><title>aa</title><p>ambiguous approval</p>",
+  });
+  const approvalKey = `publications/${ambiguousApproval.publicationId}`;
+  const approvalWritesBefore = blobs.writesTo(approvalKey);
+  const approvalPage = await context.newPage();
+  blobs.faults.ambiguousNextWrite = approvalKey;
+  const ambiguousReview = await approveInBrowser(approvalPage, ambiguousApproval.verificationUriComplete);
+  blobs.faults.ambiguousNextWrite = null;
+  await approvalPage.close();
+
+  const approvedState = await (await publicationStatus(world, ambiguousApproval)).json();
+  assert.equal(
+    approvedState.state,
+    "approved",
+    `an approval whose write answer was lost settled as ${approvedState.state}`,
+  );
+  assert.ok(
+    !/could not|failed|conflict|wrong|again/i.test(ambiguousReview.status),
+    `the approval page reported a failure for an approval that succeeded: ${ambiguousReview.status}`,
+  );
+  assert.equal(
+    blobs.writesTo(approvalKey) - approvalWritesBefore,
+    1,
+    "the lost approval answer was resolved by writing again rather than by reading back",
+  );
+  /* And the owner it fixed is the account that clicked, not an empty one. */
+  const approvedUpload = await uploadArtifact(world, ambiguousApproval);
+  assert.equal(approvedUpload.status, 201);
+  assert.equal(
+    (await approvedUpload.json()).result.ownerAccountId,
+    `gh_${world.provider.identities.first.id}`,
+  );
+  record("storage: an approval whose write answer was lost is reported as the success it was");
+
+  /* 6.8 The descriptor recheck inside the state machine, reached the one way
+   *     the HTTP route cannot reach it.
+   *
+   * `handleArtifact` derives the digest and the length from the bytes it read,
+   * so over the wire a client cannot claim facts that disagree with its own
+   * body -- which means the route can never present `completePublication` with
+   * a mismatched claim, and the guard inside it is untestable from outside.
+   * This calls the real producer with the real dependencies and the real record
+   * and presents exactly that combination. No storage may be touched.
+   */
+  const guarded = await startPublication(world, {
+    title: "Descriptor recheck",
+    html: "<!doctype html><title>d</title><p>descriptor</p>",
+  });
+  const guardedPage = await context.newPage();
+  await approveInBrowser(guardedPage, guarded.verificationUriComplete);
+  await guardedPage.close();
+
+  const guardedKey = `publications/${guarded.publicationId}`;
+  const guardedWritesBefore = blobs.writesTo(guardedKey);
+  await assert.rejects(
+    () => world.modules.publicationsModule.completePublication(
+      {
+        publicationId: guarded.publicationId,
+        agentSecret: guarded.agentSecret,
+        html: guarded.bytes.toString("utf8"),
+        /* Bytes that match the stored descriptor, claimed under a digest and a
+           length that do not. */
+        contentSha256: createHash("sha256").update("something else").digest("hex"),
+        contentBytes: guarded.descriptor.contentBytes + 1,
+      },
+      world.publications(),
+    ),
+    (error) => error.code === "descriptor_mismatch",
+    "a completion whose claimed digest and length disagree with the approved descriptor was accepted",
+  );
+  assert.equal(
+    blobs.writesTo(guardedKey) - guardedWritesBefore,
+    0,
+    "a refused completion still wrote to storage",
+  );
+  /* The record is untouched and the honest upload still works afterwards. */
+  const honest = await uploadArtifact(world, guarded);
+  assert.equal(honest.status, 201, `the honest upload after a refused one was ${honest.status}`);
+  record("storage: a completion claiming a digest and length the approval did not cover is refused before any write");
+
+  /* 6.9 The store producer asks for strongly consistent reads, and says so to
+   *     the provider rather than merely intending to.
+   *
+   * `@netlify/blobs` refuses a strong read when the deployment was configured
+   * without an uncached edge URL, so a handle built that way is a way to
+   * observe the request the producer makes. A producer that stopped asking
+   * would read from a replica in production -- a revoked session that keeps
+   * working, and a compare-and-set against an ETag that has already moved.
+   */
+  await assert.rejects(
+    () => world.modules.publicationStore
+      .createPublicationStore({ getStore: blobs.weakGetStore })
+      .read(guarded.publicationId),
+    "the publication store no longer requires strongly consistent reads",
+  );
+  record("storage: the publication store demands strongly consistent reads from the provider");
+
   /* 6.6 No partial artifact ever became readable.
    *
-   * The publication whose create never reached the provider has no record at
-   * all, so its content route has nothing to serve to anybody -- including the
-   * account that started it. The contested one settles either way, and both
+   * The publication whose upload never happened has no completion at all, so
+   * its content route has nothing to serve to anybody -- including the account
+   * that started it. The contested one settles either way, and both
    * settlements have a definite answer: a completed publication serves its
    * owner, and a cancelled one serves nobody. What must never happen is the
    * third thing -- a half-written document readable by someone.
@@ -2479,6 +2679,11 @@ async function storageAndRaces(world, browser) {
   });
   assert.ok(neverStored.status >= 400, `a publication with no completion served content (${neverStored.status})`);
   record("storage: a publication that never completed exposes no content");
+  const neverCreated = await fetch(`${app.origin}/api/hosted/docs/${"e".repeat(32)}/content`, {
+    headers: { cookie: ownerCookie },
+  });
+  assert.ok(neverCreated.status >= 400, "a publication that was never created served content");
+  record("storage: a create the provider never took leaves nothing to read");
 
   const contestedContent = await fetch(`${app.origin}/api/hosted/docs/${contested.publicationId}/content`, {
     headers: { cookie: ownerCookie },
@@ -2505,10 +2710,21 @@ async function storageAndRaces(world, browser) {
 const FIXTURE_DIR = join(ROOT, "scripts", "fixtures", "hosted");
 
 /** One fixture artifact, with this run's origins substituted in. */
-function fixtureArtifact(world, name) {
-  return readFileSync(join(FIXTURE_DIR, name), "utf8")
+function fixtureArtifact(world, name, { requiresOrigins = false } = {}) {
+  const source = readFileSync(join(FIXTURE_DIR, name), "utf8");
+  const substituted = source
     .replaceAll("__APP_ORIGIN__", world.app.origin)
     .replaceAll("__ADVERSARY_ORIGIN__", world.adversary.origin);
+  /* An unsubstituted hostile fixture would leave the adversary log empty for
+     the wrong reason: the artifact would be naming a host that does not exist
+     rather than being refused. Both directions are checked for the fixture that
+     depends on it -- the placeholders were there, and none survived. The benign
+     control names no origin at all, which is why the first check is opt-in. */
+  if (requiresOrigins) {
+    assert.notEqual(source, substituted, `${name} carries no origin placeholder to substitute`);
+  }
+  assert.doesNotMatch(substituted, /__[A-Z_]+__/, `${name} still carries an unsubstituted placeholder`);
+  return substituted;
 }
 
 /** Open a published document as its owner and return both frames. */
@@ -2598,17 +2814,37 @@ async function renderedIsolation(world, browser, client) {
 
   /* 7.3 Hostile content. Every attempt it makes is recorded somewhere it
          cannot reach, so the assertions are about servers and windows rather
-         than about exceptions it swallowed. */
+         than about exceptions it swallowed.
+   *
+   * The recorder is proved to work first. "Nothing reached the adversary" is
+   * worth exactly as much as the recorder's ability to notice something that
+   * does, and a broken listener would make every isolation case below pass by
+   * observing nothing. */
+  const control = await context.newPage();
+  await control.goto(`${adversary.origin}/positive-control`);
+  assert.ok(
+    adversary.state.requests.some((one) => one.path === "/positive-control"),
+    "the adversary recorder cannot see a request that reaches it",
+  );
+  await control.close();
+  record("render: the adversary recorder registers a request that does reach it");
+
   const adversaryBefore = adversary.state.requests.length;
   const appBefore = app.state.requests.length;
 
   const hostile = await publishThroughBrowser(world, context, {
     title: "Hostile artifact",
-    html: fixtureArtifact(world, "hostile.html"),
+    html: fixtureArtifact(world, "hostile.html", { requiresOrigins: true }),
   });
   const pagesBefore = new Set(context.pages());
-  const hostileView = await openAsOwner(world, context, hostile.receipt.result.url);
-  await hostileView.page.evaluate(() => { window.__pwned = false; });
+  /* Seeded before navigation. Setting it after the page has loaded would set it
+     after the artifact's script had already had its chance, so the assertion
+     below would be reading a value this line had just written. */
+  const hostilePage = await context.newPage();
+  await hostilePage.addInitScript(() => { window.__pwned = false; });
+  await hostilePage.goto(hostile.receipt.result.url);
+  const hostileFrames = await artifactFrame(hostilePage, renderer.origin);
+  const hostileView = { page: hostilePage, ...hostileFrames };
   await waitFor(
     async () => (await hostileView.artifact.locator("body").getAttribute("data-hostile-ran")) === "true",
     "the hostile artifact to finish trying",
@@ -2689,13 +2925,35 @@ async function deploymentConnection(world, owned) {
          private header set. Both are read off the deployment rather than
          restated here. */
   const declared = Object.fromEntries(world.deployment.values.map(([name, value]) => [name.toLowerCase(), value]));
+  /* The directives are asserted on what the deployment *declares*, because that
+     is the artifact Netlify serves from. Comparing the served response to the
+     same block would only prove this runner echoes its own input. The served
+     check below is kept for the one thing it does prove: that the block is
+     applied to the contract's approval path at all. */
+  assert.equal(declared["x-content-type-options"], "nosniff");
+  assert.equal(declared["referrer-policy"], "no-referrer");
+  assert.equal(declared["cache-control"], "private, no-store");
+  for (const directive of [
+    "default-src 'none'",
+    "script-src 'self'",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'self' https://github.com",
+  ]) {
+    assert.ok(
+      declared["content-security-policy"].includes(directive),
+      `the hosted deployment no longer declares ${directive}`,
+    );
+  }
+  record("deploy: the deployment declares the C3 header set for every static surface");
+
   const authorize = await fetch(`${app.origin}/publish/authorize`);
   assert.equal(authorize.status, 200, "the contract's approval path is not served");
   for (const [name, value] of Object.entries(declared)) {
     assert.equal(authorize.headers.get(name), value, `the approval page lost its ${name}`);
   }
-  assert.match(declared["content-security-policy"], /frame-ancestors 'none'/);
-  record("deploy: the approval page carries the deployment's own header block");
+  record("deploy: the contract's approval path is served with that header block applied");
 
   const shell = await fetch(`${app.origin}/docs/${owned.documentId}`, { headers: { cookie } });
   assert.equal(shell.status, 200);
@@ -2737,15 +2995,13 @@ async function deploymentConnection(world, owned) {
   assert.equal(framed, false, "the renderer announced itself to a page that framed it from another origin");
   record("deploy: an adversary page cannot frame the renderer into talking to it");
 
-  /* The approval page and the viewer refuse framing outright. */
-  for (const [label, path] of [["the approval page", "/publish/authorize"], ["the viewer", `/docs/${owned.documentId}`]]) {
-    const response = await fetch(`${app.origin}${path}`, { headers: { cookie } });
-    assert.ok(
-      (response.headers.get("content-security-policy") ?? "").includes("frame-ancestors 'none'"),
-      `${label} does not refuse framing`,
-    );
-    record(`deploy: ${label} refuses framing`);
-  }
+  /* The viewer's policy is its handler's rather than the deployment block's, so
+     its refusal to be framed is a separate claim from the one above. */
+  assert.ok(
+    shellCsp.includes("frame-ancestors 'none'"),
+    `the viewer does not refuse framing: ${shellCsp}`,
+  );
+  record("deploy: the viewer refuses framing");
 
   /* 8.3 The renderer origin is cookie-free, and the bytes it is handed carry
          no identity. The message grammar is exact-keyed by the renderer itself,
@@ -2764,31 +3020,82 @@ async function deploymentConnection(world, owned) {
     "a request to the renderer origin carried a cookie",
   );
   record("deploy: the renderer origin is cookie-free and is told no document identifier");
-
-  /* 8.4 A readiness message from the right origin and the wrong window. The
-         forge page is served by the renderer deployment itself, so its
-         `event.origin` is flawless; only its window is wrong. */
-  const forgeReports = [];
-  await view.page.exposeFunction("__archonForgeReport", (seen) => forgeReports.push(seen));
-  await view.page.evaluate((url) => {
-    addEventListener("message", (event) => {
-      if (event.data && Array.isArray(event.data.archonForgeReport)) {
-        window.__archonForgeReport(event.data.archonForgeReport);
-      }
-    });
-    const frame = document.createElement("iframe");
-    frame.src = url;
-    document.body.appendChild(frame);
-  }, `${renderer.origin}${FORGE_PATH}`);
-  await waitFor(() => forgeReports.length > 0, "the forged renderer to report what it received");
-  await new Promise((done) => setTimeout(done, 300));
-  const forged = forgeReports.flat();
-  assert.ok(
-    !forged.includes("archon:render"),
-    `the viewer sent the document to a window it was not waiting on: ${JSON.stringify(forged)}`,
-  );
-  record("deploy: a readiness message from the right origin and the wrong window gets nothing");
   await view.page.close();
+
+  /* 8.4 A readiness message from the right origin and the wrong window.
+   *
+   * The timing is the whole case. The viewer hands the document over exactly
+   * once, and once it has, a later forged message is refused by the
+   * already-rendered guard rather than by the source check -- so a forged
+   * message sent to a finished viewer proves nothing about who is allowed to
+   * speak. This runs against a viewer that is *waiting*: the renderer's own
+   * document is held open, so the bytes are fetched and pending and the real
+   * renderer has not said anything yet. That is the one moment the source check
+   * is the only thing between a private document and another window.
+   *
+   * The forge page is served by the renderer deployment itself, so its
+   * `event.origin` is flawless; only its window is wrong.
+   */
+  renderer.stall();
+  const forgeReports = [];
+  try {
+    const waiting = await context.newPage();
+    await waiting.goto(`${app.origin}/docs/${owned.documentId}`);
+    /* The pre-state, asserted rather than assumed: the viewer is still waiting
+       for its renderer. If this ever stops being true the case has stopped
+       testing the source check and says so here. */
+    await waitFor(
+      async () => (await waiting.locator("[data-archon-title]").innerText()) === owned.title,
+      "the viewer to have fetched the document it is waiting to hand over",
+    );
+    assert.notEqual(
+      await waiting.locator("html").getAttribute("data-archon-state"),
+      "rendered",
+      "the viewer had already handed the document over before the forged message was sent",
+    );
+
+    await waiting.exposeFunction("__archonForgeReport", (seen) => forgeReports.push(seen));
+    await waiting.evaluate((url) => {
+      addEventListener("message", (event) => {
+        if (event.data && Array.isArray(event.data.archonForgeReport)) {
+          window.__archonForgeReport(event.data.archonForgeReport);
+        }
+      });
+      const frame = document.createElement("iframe");
+      frame.src = url;
+      document.body.appendChild(frame);
+    }, `${renderer.origin}${FORGE_PATH}`);
+
+    /* Bounded on the forge page's own reports rather than on a sleep: it posts
+       readiness every 50ms and reports what it has received alongside, so three
+       reports mean it has been announcing itself across three intervals and the
+       viewer has had every chance to answer it. */
+    await waitFor(() => forgeReports.length >= 3, "the forged renderer to report what it received");
+    const forged = forgeReports.flat();
+    assert.ok(
+      !forged.includes("archon:render"),
+      `the viewer sent the document to a window it was not waiting on: ${JSON.stringify(forged)}`,
+    );
+    assert.notEqual(
+      await waiting.locator("html").getAttribute("data-archon-state"),
+      "rendered",
+      "a forged readiness message caused the viewer to hand the document over",
+    );
+    record("deploy: a readiness message from the right origin and the wrong window gets nothing");
+
+    /* And the genuine handshake still works, which is what keeps the case above
+       from passing on a viewer that simply never hands anything to anybody. */
+    renderer.release();
+    const real = await artifactFrame(waiting, renderer.origin);
+    await waitFor(
+      async () => (await real.artifact.locator("body").textContent()).includes("Private figures"),
+      "the real renderer to receive the document once it announces itself",
+    );
+    record("deploy: the document is handed over as soon as the real renderer announces itself");
+    await waiting.close();
+  } finally {
+    renderer.release();
+  }
 
   /* 8.5 The renderer deployment is simply not there. The reader must be told,
          in the trusted shell, and the bytes must not have been sent anywhere. */
@@ -2871,11 +3178,11 @@ async function operations(world, browser, owned) {
     assert.equal(stillReadable.status, 200, "disabling publishing took away an owner's document");
     record("ops: an owner's existing document is still readable while publishing is disabled");
 
-    const recovery = await publicationStatus(world, { ...pending, publicationId: owned.documentId });
-    assert.ok(
-      recovery.status === 200 || recovery.status === 401,
-      `receipt recovery while disabled was answered ${recovery.status}`,
-    );
+    const recovery = await publicationStatus(world, owned.publication);
+    assert.equal(recovery.status, 200, `receipt recovery while disabled was answered ${recovery.status}`);
+    const recovered = await recovery.json();
+    assert.equal(recovered.state, "complete", "a completed receipt stopped being recoverable while disabled");
+    assert.equal(recovered.result.documentId, owned.documentId);
     const completedRecovery = await fetch(`${app.origin}/api/hosted/docs/${owned.documentId}/content`, {
       headers: { cookie: owned.ownerCookie },
     });
@@ -2957,7 +3264,14 @@ async function operations(world, browser, owned) {
   /* 9.6 Nothing this run printed carries a capability or a private document.
          Every child process transcript is checked, because a secret in a log is
          the same disclosure as a secret in a response. */
-  const secrets = [pending.agentSecret, owned.digest, DOCUMENT_SENTINEL];
+  const secrets = [
+    pending.agentSecret,
+    owned.publication.agentSecret,
+    owned.browserSecret,
+    owned.sessionCookie,
+    owned.digest,
+    DOCUMENT_SENTINEL,
+  ].filter((secret) => typeof secret === "string" && secret !== "");
   for (const entry of TRANSCRIPTS) {
     for (const secret of secrets) {
       assert.ok(
@@ -3043,11 +3357,20 @@ async function accessibility(world, browser, owned) {
   assert.match(await view.page.locator("[data-archon-owner]").innerText(), /Signed in as @/);
   record("a11y: the title, the account and sign-out are outside the untrusted frame");
 
-  /* Signing out from the keyboard revokes server-side, not merely in the tab. */
+  /* Signing out from the keyboard revokes server-side, not merely in the tab.
+     The cookie is captured *before* the press and replayed afterwards: reading
+     the jar again after sign-out returns an empty header, and an empty header
+     is refused for having no session rather than for having a revoked one --
+     which would make this case pass against a server that revoked nothing. */
+  const revoked = await cookieHeader(context, app.origin);
+  const beforeSignOut = await fetch(`${app.origin}/api/hosted/docs/${owned.documentId}`, {
+    headers: { cookie: revoked },
+  });
+  assert.equal(beforeSignOut.status, 200, "the captured cookie was not a working session");
   await view.page.keyboard.press("Enter");
   await waitFor(async () => {
     const response = await fetch(`${app.origin}/api/hosted/docs/${owned.documentId}`, {
-      headers: { cookie: await cookieHeader(context, app.origin).catch(() => "") },
+      headers: { cookie: revoked },
     });
     return response.status !== 200;
   }, "the keyboard sign-out to revoke the session");

@@ -24,13 +24,16 @@ Five servers on loopback, plus a browser, plus two child-process clients.
 
 Browser: Chromium, pinned via `playwright@1.55.0`. The exact build is printed in
 the runner's own PASS line, e.g.
-`PASS  hosted integration matrix (chromium 140.0.7339.16; 90 cases)`.
+`PASS  hosted integration matrix (chromium 140.0.7339.16; 96 cases)`.
 
-Nothing in the run contacts a network host. `github.com` is the only external
-name the browser may resolve and it resolves to the loopback fixture; every
-other origin is aborted by an explicit rule, so a regression that reached the
-internet fails as a blocked request rather than passing on a machine that has
-one.
+Once the servers are up, nothing in the matrix contacts a network host.
+`github.com` is the only external name the browser may resolve and it resolves
+to the loopback fixture; every other origin is aborted by an explicit rule, so a
+regression that reached the internet fails as a blocked request rather than
+passing on a machine that has one. The *setup* is not network-free and does not
+claim to be: the supervisor installs a pinned Playwright and downloads a
+Chromium, and the client half runs `npm pack` and `npm install`. Those are
+registry and CDN fetches, not provider contact.
 
 ## What is real, and what is substituted
 
@@ -105,8 +108,8 @@ gap that more local cases would close.
 
 ## What the run covers
 
-Ninety cases across ten matrices, each named in the runner and counted by its
-supervisor:
+Ninety-six cases across ten matrices, each named in the runner and counted by
+its supervisor:
 
 1. The whole happy path — clean-installed client, browser approval, a *second*
    client process resuming and uploading, the durable record, the owner's
@@ -124,9 +127,13 @@ supervisor:
    `DOC_OWNERS`, organisation defaults and `PUBLIC_DEFAULT_ROLE` cannot widen a
    hosted read.
 6. Storage faults and races — a create the provider never took, an unanswerable
-   read, a committed write whose answer was lost, simultaneous completions, a
-   cancel racing an upload, and the rule that nothing partial becomes readable.
-7. Rendered isolation — an ordinary artifact operated through its own theme
+   read, a committed write whose answer was lost on a completion *and* on an
+   approval, a completion whose claimed digest and length disagree with the
+   approval, the store's demand for strongly consistent reads, simultaneous
+   completions, a cancel racing an upload, and the rule that nothing partial
+   becomes readable.
+7. Rendered isolation — a positive control proving the adversary recorder can
+   see a request that does reach it, an ordinary artifact operated through its own theme
    toggle and fragment navigation, the *packaged* document's real section
    navigation inside the sandbox, and a hostile artifact's attempts on the
    parent window, the account origin, the renderer's message channel, the tab
@@ -163,5 +170,6 @@ refuses to install the client package anywhere the builder's own repository walk
 could find `templates/base/`, because every packaging assertion would otherwise
 pass for the wrong reason.
 
-No credential, no provider account and no network access is required, which is
-why this runs on an untrusted pull request.
+No credential and no provider account is required, which is why this runs on an
+untrusted pull request. The only network the run needs is the npm registry and
+the Chromium download.
