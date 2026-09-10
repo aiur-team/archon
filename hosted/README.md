@@ -520,9 +520,30 @@ in every browser rather than refusing an attacker.
 carries `Sec-Fetch-Site: same-origin` **and** `Sec-Fetch-Mode: navigate`.
 `Sec-Fetch-Site` is a forbidden header name, so page script cannot set it, and a
 cross-site form POST arrives as `cross-site` — exactly the class the check
-exists to refuse. Requiring the `navigate` mode too means a `fetch` or
-`XMLHttpRequest` never gets the exemption; both send a real `Origin` anyway. A
-browser too old to send Fetch Metadata sends neither header and is refused.
+exists to refuse; a sandboxed frame's opaque origin and a cross-origin redirect
+both report `cross-site` too. The `navigate` mode is not a restatement of that
+argument: `fetch` with `mode: "no-cors"` is the *other* request class that gets
+`Origin: null` under `no-referrer`, and the mode requirement is the only thing
+that excludes it.
+
+The exemption is **off unless a route asks for it**, via
+`requireExactOrigin(request, config, {formNavigation: true})` — which only
+`auth-github-start` does, on both its paths. `publications-bind`,
+`publications-decision` and `auth-logout` are `fetch` callers whose requests
+always carry a real `Origin`, so they are held to exact equality with no escape.
+A browser too old to send Fetch Metadata sends neither header and is refused.
+
+## Why `/publish/authorize` has a rewrite in `netlify.toml`
+
+The approval page is committed at `public/publish/authorize.html`, and C3 freezes
+its URL at the extensionless `/publish/authorize` — `validateStartResponse`
+refuses a start response whose URL is anything else. Serving a flat `.html` asset
+at its extensionless path is Netlify *post-processing*, and this deployment sets
+`[build.processing] skip_processing = true`. Leaving the contract path to that
+setting would mean the one URL every agent prints 404s, on a flag whose stated
+purpose is unrelated. The `[[redirects]]` block states it instead, as a `200`
+rewrite so the visitor stays on the contract path and no fragment is carried
+through a `Location`.
 
 ## Operator configuration
 

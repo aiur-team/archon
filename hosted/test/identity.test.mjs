@@ -220,13 +220,21 @@ test("a same-origin form navigation is accepted on its Fetch Metadata", () => {
     origin: "null",
     headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
   });
-  assert.equal(requireExactOrigin(navigation, config), APP_ORIGIN);
+  assert.equal(requireExactOrigin(navigation, config, { formNavigation: true }), APP_ORIGIN);
+
+  /* And it is off unless the route asks. Only the two sign-in forms submit by
+     navigation; bind, decision and logout are `fetch` callers that always
+     present a real Origin, and handing them the exemption would widen it past
+     the case that needs it. */
+  assert.throws(() => requireExactOrigin(navigation, config), ForbiddenOriginError);
 });
 
 test("the Fetch Metadata exemption is exactly one case, and fails closed", () => {
   const config = hostedConfig();
   const nulled = (headers) =>
     browserRequest("/x", { method: "POST", origin: "null", headers });
+  const check = (request) =>
+    requireExactOrigin(request, config, { formNavigation: true });
 
   for (const [why, headers] of [
     ["no Fetch Metadata at all, as an old browser sends", {}],
@@ -238,7 +246,7 @@ test("the Fetch Metadata exemption is exactly one case, and fails closed", () =>
     ["only the site half", { "sec-fetch-site": "same-origin" }],
     ["only the mode half", { "sec-fetch-mode": "navigate" }],
   ]) {
-    assert.throws(() => requireExactOrigin(nulled(headers), config), ForbiddenOriginError, why);
+    assert.throws(() => check(nulled(headers)), ForbiddenOriginError, why);
   }
 
   /* And the exemption is for the literal `null` only: an absent Origin carrying
@@ -246,14 +254,38 @@ test("the Fetch Metadata exemption is exactly one case, and fails closed", () =>
      header inherits it. */
   assert.throws(
     () =>
-      requireExactOrigin(
+      check(
         browserRequest("/x", {
           method: "POST",
           origin: null,
           headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
         }),
-        config,
       ),
+    ForbiddenOriginError,
+  );
+});
+
+test("requireBrowserMutation only forwards the exemption when its caller asks", async () => {
+  const config = hostedConfig();
+  const { store, token, csrf } = await signedIn();
+  const navigation = () =>
+    browserRequest("/x", {
+      method: "POST",
+      origin: "null",
+      cookies: { [SESSION_COOKIE]: token },
+      csrf,
+      headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+    });
+
+  const allowed = await requireBrowserMutation(navigation(), {
+    store,
+    config,
+    formNavigation: true,
+  });
+  assert.deepEqual(allowed.principal, PRINCIPAL_ALPHA);
+
+  await assert.rejects(
+    () => requireBrowserMutation(navigation(), { store, config }),
     ForbiddenOriginError,
   );
 });

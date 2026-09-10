@@ -47,8 +47,10 @@ and returns you to this same pending publication. Your approval is still
 waiting.
 
 If the account changes between the page loading and your click, Archon refuses
-the decision rather than publishing under the new one. The click meant "publish
-as the account I can see".
+the decision rather than publishing under the new one, tells you which account
+you are signed in as now, and shows you the document again so you can decide
+against what is actually true. The click meant "publish as the account I can
+see".
 
 ## What Archon does not do here
 
@@ -72,6 +74,7 @@ as the account I can see".
 | **No pending publication** | This browser is not holding a request — the link was already answered, it expired, or it was opened in a different browser. Open the link your agent printed again, on this device. |
 | **This link cannot be used** | The token in the link does not match any waiting publication. Ask your agent for a new one. |
 | **Archon is not reachable** | A temporary fault. Nothing was decided; select **Try again**. |
+| **You are now signed in as @someone-else** | Your account changed while this page was open. Nothing was published. Check the document again before approving it as that account. |
 
 Denial, cancellation and expiry are all normal answers. Your agent is told which
 one happened, and none of them is a failure you need to retry.

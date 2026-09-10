@@ -478,6 +478,89 @@ test("a storage outage is a retryable 503, never a signed-out visitor", async ()
   assert.equal(body.error.retryable, true);
 });
 
+test("review does not demand an Origin, because a same-origin GET carries none", async () => {
+  /* The one entry rule this route is defined by, and the only test that pins
+     it: a browser sends no `Origin` on a same-origin `GET`, so a route that
+     called `requireExactOrigin` here would refuse every legitimate request while
+     refusing nothing else. Without this case, adding that call leaves the whole
+     suite green and only the Chromium matrix notices. */
+  const context = harness();
+  const response = await context.review(
+    request(REVIEW_PATH, {
+      origin: null,
+      cookies: {
+        [BINDING_COOKIE]: await context.publishBinding(),
+        [SESSION_COOKIE]: await context.session(),
+      },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).state, "pending");
+});
+
+test("a binding-store outage is a 503, not an invitation to re-open the link", async () => {
+  /* The sibling of the session-store case below. If the binding read ever
+     swallowed a storage error and answered null, every visitor during an outage
+     would be told this browser is holding nothing and sent to re-open a link
+     that cannot help - one key prefix away from the failure the session test
+     exists to prevent. */
+  const context = harness();
+  const cookies = {
+    [BINDING_COOKIE]: await context.publishBinding(),
+    [SESSION_COOKIE]: await context.session(),
+  };
+  context.blobs.fail("auth/binding", "read");
+  const body = await refusal(await context.review(request(REVIEW_PATH, { cookies })), 503, "unavailable");
+  assert.equal(body.error.retryable, true);
+});
+
+test("a path that is not a publication route is a 404, and a malformed one a 400", async () => {
+  const context = harness();
+  const cookies = {
+    [BINDING_COOKIE]: await context.publishBinding(),
+    [SESSION_COOKIE]: await context.session(),
+  };
+
+  for (const path of [
+    "/api/hosted/publications/review",
+    `/api/hosted/publications/${FIXTURE_PUBLICATION_ID}/extra/review`,
+    `/api/hosted/publications/${FIXTURE_PUBLICATION_ID}/reviews`,
+  ]) {
+    await refusal(await context.review(request(path, { cookies })), 404, "not_found");
+  }
+
+  /* `%ZZ` throws `URIError`, which is not a `HostedContractError`. Untyped, it
+     would be flattened into a *retryable* 503 and a conforming poller would loop
+     on a request that can never succeed. It is the caller's mistake, and a 400. */
+  const malformed = await context.review(
+    request("/api/hosted/publications/%ZZ/review", { cookies }),
+  );
+  const body = await refusal(malformed, 400, "invalid_request");
+  assert.equal(body.error.retryable, false);
+});
+
+test("a deploy missing its configuration answers 503, and a wrong method still wins", async () => {
+  /* The dependency set is resolved inside each route's `try` precisely so a
+     missing C6 key becomes a bounded 503 rather than a throw out of the function
+     runtime - and so a wrong method on a broken deploy is still reported as a
+     wrong method. */
+  const broken = () => {
+    throw new Error("HOSTED_APP_ORIGIN is not set");
+  };
+  for (const [route, path, method] of [
+    [createBindRoute(broken), BIND_PATH, "POST"],
+    [createReviewRoute(broken), REVIEW_PATH, "GET"],
+    [createDecisionRoute(broken), DECISION_PATH, "POST"],
+  ]) {
+    const body = await refusal(await route(request(path, { method })), 503, "unavailable");
+    /* The fault names an environment variable; an anonymous caller never sees it. */
+    assert.ok(!body.error.message.includes("HOSTED_APP_ORIGIN"));
+
+    const wrongMethod = await route(request(path, { method: method === "GET" ? "POST" : "GET" }));
+    await refusal(wrongMethod, 405, "invalid_request");
+  }
+});
+
 test("review accepts only GET", async () => {
   const context = harness();
   for (const method of ["POST", "PUT", "DELETE"]) {

@@ -58,6 +58,7 @@ import { withErrorBoundary } from "../lib/http.mjs";
 import { createPublicationStore, PUBLICATION_KEY_PREFIX } from "../lib/publication-store.mjs";
 import { createStartRoute } from "../functions/auth-github-start.mjs";
 import { createCallbackRoute } from "../functions/auth-github-callback.mjs";
+import { SESSION_COOKIE_MAX_AGE, serializeCookie } from "../lib/identity.mjs";
 import { createSessionRoute } from "../functions/session.mjs";
 import { createBindRoute } from "../functions/publications-bind.mjs";
 import { createReviewRoute } from "../functions/publications-review.mjs";
@@ -69,10 +70,15 @@ import { createClock, createProviderDouble, sequentialRandomBytes } from "./help
 const SELF = fileURLToPath(import.meta.url);
 const HOSTED = resolve(dirname(SELF), "..");
 const PLAYWRIGHT = "playwright@1.55.0";
-const INSTALL_DEADLINE_MS = 900_000;
-/* The install is minutes of network on a cold runner and the matrix itself is
-   seconds; one budget covers both, and it overrides the runner default. */
-const TEST_TIMEOUT_MS = 1_200_000;
+/* Per `spawnSync` call, and there are two of them - the package and the browser.
+   Both have to fit inside `TEST_TIMEOUT_MS` with the matrix, or a genuinely cold
+   runner reports "test timed out" when what actually happened is a slow
+   download. */
+const INSTALL_DEADLINE_MS = 600_000;
+/* Two installs plus the matrix, with room. A per-test timeout overrides the
+   runner's `--test-timeout` in both directions, so this number is the real
+   budget whatever CI passes. */
+const TEST_TIMEOUT_MS = 1_500_000;
 
 /**
  * The exact policy `netlify.toml` serves the static tree under.
@@ -91,8 +97,43 @@ const ACCOUNT = { id: 1010, login: "alpha-example", accountId: "gh_1010" };
 /** A second account, for the switch. A different numeric id is a different owner. */
 const OTHER_ACCOUNT = { id: 2020, login: "beta-example", accountId: "gh_2020" };
 
+/**
+ * The deploy configuration this matrix serves the page under.
+ *
+ * The policy above is a hand copy on purpose - a matrix that read the header out
+ * of the file it is meant to hold would pass whatever the file said. But nothing
+ * else in the repository asserts that block exists: the workflow's deploy-config
+ * step checks only absences, so deleting `[[headers]]`, dropping
+ * `connect-src 'self'` or adding `'unsafe-inline'` to `script-src` would leave
+ * every gate green while this matrix kept enforcing the old, stricter policy.
+ * Reading the file *once*, to check it still declares the same string, closes
+ * that loop without making the enforcement circular.
+ */
+async function assertDeployedPolicyMatches(failures) {
+  const toml = await readFile(join(HOSTED, "netlify.toml"), "utf8");
+  if (!toml.includes(`Content-Security-Policy = "${CSP}"`)) {
+    failures.push("netlify.toml no longer declares the policy this matrix enforces");
+  }
+  /* And the rewrite that puts the page on the path C3 freezes. Netlify's
+     extensionless serving is post-processing, which this deployment disables. */
+  if (!/from = "\/publish\/authorize"/.test(toml) || !/to = "\/publish\/authorize\.html"/.test(toml)) {
+    failures.push("netlify.toml no longer rewrites /publish/authorize to the committed page");
+  }
+}
+
 /** Where the provider stand-in listens, on this deployment's own loopback origin. */
 const PROVIDER_PATH = "/fixture-provider/authorize";
+
+/**
+ * A harness-only endpoint that signs the browser in as somebody else *without*
+ * the page finding out.
+ *
+ * Chromium refuses a `__Host-` cookie set through CDP over `http://`, so the
+ * only way to reach the tab-left-open case from a browser is to have the server
+ * issue the cookie the way every real route does. The page fetches this without
+ * navigating, so it keeps rendering the account it rendered before.
+ */
+const BECOME_PATH = "/fixture-provider/become";
 
 /** The real endpoint the start route redirects to, and this matrix intercepts. */
 const GITHUB_AUTHORIZE_PREFIX = "https://github.com/login/oauth/authorize";
@@ -208,6 +249,23 @@ async function startDeployment(record) {
       const state = url.searchParams.get("state") ?? "";
       outgoing.writeHead(302, {
         location: `${dependencies.origin}/api/hosted/auth/github/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
+        "cache-control": "private, no-store",
+      });
+      outgoing.end();
+      return;
+    }
+
+    if (url.pathname === BECOME_PATH) {
+      const { token } = await store.createSession({
+        accountId: OTHER_ACCOUNT.accountId,
+        provider: "github.com",
+        providerUserId: String(OTHER_ACCOUNT.id),
+        login: OTHER_ACCOUNT.login,
+      });
+      outgoing.writeHead(204, {
+        "set-cookie": serializeCookie("__Host-archon_session", token, {
+          maxAgeSeconds: SESSION_COOKIE_MAX_AGE,
+        }),
         "cache-control": "private, no-store",
       });
       outgoing.end();
@@ -364,13 +422,15 @@ async function runMatrix(chromium) {
   const eq = (actual, expected, message) =>
     check(actual === expected, `${message} (saw ${JSON.stringify(actual)}, wanted ${JSON.stringify(expected)})`);
 
+  await assertDeployedPolicyMatches(failures);
+
   const browser = await chromium.launch();
   try {
 
   /** One case: a fresh deployment, a fresh isolated browser context. */
-  async function withCase(record, run) {
+  async function withCase(record, run, { contextOptions = {} } = {}) {
     const app = await startDeployment(record);
-    const context = await browser.newContext();
+    const context = await browser.newContext(contextOptions);
     await refuseTheInternet(context, app.origin);
     const page = await context.newPage();
     try {
@@ -429,7 +489,7 @@ async function runMatrix(chromium) {
   }
 
   /* -------- 1. the fragment is gone, and gone from history too -------- */
-  await withCase(seedRecord(), async ({ app, page }) => {
+  await withCase(seedRecord(), async ({ app, page, context }) => {
     /* From a real previous page, so "did the token become a history entry" is a
        question with an answer rather than a comparison against whatever a fresh
        context happens to start with. */
@@ -437,6 +497,17 @@ async function runMatrix(chromium) {
     const entriesBefore = await page.evaluate(() => window.history.length);
 
     await open(page, link(app));
+
+    /* And the exchange must have *worked*. Without this, every other assertion
+       in this case holds when bind is refused for every input - the fragment is
+       stripped before any request either way - so the cheapest possible
+       regression is the one it would not detect. */
+    eq(await statusOf(page), "Sign in with GitHub to see what is being published.",
+      "a bound, signed-out visitor must be asked to sign in");
+    check(
+      (await context.cookies()).some((cookie) => cookie.name === "__Host-archon_publish"),
+      "the bind must leave the browser holding a pending binding",
+    );
 
     eq(new URL(page.url()).hash, "", "the fragment must be removed from the address bar");
     eq(page.url(), `${app.origin}/publish/authorize`, "the URL must be the bare authorize path");
@@ -475,6 +546,14 @@ async function runMatrix(chromium) {
     await signIn(page);
 
     await page.waitForSelector("#review:not([hidden])");
+    /* The rewrite in the harness is what keeps the sign-in on loopback. If it
+       ever stops matching, the browser goes to the real github.com and the
+       failure surfaces as a twenty-second timeout rather than as "the provider
+       stand-in was bypassed". */
+    check(
+      app.seen.some((entry) => entry.path === PROVIDER_PATH),
+      "the sign-in must have gone through the loopback provider stand-in",
+    );
     eq(await page.textContent("#account"), `@${ACCOUNT.login} (${ACCOUNT.accountId})`,
       "the page must name the account that would become owner");
     eq(await page.textContent("#user-code"), RECORDS.pending.userCode, "the pairing code must be shown");
@@ -592,6 +671,130 @@ async function runMatrix(chromium) {
     );
     eq(await page.isVisible("#review"), false, "a bare visit must reveal no document");
   });
+
+  /* -------- 6. a signed-in visitor whose browser refuses site data -------- */
+  await withCase(seedRecord(), async ({ app, page, context }) => {
+    await open(page, link(app));
+    await signIn(page);
+    await page.waitForSelector("#review:not([hidden])");
+
+    /* Safari's cross-site modes, storage-partitioned embeds, private modes and
+       an exhausted quota all make this throw. Reading the id back out of storage
+       as its *only* source turned that into a permanent dead end: the bind had
+       succeeded and the server was holding a real binding, but the page said
+       "no pending publication" and every re-open of the link repeated it. */
+    await context.addInitScript(() => {
+      const refuse = () => {
+        throw new Error("site data is blocked");
+      };
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        get: () => ({ getItem: refuse, setItem: refuse, removeItem: refuse }),
+      });
+    });
+
+    /* The same link again, on a load that can persist nothing. The fragment is
+       the id's source here, which is the whole point. */
+    await open(page, link(app));
+    await page.waitForSelector("#review:not([hidden])");
+    await page.click("#approve");
+    await page.waitForSelector("#review", { state: "hidden" });
+    await settled(page, "the decision");
+    eq(app.stored().state, "approved",
+      "a signed-in visitor whose browser blocks site data must still be able to approve");
+  });
+
+  /* -------- 6b. the account changed under an open tab -------- */
+  await withCase(seedRecord(), async ({ app, page, context }) => {
+    await open(page, link(app));
+    await signIn(page);
+    await page.waitForSelector("#review:not([hidden])");
+    eq(await page.textContent("#account"), `@${ACCOUNT.login} (${ACCOUNT.accountId})`,
+      "the tab must be showing the first account");
+
+    /* Another tab signed in as somebody else. A same-origin `fetch` rather than
+       a navigation, so this tab keeps rendering the account it already rendered
+       - which is the whole shape of the case. The click then means "publish as
+       the account I can see", and that account is gone. */
+    await page.evaluate(
+      (path) => fetch(path, { credentials: "same-origin" }),
+      "/fixture-provider/become",
+    );
+
+    await page.click("#approve");
+    await settled(page, "the stale decision");
+
+    eq(app.stored().state, "pending", "a decision against a stale account must publish nothing");
+    eq(app.stored().ownerAccountId, null, "and must fix no owner");
+    /* The adapter signals this with `csrf_failed`, the same code a wrong token
+       gets. Reporting it as "Archon could not verify this page. Select Try
+       again." would be the opposite advice for the one case this confirmation
+       exists for. */
+    check(
+      (await statusOf(page)).includes(`now signed in as @${OTHER_ACCOUNT.login}`),
+      "the page must say which account it is now, not that a retry might help",
+    );
+    await page.waitForSelector("#review:not([hidden])");
+    eq(await page.textContent("#account"), `@${OTHER_ACCOUNT.login} (${OTHER_ACCOUNT.accountId})`,
+      "and must re-render against the account that is actually signed in",
+    );
+  });
+
+  /* -------- 7. the retry affordance, on a failure retrying can fix -------- */
+  await withCase(seedRecord(), async ({ app, page, context }) => {
+    await open(page, link(app));
+    await signIn(page);
+    await page.waitForSelector("#review:not([hidden])");
+
+    /* Every request fails at transport from here, which is what an offline
+       visitor sees. The page must offer a retry rather than nothing. */
+    await context.route(/.*/, (route) => route.abort());
+    await page.click("#approve");
+    await settled(page, "the failed decision");
+    check((await statusOf(page)).includes("not reachable"), "an offline decision must say so");
+    check(await page.isVisible("#retry"), "a retryable failure must offer a retry");
+
+    await context.unroute(/.*/);
+    await refuseTheInternet(context, app.origin);
+    await page.click("#retry");
+    await settled(page, "the retry");
+    await page.waitForSelector("#review:not([hidden])");
+    eq(app.stored().state, "pending", "a retry must not decide anything by itself");
+  });
+
+  /* -------- 8. a completed operation reads as published, not as an error ---- */
+  await withCase(seedRecord({
+    state: "complete",
+    ownerAccountId: `gh_${ACCOUNT.id}`,
+    uploadExpiresAt: RECORDS.complete.uploadExpiresAt,
+    completedAt: RECORDS.complete.completedAt,
+    receiptExpiresAt: RECORDS.complete.receiptExpiresAt,
+    html: RECORDS.complete.html,
+  }), async ({ app, page }) => {
+    await open(page, link(app));
+    await signIn(page);
+    check((await statusOf(page)).includes("already published"),
+      "a completed operation must read as published");
+    eq(await page.isVisible("#approve"), false, "a completed operation offers no decision");
+    check(!(await page.content()).includes("<!doctype html>".slice(1)),
+      "the approval page must never render the document");
+  });
+
+  /* -------- 9. with no JavaScript, the page says so -------- */
+  await withCase(
+    seedRecord(),
+    async ({ app, page }) => {
+      await page.goto(link(app));
+      const noscript = await page.textContent("noscript");
+      check(noscript !== null && noscript.includes("JavaScript is required"),
+        "a no-JS visitor must be told why the page is empty");
+      check(
+        !app.seen.some((entry) => entry.path.startsWith("/api/hosted/")),
+        "a no-JS visit must not reach any API route",
+      );
+    },
+    { contextOptions: { javaScriptEnabled: false } },
+  );
 
   await withCase(seedRecord(), async ({ app, page }) => {
     await open(page, link(app, null, "not-the-browser-secret-but-long-enough-to-be-well-formed"));

@@ -123,12 +123,12 @@ jobs:
       # approximation of one, so this drives a real Chromium against the real
       # handlers and the real `public/publish/authorize.html`.
       #
-      # It gets its own step and its own timeout because it installs a pinned
-      # Playwright and one Chromium into a temporary root first -- minutes of
-      # network on a cold runner, which has nothing to do with any individual
-      # assertion. The per-test timeout inside the file overrides the runner
-      # default; the value here has to be at least as large or the runner kills
-      # the process before the case's own budget is reached.
+      # It gets its own step because it installs a pinned Playwright and one
+      # Chromium into a temporary root first -- minutes of network on a cold
+      # runner, which has nothing to do with any individual assertion. The
+      # per-test timeout inside the file is the real budget: a test's own
+      # `timeout` overrides `--test-timeout` in both directions. The value here
+      # matches it so a reader of this step is not told a different number.
       #
       # This step is not decoration. It is what caught the sign-in flow being
       # dead in every browser: `Referrer-Policy: no-referrer` makes a same-origin
@@ -137,7 +137,7 @@ jobs:
       # true, because they all build their requests by hand.
       - name: hosted approval page browser matrix
         run: >-
-          node --test --test-timeout=1200000
+          node --test --test-timeout=1500000
           hosted/test/approval-browser.test.mjs
 
       # AHU-011's operational half: the publish-disable policy, the two per-IP

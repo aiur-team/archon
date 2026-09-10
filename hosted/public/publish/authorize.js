@@ -24,9 +24,12 @@
  * `__Host-archon_publish` cookie the bind route set, which JavaScript cannot
  * read.
  *
- * The publication *id* is kept in `sessionStorage`, because the round trip to
- * GitHub and back is a real navigation and this page comes back with no
- * fragment. The id is not a secret - it is in the review URL and in the
+ * The publication *id* is held in memory for this load and mirrored into
+ * `sessionStorage`, because the round trip to GitHub and back is a real
+ * navigation and this page comes back with no fragment. Memory is the primary
+ * copy: storage is allowed to refuse, and a visitor who is already signed in
+ * must not be told there is nothing to approve merely because their browser
+ * blocks site data. The id is not a secret - it is in the review URL and in the
  * document URL - and presenting the wrong one simply fails against the server's
  * binding, so the worst a tampered value can do is produce a refusal.
  *
@@ -53,9 +56,14 @@
   try {
     window.history.replaceState(null, "", window.location.pathname);
   } catch {
-    /* A browser that refuses `replaceState` still must not keep the token on
-       screen, and `location.hash = ""` leaves a bare "#". Overwriting the local
-       copy is all that is left; the visit is refused below either way. */
+    /* Nothing else to try, and the flow continues anyway.
+       `location.hash = ""` leaves a bare "#", and `location.replace` would
+       reload the page without the fragment - discarding the one value this load
+       needs before it has been exchanged. So on a browser that refuses
+       `replaceState` the token stays in the address bar for this visit. That is
+       worse than the normal path and it is still better than refusing: the
+       fragment is already on screen either way, and refusing would only add a
+       broken approval to it. */
   }
 
   /* `<32 hex>.<32-256 base64url>` and nothing else. The server checks the same
@@ -166,17 +174,32 @@
     return answer.ok && answer.body !== null ? answer.body : null;
   }
 
+  /**
+   * The operation this load is working on.
+   *
+   * The fragment wins whenever there was one. `sessionStorage` exists only to
+   * carry the id across the navigation out to GitHub and back, and it is allowed
+   * to fail: private modes, storage-partitioned embeds and exhausted quota all
+   * refuse it. Reading it back as the *only* source made a refused write a dead
+   * end - the bind had already succeeded and the server was holding a real
+   * binding, but the page said "no pending publication" and every re-open of the
+   * link repeated it until the operation expired.
+   */
+  let pending = null;
+
   function remember(publicationId) {
+    pending = publicationId;
     try {
       window.sessionStorage.setItem(STORAGE_KEY, publicationId);
     } catch {
-      /* Private modes and storage-partitioned embeds can refuse. The page still
-         works for the visitor who does not need to sign in; one who does will be
-         told the link has to be opened again, which is true and actionable. */
+      /* The visitor who is already signed in is unaffected: `pending` carries
+         the id for this load. One who has to sign in loses it at the navigation
+         and is told to open the link again, which is true and actionable. */
     }
   }
 
   function remembered() {
+    if (pending !== null) return pending;
     try {
       const value = window.sessionStorage.getItem(STORAGE_KEY);
       return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) ? value : null;
@@ -186,6 +209,7 @@
   }
 
   function forget() {
+    pending = null;
     try {
       window.sessionStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -230,11 +254,13 @@
    * Exchange the link's secret for a server-side binding.
    *
    * Runs at most once per page load, and only when a fragment was actually
-   * present. A previous pending id is dropped first, so a second link never
-   * falls back to the operation the first one bound.
+   * present. The previous pending id is dropped only once this bind has
+   * *succeeded*: the server releases the old binding after it verifies the new
+   * secret, so a refused bind leaves the browser still legitimately holding the
+   * earlier operation, and forgetting the id up front stranded a live pending
+   * approval behind a "no pending publication" that a reload could not clear.
    */
   async function bind(link) {
-    forget();
     const answer = await call("/api/hosted/publications/bind", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -249,7 +275,7 @@
   }
 
   /** Render one review projection, in whatever state it is in. */
-  function renderReview(projection, session) {
+  function renderReview(projection, session, notice = null) {
     if (projection.state !== "pending") {
       say(TERMINAL[projection.state] ?? "This publication already has an answer.", "ok");
       show({});
@@ -264,19 +290,23 @@
     csrfField.value = session.csrfToken;
     approve.disabled = false;
     deny.disabled = false;
-    say("Approve only if you recognise this document and this pairing code.", "ok");
+    /* A caller with something more urgent to say keeps the floor. The account
+       having changed under an open tab is exactly that: the default invitation
+       to approve would paper straight over it. */
+    if (notice === null) say("Approve only if you recognise this document and this pairing code.", "ok");
+    else say(notice, "error");
     show({ card: true, switchAccount: true });
   }
 
   /** Ask for the review body and render whatever it says. */
-  async function loadReview(publicationId, session) {
+  async function loadReview(publicationId, session, notice = null) {
     const answer = await call(`/api/hosted/publications/${publicationId}/review`);
     if (!answer.ok) {
       const code = codeOf(answer);
       if (code === "session_required") return askToSignIn();
       return reportRefusal(code);
     }
-    renderReview(answer.body, session);
+    renderReview(answer.body, session, notice);
   }
 
   function askToSignIn() {
@@ -352,6 +382,7 @@
          that expired mid-decision is recoverable by signing in and coming back
          to this same operation. */
       if (code === "session_required") return askToSignIn();
+      if (code === "csrf_failed") return reportUnverified(publicationId);
       return reportRefusal(code);
     }
 
@@ -360,6 +391,35 @@
     forget();
     displayed = null;
     say(TERMINAL[answer.body?.state] ?? "This publication has an answer.", "ok");
+    show({});
+  }
+
+  /**
+   * Tell a `csrf_failed` decision apart, because two different events share it.
+   *
+   * The adapter refuses a decision whose `displayedAccountId` is not the
+   * session's account with `csrf_failed` - the same code `requireBrowserMutation`
+   * uses for a missing or wrong token. They need opposite advice. "Archon could
+   * not verify this page. Select Try again." is right for a token problem and
+   * actively misleading for the case this whole confirmation exists for: the
+   * account changed under an open tab, and the visitor needs to know that the
+   * page they were reading is out of date, not that a retry might help.
+   *
+   * Asking the session route which account is signed in *now* is what separates
+   * them, and it re-renders from the answer so the visitor can decide again
+   * against what is actually true.
+   */
+  async function reportUnverified(publicationId) {
+    const session = await readSession();
+    if (session === null || session.authenticated !== true) return askToSignIn();
+    if (displayed !== null && session.accountId !== displayed.accountId) {
+      return loadReview(
+        publicationId,
+        session,
+        `You are now signed in as @${session.login}. Nothing was published. Check this document again before approving it as that account.`,
+      );
+    }
+    say("Archon could not verify this page. Select Try again.", "error", { retryable: true });
     show({});
   }
 
