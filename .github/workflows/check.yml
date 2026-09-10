@@ -350,6 +350,36 @@ jobs:
           # renderer origin gets nothing, and sign-out revokes server-side.
           node scripts/test-hosted-owner-viewer.mjs
 
+      # AHU-012's integrated gate. Every other step above proves one producer
+      # against a seam that producer's own ticket controls: a client against a
+      # protocol fixture, a handler against a store double, a package against a
+      # fixture service. Each is true and none of them says that the approval a
+      # person clicked, the upload an agent sent and the document that person
+      # reads afterwards refer to the same record and the same account. This one
+      # does, by assembling the merged producers and controlling exactly one
+      # thing -- the identity provider upstream.
+      #
+      # It is a standalone runner rather than a `node --test` file for the same
+      # reason the other supervisors are: it installs a pinned Playwright and
+      # Chromium into a temporary root, packs and installs the real client
+      # package outside the checkout, and starts five servers. It prints one
+      # PASS line naming the engine and the number of cases that completed, and
+      # its supervisor checks that count -- a worker that returned early cannot
+      # print a line that reads like a full run.
+      #
+      # It needs no credential and contacts no provider: `github.com` is
+      # resolved, for its browser only, to a loopback fixture that validates the
+      # client id, the redirect URI, the PKCE challenge and the client secret.
+      # Three earlier steps are prerequisites and are invisible from here: the
+      # hosted install (the handlers resolve `@netlify/blobs` and `tldts` out of
+      # `hosted/node_modules`, and the local blob server comes from the same
+      # package), the typecheck install (`npm pack` runs prepack then prepare,
+      # and prepare is `tsc`), and `openssl`, which the runner uses to mint the
+      # one-name certificate its provider fixture needs to complete a TLS
+      # handshake.
+      - name: hosted publishing integration gate
+        run: node scripts/test-hosted-integration.mjs
+
       # AHU-010's clean-consumer proof. Every other gate above runs inside this
       # checkout, where `templates/base/`, `templates/skeleton/` and
       # `skills/archon-doc/` are all on disk and the builder's own `repoRoot()`

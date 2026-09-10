@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  A benign artifact: the shape of an ordinary published document.
+
+  It is deliberately NOT a copy of what `docbuild` emits. The packaged
+  document is exercised separately and in full by the runner, against the
+  real builder's own output; this fixture is the small, readable control
+  beside it, so that a rendering failure can be localised to "the renderer
+  cannot run an ordinary document" rather than to some property of a
+  60 KB generated page.
+
+  Everything here is something a real authored document does and the
+  artifact policy in `renderer/public/renderer.js` allows: inline style,
+  inline script, a `data:` image, fragment-only links into sections, and a
+  click listener the author registered on those links. Nothing here is an
+  attack; `hostile.html` owns that half.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Benign artifact</title>
+    <style>
+      :root { --ink: #202020; --paper: #fdfdfd; }
+      body { background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; margin: 0 auto; max-width: 40rem; padding: 2rem 1rem; }
+      body[data-theme="dark"] { --ink: #f0f0f0; --paper: #121212; }
+      nav.jump a { display: inline-block; margin-right: 1rem; }
+      section { min-height: 60vh; }
+    </style>
+  </head>
+  <body>
+    <h1 id="top">Benign artifact</h1>
+
+    <p><img id="inline-image" alt="a single pixel" width="8" height="8"
+      src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" /></p>
+
+    <button type="button" id="theme">Toggle theme</button>
+
+    <nav class="jump" aria-label="Section navigation">
+      <a href="#alpha">Alpha</a>
+      <a href="#beta">Beta</a>
+      <a href="#percent%20sign">Percent</a>
+      <a href="#nowhere">Missing</a>
+      <a href="#">Top</a>
+    </nav>
+
+    <section id="alpha"><h2>Alpha</h2><p>First section.</p></section>
+    <section id="beta"><h2>Beta</h2><p>Second section.</p></section>
+    <section id="percent sign"><h2>Percent</h2><p>An id that only matches once the fragment is percent-decoded.</p></section>
+
+    <p id="clicks" data-clicks="0" data-last="">no link has been clicked</p>
+    <p id="hrefs"></p>
+
+    <script>
+      /* An authored click listener on the links themselves. The renderer's
+         trusted prelude listens on `window` in the bubble phase, so this one
+         has already run by the time the prelude sees the event -- which is
+         the property the runner asserts, in both directions: this listener
+         observes every click, and the prelude still performs the scroll. */
+      var clicks = 0;
+      document.querySelectorAll("nav.jump a").forEach(function (anchor) {
+        anchor.addEventListener("click", function () {
+          clicks += 1;
+          var row = document.getElementById("clicks");
+          row.setAttribute("data-clicks", String(clicks));
+          row.setAttribute("data-last", anchor.getAttribute("href"));
+          row.textContent = "clicked " + anchor.getAttribute("href");
+        });
+      });
+
+      /* The original `href` attributes, read back out of the DOM. The
+         renderer promises never to rewrite them, and a document that can
+         see its own links is how that promise is checked from inside. */
+      document.getElementById("hrefs").textContent = Array.prototype.map
+        .call(document.querySelectorAll("nav.jump a"), function (anchor) {
+          return anchor.getAttribute("href");
+        })
+        .join(" ");
+
+      document.getElementById("theme").addEventListener("click", function () {
+        document.body.setAttribute(
+          "data-theme",
+          document.body.getAttribute("data-theme") === "dark" ? "light" : "dark",
+        );
+      });
+    </script>
+  </body>
+</html>

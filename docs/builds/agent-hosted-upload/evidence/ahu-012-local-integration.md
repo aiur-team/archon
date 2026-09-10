@@ -1,0 +1,348 @@
+# AHU-012 — local integration evidence
+
+What `node scripts/test-hosted-integration.mjs` establishes, what it does not,
+and the exact shape of the environment it establishes it in.
+
+**This is not a deployed acceptance result.** Nothing here may be reported as
+"the hosted publishing feature is live" or as closing AHU-013. The live capstone
+owns real GitHub, two real registrable sites, the provider's production
+conditional-write behaviour, deployed headers and rate configuration, and
+external package availability.
+
+## Topology
+
+Five servers on loopback, plus a browser, plus two child-process clients.
+
+| Piece | What it is | How it is reached |
+| --- | --- | --- |
+| Application | Every merged handler in `hosted/functions/`, dispatched by the `config.path` each module exports, plus the committed `hosted/public/` tree served with the `[[headers]]` block and the one rewrite read out of `hosted/netlify.toml` | `http://127.0.0.1:<port>` |
+| Renderer | Exactly what `renderer/scripts/build.mjs` emitted, served with its own generated `_headers` | `http://localhost:<port>` |
+| Storage | `BlobsServer` from `@netlify/blobs` 11.0.2 — the provider's own local server — over a private `0700` temporary directory | an HTTP edge URL the real `getStore` client is pointed at |
+| Identity provider | A loopback fixture standing in for GitHub. Validates the client id, the redirect URI, the response type, the PKCE method, the client secret and the verifier→challenge hash; issues single-use codes bound to the chosen account | `https://github.com`, resolved to the fixture by a Chromium `--host-resolver-rules` mapping; the server-side token and user calls go to its plain loopback origin through the `fetchImpl` seam of `createCallbackRoute` |
+| Adversary | A third origin that records every request that reaches it | `http://127.0.0.1:<port>` |
+| Client | `templates/docbuild` packed with `npm pack` and installed into a directory **outside** this checkout; the document is built and published by the installed `docbuild` and `archon-publish` binaries in separate processes | — |
+
+Browser: Chromium, pinned via `playwright@1.55.0`. The exact build is printed in
+the runner's own PASS line, e.g.
+`PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)`.
+
+Once the servers are up, nothing in the matrix contacts a network host.
+`github.com` is the only external name the browser may resolve and it resolves
+to the loopback fixture; every other origin is aborted by an explicit rule, so a
+regression that reached the internet fails as a blocked request rather than
+passing on a machine that has one. The *setup* is not network-free and does not
+claim to be: the supervisor installs a pinned Playwright and downloads a
+Chromium, and the client half runs `npm pack` and `npm install`. Those are
+registry and CDN fetches, not provider contact.
+
+## What is real, and what is substituted
+
+Real: every route, the publication state machine, the publication and auth
+stores, the browser approval page and its bootstrap, the trusted viewer, the
+renderer build and its policies, the packaged client, the descriptor grammar,
+every origin, cookie and CSRF check, and the durable records.
+
+Substituted, and only these four:
+
+1. **The identity provider upstream.** No GitHub account exists. The state
+   cookie, the PKCE verifier, the callback handler, the session and the account
+   binding are production code; only the party at the other end is a fixture.
+2. **The seam that points the callback at that fixture.** The browser reaches
+   `https://github.com` through a Chromium `--host-resolver-rules` mapping, but
+   the callback handler's own token and user calls are server-side, so the
+   runner constructs `createCallbackRoute` with a `fetchImpl`. That wrapper maps
+   exactly the two URLs `hosted/lib/github-oauth.mjs` names to the fixture and
+   throws on anything else, so a handler that acquired a third upstream call
+   fails the run. It is a real injection point in the producer's own signature
+   and it is the only argument any route is constructed with that production
+   would not pass; it does not alter what the handler does with an answer.
+3. **The clock, for two deadline cases.** `publicationDependencies` is the
+   producer's own dependency builder and the state machine reads its clock out
+   of it, so the upload-deadline and receipt-window cases move that clock rather
+   than waiting ten minutes and twenty-four hours. The handler, the store and
+   the record are unchanged.
+4. **Three provider outcomes, one call wide.** A wrapper around the `Store`
+   object — the boundary between the real store producer and the real provider
+   client — can make one write not reach the provider, make one write *commit
+   and lose its answer*, or make one read fail. It cannot answer a read from
+   memory, cannot decide whether a conditional write wins, and never replaces a
+   handler or a store.
+
+### How the agent half is driven
+
+The packaged client is exercised end to end by matrix 1 and by the packaged
+document's navigation in matrix 7: `npm pack`, an install outside this checkout,
+and the installed `docbuild` and `archon-publish` binaries in separate
+processes. Matrices 2-9 speak the wire protocol directly instead, through the
+runner's own `agentFetch` — the same routes, the same bearer, the same bodies,
+but the runner rather than the CLI composing the request.
+
+That is deliberate: a refusal matrix needs to send requests the client will not
+send (a client-supplied owner, altered bytes, a wrong media type, a mismatched
+digest) and to send them at moments the client's own retry loop would pace. It
+does mean those cases prove the *server's* contract and not the client's use of
+it. Anything the client alone could get wrong is owned by matrix 1, by AHU-006's
+protocol tests, and by AHU-010's packaging proof.
+
+## Limits of this evidence
+
+These are structural. They are the reason AHU-013 exists, and none of them is a
+gap that more local cases would close.
+
+- **Two loopback ports are two origins and one site.** `http://127.0.0.1:a` and
+  `http://localhost:b` are different origins, which is what every exact-origin
+  comparison in the design is about, and they are *not* different registrable
+  sites. So the SameSite consequences of the two-site split — the property that
+  makes the renderer cookie-free in a real browser against a real cookie jar —
+  are not exercised here. `hosted/lib/config.mjs` enforces the registrable-site
+  rule in production and skips it in `local-test` mode precisely because a
+  loopback host has no registrable site to compare. AHU-013 owns it.
+- **`BlobsServer` is the provider's local server, not the provider.** In
+  particular it derives an entry's ETag from that file's modification time at
+  millisecond resolution, so two writes landing inside the same millisecond
+  present the same `If-Match` value and both are taken. "Exactly one caller
+  created the document" is therefore a claim about Netlify's production
+  conditional writes and is AHU-013's to prove. What is proved locally is that
+  simultaneous completions are answered successfully, are answered with the
+  *same* document, leave one durable record carrying the approved owner, digest
+  and bytes, and that a completion presented against an ETag the provider has
+  already moved past resolves to the stored document rather than to a failure or
+  a second one.
+- **`BlobsServer` omits the `etag` header on `GET`.** It emits one on `PUT` and
+  on `LIST` and not on the read the publication store's compare-and-set depends
+  on, so against the local server as shipped the real store producer cannot run
+  at all. The runner closes that gap by asking the same server for the same
+  key's ETag through `list` — the provider's value, computed by the provider's
+  own function, used in the provider's own comparison. Nothing local decides
+  whether a write wins. This is a limitation of the local runtime rather than of
+  the code under test, and it is named here because a reader is entitled to know
+  that one read in the loop takes a second call it would not take in
+  production.
+- **The pilot rate rules are declared, not demonstrated.** The runner asserts
+  the `rateLimit` objects the start and status route modules export — the
+  objects Netlify packages — and then makes twelve status calls in a row and
+  requires all twelve to succeed, because nothing local implements the
+  platform's edge counters. Configured is not enforced; live efficacy is
+  AHU-013's.
+- **No real GitHub scope, callback registration, deployed header or CDN
+  behaviour is observed.** A fixture provider cannot establish any of them.
+- **Isolation is not an absolute.** C4 says the sandbox removes the artifact's
+  authority over the account origin; it does not claim to be network-proof or
+  end-to-end encrypted, and the hostile fixture is written to test the former
+  rather than to assert the latter.
+
+## What the run covers
+
+One hundred and two cases across ten matrices, each named in the runner and counted by
+its supervisor:
+
+1. The whole happy path — clean-installed client, browser approval, a *second*
+   client process resuming and uploading, the durable record, the owner's
+   receipt URL rendering the real artifact, and the local source unchanged.
+2. Account binding — switching accounts mid-review, a stale displayed identity,
+   an absent and a wrong CSRF token, a foreign `Origin`, `GET`, a link whose
+   browser secret was altered by one character, a signed-in browser that never
+   opened the link trying to decide the publication anyway, a browser bound to
+   one publication trying to decide another, and the adapter's own binding check
+   presented with a digest no browser could construct.
+3. Provider faults — a replayed callback in the same browser and in another, a
+   replay carrying the transaction's own binding cookie captured mid-flight, an
+   outage, and a grant carrying an unexpected scope.
+4. Upload and receipt — a client-supplied owner, an unapproved upload, altered
+   bytes, a wrong media type, the identical retry, a retry carrying *other*
+   bytes after completion, and recovery inside and outside the receipt window.
+5. Owner read and enumeration — the owner's metadata and content, a signed-out
+   reader, a second account holding the owner's URL, a missing id, a malformed
+   id, `HEAD`, the byte-identical refusal shell, and the rule that legacy
+   `DOC_OWNERS`, organisation defaults and `PUBLIC_DEFAULT_ROLE` cannot widen a
+   hosted read.
+6. Storage faults and races — a create the provider never took, an unanswerable
+   read, a committed write whose answer was lost on a completion *and* on an
+   approval, a completion whose claimed digest and length disagree with the
+   approval, the store's demand for strongly consistent reads, simultaneous
+   completions, a cancel racing an upload, and the rule that nothing partial
+   becomes readable.
+7. Rendered isolation — a positive control proving the adversary recorder can
+   see a request that does reach it, an ordinary artifact operated through its own theme
+   toggle and fragment navigation, the *packaged* document's real section
+   navigation inside the sandbox, and a hostile artifact's attempts on the
+   parent window, the account origin, the renderer's message channel, the tab
+   and the network.
+8. Deployment connection — the header block on the static surfaces, the viewer's
+   policy naming the configured renderer, the renderer's generated
+   `frame-ancestors`, an adversary that cannot frame the renderer into talking
+   to it, a readiness message from the right origin and the wrong window, and an
+   unreachable renderer producing a readable failure with no bytes sent.
+9. Operations — publishing disabled refusing new work while existing reads and
+   completed recovery keep working, the payload bound at both ends, the private
+   header set on every refusal, the declared rate rules, and a check that no
+   operation secret or private content reached any client transcript.
+10. Accessibility — live regions on the approval page and the viewer, a
+    publication approved entirely from the keyboard, accessible names on both
+    frames, the title and account outside the untrusted frame, and a keyboard
+    sign-out that revokes server-side.
+
+## Mutation proof
+
+A gate that cannot fail is worse than no gate, so each guard the ticket names
+was removed one at a time, the runner was run against the mutated tree, the file
+was restored from the pristine checkout, and the restored tree was run again.
+
+The worktree is isolated and never the live checkout:
+
+```sh
+sha=$(git rev-parse HEAD)
+git worktree add --detach "$scratch/pr-190-$unique" "$sha"
+# hosted/, root and templates/docbuild node_modules copied in; nothing installed
+```
+
+Restoring is a **copy from the pristine checkout**, not `git checkout --`: the
+Aiur command wrapper refuses a destructive git command whose target is outside
+the agent workspace, and an earlier run that used `git checkout --` silently
+left the first mutation in place, so the three that followed all failed on it
+and reported a false result. Each case now asserts a clean tree before mutating
+and a clean tree after restoring.
+
+Each case ran:
+
+```sh
+node scripts/test-hosted-integration.mjs   # from the worktree root
+```
+
+| Guard removed | Where | Result |
+| --- | --- | --- |
+| owner equality | `readOwnedPublication` (`hosted/lib/publications.mjs`) | **fails** — `stranger metadata was answered 200` |
+| renderer exact source | the message listener's `event.source !== parentWindow` (`renderer/public/renderer.js`) | **fails** — `the renderer did not record refusing the artifact's forged messages: wrong-origin` |
+| descriptor recheck, approved | `completePublication`'s approved branch (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
+| descriptor recheck, already complete | `completePublication`'s already-complete branch (`hosted/lib/publications.mjs`) | **fails** — `a completed publication accepted other bytes with status 200` |
+| ambiguous-write readback | `createPublicationStore.update` (`hosted/lib/publication-store.mjs`), `return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}` | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
+| bind browser-secret check | `bindPublication` (`hosted/lib/publications.mjs`) | **fails** — `timed out waiting for the approval page to refuse a mutated link` |
+| binding bound-id check | `requireBrowserBinding` (`hosted/lib/publication-browser-binding.mjs`) | **fails** — `a decision for a publication this browser never bound was answered 401` |
+| OAuth single-use guards | both `consumedAt` checks in `AuthStore` (`readTransient` and `consumeTransient`) | **fails** — `a replay carrying the captured binding cookie was exchanged with the provider a second time` |
+| binding digest check | `requireBinding` (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a decision carrying a binding for another secret was accepted`, in five runs of five |
+| nothing — the restored tree | control | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)` |
+
+The first five rows were measured in the first round, against `848edd9` and its
+97 cases; the four binding, OAuth and control rows were measured against the
+current head and its 102. Every row ran in a detached worktree that was clean
+before the mutation and clean again after the restore. Rows are named by the
+guard they remove rather than numbered, because the numbering drifted between
+rounds and a row that cannot be matched to a guard by reading it is not
+evidence.
+
+### What the first run caught, and what it cost
+
+The first mutation run found a real hole rather than confirming the gate: owner
+equality and renderer exact source failed, and **the approved-branch descriptor
+recheck and the ambiguous-write readback both left the gate green at 90/90**.
+Two cases exist because of that, and they are the two most interesting in the
+file.
+
+- **The descriptor recheck was unreachable over HTTP.** `handleArtifact` derives
+  the digest and the length from the bytes it read, so a client cannot present the state machine
+  with facts that disagree with its own body — the guard inside
+  `completePublication` had no wire-level input that could trip it. The case now
+  calls the real producer with the real dependencies and the real record and
+  presents exactly that combination, and asserts no write reached storage.
+  A sibling case covers the same guard on the already-complete branch, which
+  *is* reachable over HTTP: a retry carrying other bytes must be refused rather than handed the
+  receipt the first upload earned.
+- **The ambiguous-write readback needed a non-idempotent transition.** A
+  completion is idempotent, so a lost write answer resolves to the same document whether the state machine
+  reads back or retries — which is why the completion case could not see the
+  difference. An approval is not idempotent: a state machine that reads a lost
+  answer as a refusal re-reads an already-approved record and reports
+  `state_conflict`, telling a person their successful approval failed on a
+  publication that is in fact theirs. The case drives the real browser approval
+  with the write's answer thrown away and asserts the status code the decision
+  route actually returned — not the page's copy, because every terminal answer
+  leaves the same shape on screen with a different sentence.
+
+A third correction came out of the same work: the ambiguous-approval case
+originally asserted the absence of failure words in the status line, and the
+blind-refusal mutation survived it because "This publication already has an
+answer." contains none of them. Asserting the response rather than the prose is what made it a proof.
+
+### What the second round caught
+
+The four binding and OAuth rows were added after review found that the browser
+half of the capability chain was not owned: the gate stayed green at 97/97 with
+`bindPublication`'s browser-secret check gone, and again with `requireBinding`'s digest check gone.
+Both are now killed, and the shape of the fix repeats the first round's lesson.
+
+- **The bind secret check and the bound-id check are ordinary wire cases.** A
+  link whose fragment secret is altered by one character never reaches the review card, and a browser holding a
+  binding for one publication is refused a decision on another. Neither existed
+  before: every prior binding case started from a legitimately bound session.
+- **The binding digest check is unreachable over HTTP, for the same structural
+  reason the descriptor recheck was.** The browser's proof is an opaque `__Host-` cookie whose operation string lives
+  server-side, so no client can present the adapter with a binding that names
+  this publication under another secret's digest — the route refuses the id
+  mismatch first. The case calls the real producer with the real dependencies
+  and the real record, and asserts no owner was fixed.
+- **The OAuth single-use guards took two attempts, and the first one was the
+  interesting failure.** The OAuth-replay case had been passing for the *fixture's* reason: its codes are
+  single use, so the replay was refused whether or not the application still
+  held its own guard. The obvious fix — assert the provider's `tokenCalls` did
+  not move — did not close it either, and the mutation run said so: a completed
+  sign-in clears the transaction's binding cookie, so the replay is refused at
+  the first line of the handler and never reaches the store under either tree.
+  What owns `consumedAt` is a replay that still *has* that cookie. The cookie is
+  now read out of the jar while the visitor is on the provider's chooser, the
+  one moment it legitimately exists, and the callback is replayed with it from
+  outside the browser. Under the mutated tree the state is redeemed a second
+  time and the provider is called again; under the restored tree the handler
+  refuses before the exchange.
+
+### What the third round caught
+
+Review reported that the binding-digest row was not a reliable kill: with
+`requireBinding`'s digest check removed the gate failed in three runs of four
+and passed once. Four runs of the reviewed head here all killed it, so the
+mechanism was never observed directly and no explanation is claimed. What was
+true either way is that the case leaned on state it did not create — it decided
+on the publication case 2.8 had started and bound — and a proof whose kill can
+depend on what an earlier case left behind is not a proof.
+
+The case now creates everything it is judged against: its own publication, its
+own browser context bound to that publication through the real page bootstrap,
+and the record's real digest read back from the real `bindPublication`. Each way
+the call could be refused for a reason other than the guard is closed before it
+runs — the record is asserted pending, the presented binding is asserted well
+formed in every other respect, and the wrong digest is asserted to differ from
+the record's real one — and the rejection is matched on the guard's own message
+rather than on a code four other checks in the module also raise. So a pass
+under the mutated tree can no longer come from somewhere else, and a refusal
+from somewhere else fails loudly instead of reading like a kill.
+
+Measured five consecutive times with the digest check removed, in a detached
+worktree clean before the mutation and clean again after the restore:
+
+```sh
+node scripts/test-hosted-integration.mjs   # from the worktree root, five times
+```
+
+All five failed on `Missing expected rejection: a decision carrying a binding
+for another secret was accepted`; the restored tree passes at 102 cases.
+
+## Reproducing it
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
+npm --prefix templates/docbuild ci --no-audit --no-fund
+node scripts/test-hosted-integration.mjs
+```
+
+`openssl` must be on `PATH`: the provider fixture mints a one-name certificate
+so it can complete a TLS handshake for `github.com`. The key never leaves the
+run's temporary root and the browser is the only thing that ever trusts it.
+
+`TMPDIR` must not have a checkout of this repository above it — the runner
+refuses to install the client package anywhere the builder's own repository walk
+could find `templates/base/`, because every packaging assertion would otherwise
+pass for the wrong reason.
+
+No credential and no provider account is required, which is why this runs on an
+untrusted pull request. The only network the run needs is the npm registry and
+the Chromium download.
