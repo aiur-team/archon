@@ -311,8 +311,8 @@ jobs:
           node --experimental-vm-modules scripts/test-p4-k.mjs contract
           node scripts/test-p4-k-browser.mjs
           # AHU-005's renderer oracle. It builds `renderer/` into a temporary
-          # root, serves that output on its own loopback origin with the
-          # generated `_headers` applied to every response, and drives the
+          # root, serves that output on its own loopback origin under the
+          # header set the build spells out as `headersFile`, and drives the
           # isolation matrix against a separate account origin and a third
           # adversary origin. Two engines rather than one: the design rests on a
           # content-security policy being inherited into a sandboxed `srcdoc`
