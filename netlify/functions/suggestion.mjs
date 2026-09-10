@@ -52,7 +52,7 @@ const DEPENDENCY_KEYS = Object.freeze([
   "toHtmlFn",
 ]);
 const BODY_KEYS = Object.freeze(["docId", "aid", "sugId", "action", "reason"]);
-const IDENTITY_KEYS = Object.freeze(["sub", "email", "name", "isOrg"]);
+const IDENTITY_KEYS = Object.freeze(["sub", "email", "emailVerified", "name"]);
 const RESULT_KEYS = Object.freeze(["receipt", "pr"]);
 const ACTOR_KEYS = Object.freeze(["sub", "name", "email"]);
 const SUGGESTION_RECEIPT_KEYS = Object.freeze([
@@ -188,7 +188,7 @@ function isActor(actor) {
 }
 
 function requireIdentity(value) {
-  if (!sameKeys(value, IDENTITY_KEYS) || typeof value.isOrg !== "boolean") {
+  if (!sameKeys(value, IDENTITY_KEYS) || typeof value.emailVerified !== "boolean") {
     throw fail("invalid-state");
   }
   const actor = { sub: value.sub, name: value.name, email: value.email };

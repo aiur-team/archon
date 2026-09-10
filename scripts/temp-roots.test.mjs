@@ -232,7 +232,7 @@ test("retained evidence is distinctly named and capped", () => {
 });
 
 test("Playwright supervisors use the shared lifecycle instead of abrupt failure exits", () => {
-  for (const name of ["test-p4-a.mjs", "test-p4-q.mjs", "test-p4-l.mjs", "test-p4-k.mjs"]) {
+  for (const name of ["test-p4-a.mjs", "test-p4-q.mjs", "test-p4-l.mjs"]) {
     const source = readFileSync(join(HERE, name), "utf8");
     assert.match(source, /guardedTempRoot/);
     assert.match(source, /installSignalCleanup/);

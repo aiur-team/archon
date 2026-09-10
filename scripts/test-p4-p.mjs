@@ -315,7 +315,6 @@ function session(overrides = {}) {
     sub: SUB,
     email: actor.email,
     name: actor.name,
-    roles: ["member"],
     canComment: true,
     canEdit: true,
     doc: DOC_ID,
@@ -568,7 +567,7 @@ async function openFixture(browser, host, currentSession, model, configure = nul
 
 async function revealSession(page, detail) {
   await page.evaluate((value) => {
-    const frozen = Object.freeze({ ...value, roles: Object.freeze([...value.roles]) });
+    const frozen = Object.freeze({ ...value });
     document.dispatchEvent(new CustomEvent("session", { detail: frozen }));
   }, detail);
 }
@@ -749,13 +748,13 @@ async function runtimeMatrix() {
       await invalidSessionContext.addInitScript({ content: initScript() });
       const invalidSessionPage = await invalidSessionContext.newPage();
       await invalidSessionPage.goto(host.base, { waitUntil: "load" });
+      /* A session body carrying one field beyond the frozen shape. This used to
+         forge a non-enumerable property onto the `roles` array; ACN-006 removed
+         that field, and the same property -- the validator accepts the exact key
+         set and nothing adjacent to it -- is now asserted against the body
+         itself. */
       await invalidSessionPage.evaluate((value) => {
-        const roles = ["member"];
-        Object.defineProperty(roles, "hidden", {
-          value: "forged", enumerable: false, writable: false, configurable: false,
-        });
-        Object.freeze(roles);
-        const detail = Object.freeze({ ...value, roles });
+        const detail = Object.freeze({ ...value, forged: "member" });
         document.dispatchEvent(new CustomEvent("session", { detail }));
       }, session());
       await invalidSessionPage.evaluate(() => window.doc.edit.overlaysReady);

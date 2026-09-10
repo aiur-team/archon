@@ -171,13 +171,45 @@ test("notFoundRenderer is a bodyless 404 with no Set-Cookie", async () => {
 /* the real gate.ts, transpiled and driven through the whole matrix           */
 /* -------------------------------------------------------------------------- */
 
+/** The account id the signed-in fixture presents: C1 v2's `a0_` + 32 hex. */
+const READER_ACCOUNT = `a0_${"9f2c1b7d4e5a6083c1d2e3f4a5b6c7d8"}`;
+
+/** A `GET /api/hosted/session` answer, as the real route serializes one. */
+function sessionResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      /* The real route issues a fresh pre-login CSRF binding on every call. It
+         is here so the matrix can assert the gate drops it rather than passing
+         another browser's cookie to this one. */
+      "set-cookie": "__Host-archon_login=binding; Max-Age=900; Secure; HttpOnly; SameSite=Lax; Path=/",
+    },
+  });
+}
+
+/** The signed-in body the frozen C1 contract allows, and nothing else. */
+function signedIn(overrides = {}) {
+  return sessionResponse({
+    v: 1,
+    authenticated: true,
+    accountId: READER_ACCOUNT,
+    login: "Reader",
+    email: "reader@app.example.test",
+    emailVerified: true,
+    csrfToken: "Y3NyZi10b2tlbi1mb3ItdGhlLXJlYWRlci1maXh0dXJl",
+    ...overrides,
+  });
+}
+
 /** The one control surface every stub reads. */
 const control = {
   identifyCalls: 0,
   resolveCalls: 0,
-  identify() {
-    this.identifyCalls += 1;
-    return { sub: "u_reader", email: "reader@app.example.test", name: "Reader", isOrg: false };
+  /** What `GET /api/hosted/session` answers the gate's internal request. The
+   *  counter is kept by the `fetch` seam, which is the thing being counted. */
+  session() {
+    return signedIn();
   },
   resolveRole() {
     this.resolveCalls += 1;
@@ -207,9 +239,13 @@ function transpileGate(ts, gateRoot) {
     `export * from ${JSON.stringify(real("netlify/lib/edge-host.mjs"))};\n`,
     "utf8",
   );
+  /* The address grammar is the real one, not a stub. The gate's projection has
+     to agree with `netlify/lib/identity.mjs`'s field for field, and a permissive
+     stub here would let the two drift without the matrix noticing. */
+  mkdirSync(join(gateRoot, "lib/hosted"), { recursive: true });
   writeFileSync(
-    join(gateRoot, "lib/identity.mjs"),
-    `export function identify(req) { return globalThis.__HOSTGATE__.identify(req); }\n`,
+    join(gateRoot, "lib/hosted/email.mjs"),
+    `export * from ${JSON.stringify(real("netlify/lib/hosted/email.mjs"))};\n`,
     "utf8",
   );
   writeFileSync(
@@ -278,11 +314,11 @@ async function loadGate() {
  * how the context seams were used. `next` and `rewrite` each default to a
  * throwing seam so a branch that should not touch downstream is caught.
  */
-async function runGate(host, path, { next, rewrite, env } = {}) {
+async function runGate(host, path, { next, rewrite, env, session } = {}) {
   const { gate } = await loadGate();
   control.identifyCalls = 0;
   control.resolveCalls = 0;
-  const calls = { next: 0, rewrite: null };
+  const calls = { next: 0, rewrite: null, session: [] };
   const context = {
     async next(request) {
       calls.next += 1;
@@ -303,10 +339,26 @@ async function runGate(host, path, { next, rewrite, env } = {}) {
     if (configured[key] === undefined) delete process.env[key];
     else process.env[key] = configured[key];
   }
+  /* The gate resolves identity by an internal request rather than a module
+     call, so the seam the matrix drives is `fetch`. It is installed for exactly
+     the session route and throws for anything else, which is what proves the
+     gate reaches nothing else from the edge. */
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requested = new URL(typeof input === "string" ? input : input.url);
+    calls.session.push({ url: requested, headers: new Headers(init?.headers) });
+    if (requested.pathname !== "/api/hosted/session") {
+      throw new Error(`the gate fetched ${requested.pathname}, which it must not`);
+    }
+    control.identifyCalls += 1;
+    return typeof session === "function" ? session(requested, init) : control.session();
+  };
+
   try {
     const response = await gate(new Request(`https://${host}${path}`, { method: "GET" }), context);
     return { response, calls };
   } finally {
+    globalThis.fetch = realFetch;
     for (const key of ["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN"]) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
@@ -436,5 +488,143 @@ test("with neither origin configured every host reaches the application branch",
     const slug = await runGate(host, "/a-slug/", { env: {}, next: () => docPage() });
     assert.equal(slug.response.status, 200, `${host} /a-slug/ reaches the application branch`);
     assert.equal(control.identifyCalls, 1, `${host} /a-slug/ is session-checked`);
+  }
+});
+
+/* --- the identity step (ACN-006) ------------------------------------------ */
+
+test("the gate resolves identity by an internal request to the hosted session route", async () => {
+  const { response, calls } = await runGate(APP_HOST, "/some-slug/", { next: () => docPage() });
+  assert.equal(response.status, 200);
+  assert.equal(calls.session.length, 1, "exactly one identity request");
+  assert.equal(
+    calls.session[0].url.toString(),
+    `https://${APP_HOST}/api/hosted/session`,
+    "addressed to the session route on this origin",
+  );
+});
+
+test("the session subrequest forwards the browser's Cookie header and nothing else", async () => {
+  const { gate } = await loadGate();
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    seen.push(new Headers(init?.headers));
+    return signedIn();
+  };
+  const saved = { ...process.env };
+  process.env.HOSTED_APP_ORIGIN = APP_ORIGIN;
+  process.env.HOSTED_RENDER_ORIGIN = RENDER_ORIGIN;
+  try {
+    await gate(
+      new Request(`https://${APP_HOST}/some-slug/`, {
+        headers: {
+          cookie: "__Host-archon_session=opaque-token",
+          authorization: "Bearer must-not-travel",
+          "x-forwarded-for": "203.0.113.9",
+        },
+      }),
+      { next: async () => docPage(), rewrite: async () => docPage() },
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+    process.env.HOSTED_APP_ORIGIN = saved.HOSTED_APP_ORIGIN;
+    process.env.HOSTED_RENDER_ORIGIN = saved.HOSTED_RENDER_ORIGIN;
+  }
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].get("cookie"), "__Host-archon_session=opaque-token");
+  assert.equal(seen[0].get("accept"), "application/json");
+  assert.equal(seen[0].get("authorization"), null, "no credential beyond the cookie travels");
+  assert.equal(seen[0].get("x-forwarded-for"), null, "and no client metadata either");
+});
+
+test("a visitor with no session is redirected to the one sign-in page with a destination", async () => {
+  const { response, calls } = await runGate(APP_HOST, "/some-slug/", {
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+  });
+  assert.equal(response.status, 303, "a 303 so the browser re-fetches with GET");
+  assert.equal(response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+  assert.equal(calls.next, 0, "the document is never fetched for an anonymous visitor");
+  assert.equal(control.resolveCalls, 0, "and no role is resolved");
+  assert.equal(response.headers.get("Set-Cookie"), null, "the subrequest's binding is not relayed");
+});
+
+test("the redirect destination is only ever one ACN-005's grammar accepts", async () => {
+  // Every path here is gated -- none is a pass-through -- and none is a bare
+  // collaboration slug, so none may be offered back as a destination.
+  for (const path of ["/some-slug/deeper/", "/some-slug", "/Some-Slug/", "/", "/a_b/"]) {
+    const { response } = await runGate(APP_HOST, path, {
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${path} is refused with a redirect`);
+    assert.equal(
+      response.headers.get("Location"),
+      "/login/",
+      `${path} is not expressible as a destination and none is offered`,
+    );
+  }
+});
+
+test("a session-store outage is a 503 and never a sign-in redirect", async () => {
+  const outages = [
+    ["the route answers 503", () => sessionResponse({ v: 1, error: { code: "unavailable" } }, 503)],
+    ["the transport fails", () => { throw new TypeError("network error"); }],
+    ["the body is not JSON", () => new Response("<html>gateway</html>", {
+      status: 200, headers: { "content-type": "text/html" },
+    })],
+    ["the body is not the frozen shape", () => sessionResponse({ v: 1 })],
+    ["a signed-in body is missing its account id", () => signedIn({ accountId: undefined })],
+  ];
+  for (const [label, session] of outages) {
+    const { response, calls } = await runGate(APP_HOST, "/some-slug/", { session });
+    assert.equal(response.status, 503, `${label}: 503`);
+    assert.equal(await response.text(), "Authentication is temporarily unavailable.", label);
+    assert.equal(response.headers.get("Location"), null, `${label}: no redirect`);
+    assert.equal(calls.next, 0, `${label}: the document is never read`);
+    assert.equal(control.resolveCalls, 0, `${label}: no role is resolved`);
+  }
+});
+
+test("an identity with no address is a signed-in visitor, not an outage", async () => {
+  const { response } = await runGate(APP_HOST, "/some-slug/", {
+    next: () => docPage(),
+    session: () => signedIn({ email: null, emailVerified: false }),
+  });
+  assert.equal(response.status, 200, "a GitHub identity with no email still reaches the document");
+  assert.equal(control.resolveCalls, 1, "and its role is resolved like anybody else's");
+});
+
+test("the gate projects the session onto the identity resolveRole is given", async () => {
+  let seen = null;
+  const recording = function resolveRole(docId, user) {
+    this.resolveCalls += 1;
+    seen = user;
+    return { role: "viewer", canRead: true };
+  };
+  const original = control.resolveRole;
+  control.resolveRole = recording;
+  try {
+    await runGate(APP_HOST, "/some-slug/", {
+      next: () => docPage(),
+      session: () => signedIn({ email: "Ann@Example.COM " }),
+    });
+    assert.deepEqual(Object.keys(seen), ["sub", "email", "emailVerified", "name"]);
+    assert.equal(seen.sub, READER_ACCOUNT, "the v2 accountId is the only grant key");
+    assert.equal(seen.email, "ann@example.com", "the address is normalized exactly once");
+    assert.equal(seen.emailVerified, true);
+    assert.equal(seen.name, "Reader", "the display login is the name");
+
+    /* An address the one grammar refuses is "no usable address", not a refusal
+       to serve: this visitor may still own the document by subject. `emailVerified`
+       goes with it, because a verified claim about an address this deployment
+       cannot represent is a claim about nothing. */
+    await runGate(APP_HOST, "/some-slug/", {
+      next: () => docPage(),
+      session: () => signedIn({ email: "ann@exam ple.com" }),
+    });
+    assert.equal(seen.email, "");
+    assert.equal(seen.emailVerified, false);
+  } finally {
+    control.resolveRole = original;
   }
 });

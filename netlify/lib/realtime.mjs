@@ -163,7 +163,7 @@ function providerHeaders(key) {
 }
 
 /**
- * @param {{sub: string, isOrg: boolean}} session
+ * @param {{sub: string, emailVerified: boolean}} session
  * @param {string} docId
  * @returns {Promise<null | {
  *   token: string,
@@ -184,7 +184,7 @@ export async function mintToken(session, docId) {
     typeof session !== "object" ||
     typeof session.sub !== "string" ||
     !IDENTITY_SUB_RE.test(session.sub) ||
-    typeof session.isOrg !== "boolean"
+    typeof session.emailVerified !== "boolean"
   ) {
     throw new TypeError("Invalid realtime session");
   }
@@ -197,7 +197,16 @@ export async function mintToken(session, docId) {
       [serverChannel]: ["subscribe"],
       [clientChannel]: ["publish", "subscribe"],
     });
-    const clientId = session.isOrg
+    /* Presence identity, and the privacy default behind it. The rule used to
+       read `isOrg`: a member of the configured organisation appeared under their
+       stable subject and everybody else got a fresh random id per connection, so
+       a guest's presence could not be correlated across documents or sessions.
+       ACN-006 removed the site-wide organisation rule, and `emailVerified` is
+       the successor field this path reads — an identity whose address the
+       provider has actually proved is presented under its stable subject, and
+       every other session stays anonymous. The anonymous side is the default in
+       both spellings, which is the property worth preserving. */
+    const clientId = session.emailVerified
       ? session.sub
       : `g_${randomBytes(6).toString("hex")}`;
     const requestTimestamp = Date.now();

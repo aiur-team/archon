@@ -173,7 +173,7 @@ function installEdit() {
   const ENTRY_KEYS = ["text", "by", "at", "pr"];
   const ACTOR_KEYS = ["sub", "name", "email"];
   const SESSION_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+    "sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SUGGESTION_KEYS = [
@@ -413,20 +413,11 @@ function installEdit() {
     if (typeof body.sub !== "string") return null;
     if (typeof body.email !== "string") return null;
     if (typeof body.name !== "string") return null;
-    const roleNames = Array.isArray(body.roles) ? Object.getOwnPropertyNames(body.roles) : [];
-    if (!Array.isArray(body.roles) || !Object.isFrozen(body.roles) ||
-        Object.getPrototypeOf(body.roles) !== Array.prototype ||
-        Object.getOwnPropertySymbols(body.roles).length !== 0 || body.roles.length !== 1 ||
-        roleNames.length !== 2 || roleNames[0] !== "0" || roleNames[1] !== "length") return null;
-    const roleDescriptor = Object.getOwnPropertyDescriptor(body.roles, "0");
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(body.roles, "length");
-    if (roleDescriptor === undefined || !hasOwn(roleDescriptor, "value") ||
-        roleDescriptor.enumerable !== true || roleDescriptor.writable !== false ||
-        roleDescriptor.configurable !== false ||
-        (roleDescriptor.value !== "member" && roleDescriptor.value !== "guest")) return null;
-    if (lengthDescriptor === undefined || !hasOwn(lengthDescriptor, "value") ||
-        lengthDescriptor.value !== 1 || lengthDescriptor.enumerable !== false ||
-        lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return null;
+    /* The frozen one-element `roles` array was validated here descriptor by
+       descriptor. It reported `member` or `guest` from a site-wide organisation
+       email suffix, which ACN-006 removed, so the field is gone from the body
+       and `body.role` -- the document role, which was always the authority --
+       is the only role this page reads. */
     if (typeof body.canComment !== "boolean") return null;
     if (typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;

@@ -919,8 +919,6 @@ function mountSharePanel(event) {
     }
     if (typeof body.sub !== "string" || typeof body.email !== "string"
       || typeof body.name !== "string") return null;
-    if (!Array.isArray(body.roles) || body.roles.length !== 1) return null;
-    if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
     if (typeof body.canComment !== "boolean" || typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;
     if (!SESSION_ROLES.includes(body.role)) return null;
@@ -1000,7 +998,7 @@ function mountSharePanel(event) {
     + " If setup stops during transfer, the new owner may need to invite you again.";
   const DEFAULT_LABELS = { commenter: "Commenter", viewer: "Viewer", none: "No access" };
   const FINAL_SESSION_FIELDS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SESSION_ROLES = ["owner", "editor", "commenter", "viewer", "none"];

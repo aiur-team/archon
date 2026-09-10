@@ -1209,7 +1209,9 @@ async function runtimeMatrix() {
       const seen = [];
       const deps = {
         requireOrigin: () => {},
-        identify: async () => (options.identity === undefined ? { ...WRITER, isOrg: false } : options.identity),
+        identify: async () => (options.identity === undefined
+          ? { ...WRITER, emailVerified: true }
+          : options.identity),
         resolveRole: async (docId, user, opts) => {
           counters.resolveRole += 1;
           seen.push({ docId, user, options: opts });
@@ -1273,13 +1275,16 @@ async function runtimeMatrix() {
         "a commenter is refused a direct edit");
     }
     {
-      // `isOrg` no longer decides anything: the document role does.
-      const built = buildEdit({ identity: { ...WRITER, isOrg: false }, role: "editor" });
+      // No identity field decides anything: the document role does. `isOrg` used
+      // to be the field this case varied; ACN-006 removed it, and `emailVerified`
+      // -- the field that replaced it in the shape -- is deliberately not a
+      // second write gate either.
+      const built = buildEdit({ identity: { ...WRITER, emailVerified: false }, role: "editor" });
       eq((await built.handle(editRequest(), editContext())).status, 404,
-        "isOrg false no longer refuses an editor");
-      const denied = buildEdit({ identity: { ...WRITER, isOrg: true }, role: "viewer" });
+        "an unverified address does not refuse an editor");
+      const denied = buildEdit({ identity: { ...WRITER, emailVerified: true }, role: "viewer" });
       eq((await denied.handle(editRequest(), editContext())).status, 403,
-        "isOrg true no longer admits a viewer");
+        "and a verified one does not admit a viewer");
     }
     {
       const built = buildEdit({ role: "none" });
@@ -1351,8 +1356,8 @@ async function runtimeMatrix() {
     const edit = readFileSync(join(ROOT, "netlify/functions/edit.mjs"), "utf8");
     ok(/canSuggest/.test(edit) && /canEdit/.test(edit),
       "edit.mjs carries both editing-family checks");
-    ok(!/identity\.isOrg\s*!==\s*true/.test(edit),
-      "the temporary isOrg write gate is gone");
+    ok(!/\bisOrg\b/.test(edit),
+      "the temporary organisation write gate is gone, field and all");
     ok(/gitedit\.mjs`? is not an authorization oracle/.test(edit),
       "edit.mjs records that P4-N must leave the gate here");
     for (const file of ["threads.mjs", "thread.mjs", "edit.mjs"]) {

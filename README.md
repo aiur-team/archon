@@ -31,9 +31,13 @@ exhaustive component reference, built by this template so it cannot drift from t
 
 | Variable | Purpose |
 |---|---|
-| `ORG_EMAIL_DOMAIN` | Organisation email suffix, including the leading `@` (for example, `@example.com`). Matching is case-insensitive. If it is unset, empty, or malformed, nobody receives organisation membership. |
+| `HOSTED_APP_ORIGIN` | The origin this site is served on, exactly — scheme, host and any port, with no path or trailing slash. Sign-in and every write depend on it: it is the origin a request's `Origin` header is compared against, and an unset or mismatched value refuses writes rather than admitting them. |
+| `HOSTED_RENDER_ORIGIN` | The separate origin artifact HTML is rendered on. It must be a different registrable site from `HOSTED_APP_ORIGIN`, not a sibling subdomain, because siblings share cookies. |
+| `AUTH0_DOMAIN` | The Auth0 tenant host, bare: no scheme, port, path or trailing slash. |
+| `AUTH0_CLIENT_ID` | The Auth0 application's client ID. |
+| `AUTH0_CLIENT_SECRET` | The Auth0 application's client secret. Never logged and never sent to a caller. |
 | `DOC_OWNERS` | Comma-separated document-owner seeds in `<document>:<email>` form. |
-| `PUBLIC_DEFAULT_ROLE` | Off unless set. The role any signed-in visitor receives when no owner, grant, invitation, or organisation rule applies to them. Only `viewer` and `commenter` are valid; anything else — unset, empty, `editor`, `owner`, a typo — grants nothing. Set it only on a deliberately public instance. |
+| `PUBLIC_DEFAULT_ROLE` | Off unless set. The role any signed-in visitor receives when no owner, grant or invitation applies to them. Only `viewer` and `commenter` are valid; anything else — unset, empty, `editor`, `owner`, a typo — grants nothing. Sign-in is open to anyone with a Google or GitHub account, so "any signed-in visitor" means the whole internet: set it only on a deliberately public instance. |
 | `ABLY_API_KEY` | Optional Ably API key for realtime presence and events. |
 | `SLACK_WEBHOOK_URL` | Optional Slack webhook for notifications. |
 | `DOCS_REPO` | Source repository in `<owner>/<repository>` form for repository-backed edits. |
@@ -41,15 +45,36 @@ exhaustive component reference, built by this template so it cannot drift from t
 | `DOCS_GITHUB_TOKEN` | Fine-grained GitHub token used for repository-backed edits. |
 | `DOCS_BOT_EMAIL` | Committer email used for repository-backed edits. |
 
-`ORG_EMAIL_DOMAIN` failing closed is deliberate: a missing or malformed value grants nobody membership
-rather than granting everybody. The implementation never sends configuration values to callers or writes
-them to logs.
+### Signing in
 
-`PUBLIC_DEFAULT_ROLE` is the one setting that widens access to people nobody has named, so it fails closed
-the same way: an unset, empty, whitespace-only or unrecognised value resolves to no access at all, and a
-writing role is rejected outright rather than quietly reduced to a safe one. It never lowers a role somebody
-already holds, never applies to a signed-out visitor, and never overrides a document whose organisation
-default is the explicit `none`. On any instance that is not meant to be world-readable, leave it unset.
+There is one sign-in page and one session. A visitor signs in at `/login/`, which hands them to Auth0 to
+continue with Google or GitHub, and the session that comes back is the same one the hosted document viewer
+uses. Archon never sees a password, and there is no email-and-password form to configure.
+
+The five variables above are what sign-in needs. Without them the sign-in route answers `503` and gated
+documents stay unreachable, which is the intended behaviour for a site vendored by `scripts/connect.mjs`
+that has no Auth0 tenant of its own — not a failure to repair. A site that does want sign-in configures its
+own Auth0 application against these same names.
+
+An organisation email suffix used to be a sixth variable, `ORG_EMAIL_DOMAIN`, and it is gone. It decided
+membership for every document on a deployment from one setting, and it matched by address suffix — which
+calls `member@example.com.evil.com` a member of `example.com`. Per-document domain lists replace it,
+evaluated label by label.
+
+### Sharing a document
+
+An owner shares a document by inviting an email address at a role. That writes an invitation and sends
+nothing: there is no account to provision and no password to set. The invited person signs in with that
+address and the invitation is matched and consumed at that moment — so tell them the document URL. The
+match requires an address the identity provider has **verified**; an unverified one matches nothing, and an
+identity carrying no address at all (a GitHub account with no public email) can sign in but can never
+satisfy an invitation.
+
+`PUBLIC_DEFAULT_ROLE` is the one setting that widens access to people nobody has named, so it fails closed:
+an unset, empty, whitespace-only or unrecognised value resolves to no access at all, and a writing role is
+rejected outright rather than quietly reduced to a safe one. It never lowers a role somebody already holds,
+never applies to a signed-out visitor, and never overrides a document whose default is the explicit `none`.
+On any instance that is not meant to be world-readable, leave it unset.
 
 ## The two modes
 

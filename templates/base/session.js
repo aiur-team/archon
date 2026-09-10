@@ -84,10 +84,12 @@ function validSession(body, docId) {
   if (typeof body.sub !== "string") return null;
   if (typeof body.email !== "string") return null;
   if (typeof body.name !== "string") return null;
-  if (!Array.isArray(body.roles)) return null;
-  for (const entry of body.roles) {
-    if (typeof entry !== "string") return null;
-  }
+  /* `roles` used to be checked here. It carried one of `member` or `guest`,
+     derived from a site-wide organisation email suffix, and it was never
+     authorization -- the document role below is. ACN-006 removed the suffix
+     rule, which left the field with nothing to report, so it is gone from the
+     body rather than always saying `guest`. A field that is always the same
+     value is one a client eventually believes. */
   if (typeof body.canComment !== "boolean") return null;
   if (typeof body.canEdit !== "boolean") return null;
   if (reservedPresent === 0) return body;
@@ -100,8 +102,6 @@ function validSession(body, docId) {
   if (typeof body.canAccept !== "boolean") return null;
   if (typeof body.canShare !== "boolean") return null;
   if (typeof body.canSeeMembers !== "boolean") return null;
-  if (body.roles.length !== 1) return null;
-  if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
   return body;
 }
 

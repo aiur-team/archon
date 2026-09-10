@@ -107,7 +107,7 @@ function installComments() {
   const ANCHOR_KEYS = ["block", "exact", "prefix", "suffix", "start"];
   const PAGE_KEYS = ["threads", "nextCursor"];
   const ENVELOPE_KEYS = ["thread"];
-  const SESSION_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+  const SESSION_KEYS = ["sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
   const SESSION_FLAGS = ["canComment", "canEdit", "shared", "canSuggest", "canAccept",
     "canShare", "canSeeMembers"];
@@ -1629,7 +1629,6 @@ function installComments() {
     if (typeof detail.sub !== "string" || !SUB.test(detail.sub)) return null;
     if (typeof detail.name !== "string" || typeof detail.email !== "string") return null;
     if (!ROLES.includes(detail.role)) return null;
-    if (!Array.isArray(detail.roles) || !Object.isFrozen(detail.roles)) return null;
     for (const flag of SESSION_FLAGS) if (typeof detail[flag] !== "boolean") return null;
     return { sub: detail.sub, role: detail.role, canComment: detail.canComment };
   }

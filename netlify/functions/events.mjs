@@ -116,7 +116,7 @@ const DEPENDENCY_FIELDS = Object.freeze([
   "nowFn",
   "randomBytesFn",
 ]);
-const IDENTITY_FIELDS = Object.freeze(["sub", "email", "name", "isOrg"]);
+const IDENTITY_FIELDS = Object.freeze(["sub", "email", "emailVerified", "name"]);
 const ACCESS_BOOLEAN_FIELDS = Object.freeze([
   "shared",
   "canRead",
@@ -690,7 +690,7 @@ function monthOfEventId(id) {
 
 function assertIdentity(user) {
   assertExactKeys(user, IDENTITY_FIELDS, "invalid identity");
-  if (typeof user.isOrg !== "boolean") {
+  if (typeof user.emailVerified !== "boolean") {
     throw invalid("invalid identity");
   }
   const actor = assertActor({
@@ -699,7 +699,9 @@ function assertIdentity(user) {
     email: user.email,
   });
   return {
-    user: { sub: actor.sub, email: actor.email, name: actor.name, isOrg: user.isOrg },
+    user: {
+      sub: actor.sub, email: actor.email, emailVerified: user.emailVerified, name: actor.name,
+    },
     actor,
   };
 }

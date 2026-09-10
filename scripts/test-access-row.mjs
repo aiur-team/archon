@@ -400,14 +400,15 @@ function unusableTables(canonical) {
 /* ========================================================================= */
 
 const DOC_ID = "a1b2c3";
-/* `sub, email, name, isOrg`, in that order: every identity validator on these
-   paths requires the exact key order, so a fixture written in another order
-   fails as an invalid identity before the access row is ever looked at. */
+/* `sub, email, emailVerified, name`, in that order: every identity validator on
+   these paths requires the exact key order, so a fixture written in another
+   order fails as an invalid identity before the access row is ever looked at.
+   `sub` is a C1 v2 account id, which is the only grant key there is now. */
 const SESSION = Object.freeze({
-  sub: "sub_realtime_0001",
+  sub: `a0_${"3".repeat(32)}`,
   email: "sample.reader@example.com",
+  emailVerified: true,
   name: "Sample Reader",
-  isOrg: true,
 });
 const TOKEN = Object.freeze({ keyName: "invented.key", token: "invented-token" });
 
@@ -418,7 +419,6 @@ const TOKEN = Object.freeze({ keyName: "invented.key", token: "invented-token" }
  */
 const control = {
   identify: () => ({ ...SESSION }),
-  isOrgEmail: (email) => email === SESSION.email,
   resolveRole: null,
   capabilitiesFor: null,
   mintToken: () => ({ ...TOKEN }),
@@ -456,7 +456,6 @@ function bindStaticModules(stubRoot) {
     ["../lib/identity.mjs", stub("identity.mjs", `
       export * from ${JSON.stringify(real("netlify/lib/identity.mjs"))};
       export function identify(req) { return globalThis.__ACCESSROW__.identify(req); }
-      export function isOrgEmail(email) { return globalThis.__ACCESSROW__.isOrgEmail(email); }
     `)],
     /* Everything except the two controlled collaborators is the real export.
        `validateAccessRow` above all: substituting it would make this file
@@ -743,9 +742,13 @@ function transpileGate(ts, gateRoot) {
   mkdirSync(join(gateRoot, "edge-functions"), { recursive: true });
   mkdirSync(join(gateRoot, "lib"), { recursive: true });
 
+  /* The gate resolves identity by an internal request to the hosted session
+     route rather than by importing `../lib/identity.mjs`, so the seam is
+     `fetch` and the only module it needs here is the real address grammar. */
+  mkdirSync(join(gateRoot, "lib/hosted"), { recursive: true });
   writeFileSync(
-    join(gateRoot, "lib/identity.mjs"),
-    `export function identify(req) { return globalThis.__ACCESSROW__.identify(req); }\n`,
+    join(gateRoot, "lib/hosted/email.mjs"),
+    `export * from ${JSON.stringify(real("netlify/lib/hosted/email.mjs"))};\n`,
     "utf8",
   );
   writeFileSync(
@@ -800,14 +803,41 @@ async function gateMatrix(ts, gateRoot, accessLib) {
     new Response(PAGE, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
   const context = () => ({ next: async () => downstream() });
 
+  /* ACN-006 moved the gate's identity step off a module import and onto an
+     internal request to `/api/hosted/session`, so the seam this matrix drives
+     is `fetch`. The body is the frozen C1 signed-in shape; the gate projects it
+     onto the identity `resolveRole` is handed, and that projection is what the
+     access-row assertions below sit on top of. */
+  const sessionBody = () => JSON.stringify({
+    v: 1,
+    authenticated: true,
+    accountId: SESSION.sub,
+    login: SESSION.name,
+    email: SESSION.email,
+    emailVerified: SESSION.emailVerified,
+    csrfToken: "aW52ZW50ZWQtY3NyZi10b2tlbi1mb3ItdGhlLWdhdGUtbWF0cml4",
+  });
+
   const run = async (overrides) => {
     Object.assign(control, {
-      identify: () => ({ ...SESSION }),
       capabilitiesFor: (role) => accessLib.capabilitiesFor(role),
       resolveRole: () => row(accessLib.capabilitiesFor, "editor"),
       ...overrides,
     });
-    return gate(gateRequest(), context());
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input) => {
+      const url = new URL(typeof input === "string" ? input : input.url);
+      ok(url.pathname === "/api/hosted/session", `the gate fetched ${url.pathname}`);
+      return new Response(sessionBody(), {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    };
+    try {
+      return await gate(gateRequest(), context());
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   };
 
   for (const [label, access] of brokenRows(accessLib.capabilitiesFor)) {
@@ -885,22 +915,25 @@ const NOW = "2026-09-05T12:00:00.000Z";
 const LATER = "2026-10-05T12:00:00.000Z";
 
 const VISITOR = Object.freeze({
-  sub: "u_visitor_stranger",
+  sub: `a0_${"a".repeat(32)}`,
   email: "stranger@elsewhere.invalid",
+  emailVerified: true,
   name: "Stranger",
-  isOrg: false,
 });
 const OWNER_USER = Object.freeze({
-  sub: "u_owner_fixture",
+  sub: `a0_${"b".repeat(32)}`,
   email: "owner@example.com",
+  emailVerified: true,
   name: "Owner",
-  isOrg: false,
 });
+/* Named MEMBER for continuity with the case it used to drive. It is an ordinary
+   signed-in visitor now: ACN-006 removed the site-wide organisation rule, so no
+   address makes anybody a member of anything. */
 const MEMBER = Object.freeze({
-  sub: "u_member_fixture",
+  sub: `a0_${"c".repeat(32)}`,
   email: "member@example.com",
+  emailVerified: true,
   name: "Member",
-  isOrg: true,
 });
 
 /** The minimum blob store `read()`, `createOnly()` and `delete()` accept. */
@@ -1111,14 +1144,20 @@ async function publicDefaultRoleMatrix(accessLib) {
       );
     }
 
+    /* The organisation tier used to sit here, and this loop asserted that a
+       member resolved `orgDefault` rather than the public default. ACN-006
+       removed it: `orgDefault` no longer grants anybody anything by address, so
+       the same caller now falls through to the public default like everybody
+       else. The stored field is still read below, where an explicit "none"
+       suppresses that default -- which is the only thing it does now. */
     for (const orgDefault of ["commenter", "viewer"]) {
       const store = fakeStore(
         new Map([[accessLib.accessDocumentKey(PUBLIC_DOC), documentRecord(orgDefault)]]),
       );
       deepEq(
         await resolveVisitor(store, MEMBER),
-        row(capabilitiesFor, orgDefault, true),
-        `an organization member still resolves orgDefault ${orgDefault}`,
+        row(capabilitiesFor, "viewer", true),
+        `orgDefault ${orgDefault} grants nobody a role by address`,
       );
     }
 

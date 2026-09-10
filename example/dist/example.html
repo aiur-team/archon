@@ -2185,7 +2185,7 @@ function installEdit() {
   const ENTRY_KEYS = ["text", "by", "at", "pr"];
   const ACTOR_KEYS = ["sub", "name", "email"];
   const SESSION_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+    "sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SUGGESTION_KEYS = [
@@ -2425,20 +2425,11 @@ function installEdit() {
     if (typeof body.sub !== "string") return null;
     if (typeof body.email !== "string") return null;
     if (typeof body.name !== "string") return null;
-    const roleNames = Array.isArray(body.roles) ? Object.getOwnPropertyNames(body.roles) : [];
-    if (!Array.isArray(body.roles) || !Object.isFrozen(body.roles) ||
-        Object.getPrototypeOf(body.roles) !== Array.prototype ||
-        Object.getOwnPropertySymbols(body.roles).length !== 0 || body.roles.length !== 1 ||
-        roleNames.length !== 2 || roleNames[0] !== "0" || roleNames[1] !== "length") return null;
-    const roleDescriptor = Object.getOwnPropertyDescriptor(body.roles, "0");
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(body.roles, "length");
-    if (roleDescriptor === undefined || !hasOwn(roleDescriptor, "value") ||
-        roleDescriptor.enumerable !== true || roleDescriptor.writable !== false ||
-        roleDescriptor.configurable !== false ||
-        (roleDescriptor.value !== "member" && roleDescriptor.value !== "guest")) return null;
-    if (lengthDescriptor === undefined || !hasOwn(lengthDescriptor, "value") ||
-        lengthDescriptor.value !== 1 || lengthDescriptor.enumerable !== false ||
-        lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return null;
+    /* The frozen one-element `roles` array was validated here descriptor by
+       descriptor. It reported `member` or `guest` from a site-wide organisation
+       email suffix, which ACN-006 removed, so the field is gone from the body
+       and `body.role` -- the document role, which was always the authority --
+       is the only role this page reads. */
     if (typeof body.canComment !== "boolean") return null;
     if (typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;
@@ -3870,7 +3861,7 @@ function installComments() {
   const ANCHOR_KEYS = ["block", "exact", "prefix", "suffix", "start"];
   const PAGE_KEYS = ["threads", "nextCursor"];
   const ENVELOPE_KEYS = ["thread"];
-  const SESSION_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+  const SESSION_KEYS = ["sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
   const SESSION_FLAGS = ["canComment", "canEdit", "shared", "canSuggest", "canAccept",
     "canShare", "canSeeMembers"];
@@ -5392,7 +5383,6 @@ function installComments() {
     if (typeof detail.sub !== "string" || !SUB.test(detail.sub)) return null;
     if (typeof detail.name !== "string" || typeof detail.email !== "string") return null;
     if (!ROLES.includes(detail.role)) return null;
-    if (!Array.isArray(detail.roles) || !Object.isFrozen(detail.roles)) return null;
     for (const flag of SESSION_FLAGS) if (typeof detail[flag] !== "boolean") return null;
     return { sub: detail.sub, role: detail.role, canComment: detail.canComment };
   }
@@ -7203,9 +7193,9 @@ runHistory();
   const RAIL_EDGE_PX = 4;
   const COLOURS = 8;
 
-  const LEGACY_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit"];
+  const LEGACY_KEYS = ["sub", "email", "name", "canComment", "canEdit"];
   const FINAL_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const FINAL_BOOLEANS = ["shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
@@ -7426,7 +7416,6 @@ runHistory();
       if (typeof detail.sub !== "string") return null;
       if (typeof detail.email !== "string") return null;
       if (typeof detail.name !== "string") return null;
-      if (!validRoles(detail.roles)) return null;
       if (typeof detail.canComment !== "boolean") return null;
       if (typeof detail.canEdit !== "boolean") return null;
 
@@ -7443,49 +7432,22 @@ runHistory();
     }
   }
 
-  // A frozen dense ordinary string array: exact index descriptors, the ordinary
-  // `length`, and nothing else. Checked by descriptor so an index accessor is
-  // never invoked.
-  function validRoles(roles) {
-    try {
-      if (!Array.isArray(roles)) return false;
-      if (Object.getPrototypeOf(roles) !== Array.prototype) return false;
-      if (!Object.isFrozen(roles)) return false;
-      if (Object.getOwnPropertySymbols(roles).length !== 0) return false;
-
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(roles, "length");
-      if (lengthDescriptor === undefined || !own(lengthDescriptor, "value")) return false;
-      if (lengthDescriptor.enumerable !== false) return false;
-      if (lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return false;
-
-      const length = lengthDescriptor.value;
-      if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) return false;
-
-      const names = Object.getOwnPropertyNames(roles);
-      if (names.length !== length + 1) return false;
-      if (names[length] !== "length") return false;
-
-      for (let index = 0; index < length; index += 1) {
-        if (names[index] !== String(index)) return false;
-        const descriptor = Object.getOwnPropertyDescriptor(roles, names[index]);
-        if (descriptor === undefined || !own(descriptor, "value")) return false;
-        if (descriptor.enumerable !== true) return false;
-        if (descriptor.writable !== false || descriptor.configurable !== false) return false;
-        if (typeof descriptor.value !== "string") return false;
-      }
-      return true;
-    } catch (ignored) {
-      return false;
-    }
-  }
-
-  // Presentation only. The sole `member` role is the one shape that may carry a
-  // server-supplied name; everything else is privacy-conservatively external
-  // and broadcasts the literal `Guest`. There is no email, sub, role or domain
-  // fallback in either branch.
+  // Presentation only, and conservative by construction: a name is broadcast to
+  // everybody else in the document, so it is only ever the name of somebody the
+  // owner has actually admitted.
+  //
+  // The test used to be the compatibility `roles` field -- one of `member` or
+  // `guest`, derived from a site-wide organisation email suffix. ACN-006 removed
+  // that suffix rule and the field with it, so the successor is the document
+  // role, which is both the thing that was always authoritative and a narrower
+  // question: not "does this address end the right way" but "has this person
+  // been given access to this document". A caller with no role, and a legacy
+  // body that carries no role at all, both stay `Guest`.
+  //
+  // There is no email, sub, role or domain fallback in either branch.
   function deriveLabel(detail) {
-    const roles = detail.roles;
-    if (roles.length !== 1 || roles[0] !== "member") return "Guest";
+    const role = detail.role;
+    if (typeof role !== "string" || !ROLE_VALUES.includes(role) || role === "none") return "Guest";
 
     const name = detail.name;
     if (typeof name !== "string" || CONTROL_RE.test(name)) return "Member";
@@ -9427,8 +9389,6 @@ function mountSharePanel(event) {
     }
     if (typeof body.sub !== "string" || typeof body.email !== "string"
       || typeof body.name !== "string") return null;
-    if (!Array.isArray(body.roles) || body.roles.length !== 1) return null;
-    if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
     if (typeof body.canComment !== "boolean" || typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;
     if (!SESSION_ROLES.includes(body.role)) return null;
@@ -9508,7 +9468,7 @@ function mountSharePanel(event) {
     + " If setup stops during transfer, the new owner may need to invite you again.";
   const DEFAULT_LABELS = { commenter: "Commenter", viewer: "Viewer", none: "No access" };
   const FINAL_SESSION_FIELDS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SESSION_ROLES = ["owner", "editor", "commenter", "viewer", "none"];
@@ -9602,10 +9562,12 @@ function validSession(body, docId) {
   if (typeof body.sub !== "string") return null;
   if (typeof body.email !== "string") return null;
   if (typeof body.name !== "string") return null;
-  if (!Array.isArray(body.roles)) return null;
-  for (const entry of body.roles) {
-    if (typeof entry !== "string") return null;
-  }
+  /* `roles` used to be checked here. It carried one of `member` or `guest`,
+     derived from a site-wide organisation email suffix, and it was never
+     authorization -- the document role below is. ACN-006 removed the suffix
+     rule, which left the field with nothing to report, so it is gone from the
+     body rather than always saying `guest`. A field that is always the same
+     value is one a client eventually believes. */
   if (typeof body.canComment !== "boolean") return null;
   if (typeof body.canEdit !== "boolean") return null;
   if (reservedPresent === 0) return body;
@@ -9618,8 +9580,6 @@ function validSession(body, docId) {
   if (typeof body.canAccept !== "boolean") return null;
   if (typeof body.canShare !== "boolean") return null;
   if (typeof body.canSeeMembers !== "boolean") return null;
-  if (body.roles.length !== 1) return null;
-  if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
   return body;
 }
 

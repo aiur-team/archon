@@ -154,7 +154,6 @@ window.__t = {
       sub: ${JSON.stringify(SUB)},
       email: "reader@invented.example",
       name: "Invented Reader",
-      roles: ["member"],
       canComment: true,
       canEdit: false,
       doc: ${JSON.stringify(DOC_ID)},
@@ -165,7 +164,6 @@ window.__t = {
       canShare: false,
       canSeeMembers: false,
     }, patch || {});
-    Object.freeze(detail.roles);
     Object.freeze(detail);
     document.dispatchEvent(new CustomEvent("session", { detail: detail }));
   },

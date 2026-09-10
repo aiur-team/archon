@@ -2767,10 +2767,14 @@ async function ownerRead(world, browser) {
   record("read: the stranger's shell is byte-identical to a missing document's");
 
   /* 5.5 Legacy authority cannot widen a hosted read. `DOC_OWNERS`, the
-         organisation default and `PUBLIC_DEFAULT_ROLE` are the root
+         organisation defaults and `PUBLIC_DEFAULT_ROLE` are the root
          deployment's, and this deployment reads none of them -- so setting all
-         three, to values that would make the stranger an owner over there,
-         changes nothing here. */
+         four, to values that would make the stranger an owner over there,
+         changes nothing here. `ORG_EMAIL_DOMAIN` is retired outright as of
+         ACN-006 and is now read by nothing on either side; it stays in this set
+         because the property under test is that a hosted read is unmoved by a
+         root-deployment variable, and a variable nobody reads is the strongest
+         form of that. */
   const legacy = {
     DOC_OWNERS: `${documentId}:*`,
     PUBLIC_DEFAULT_ROLE: "owner",

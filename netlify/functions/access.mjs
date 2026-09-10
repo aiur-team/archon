@@ -12,17 +12,36 @@
  * Runtime grants in `doc-state` are the only authority: never Identity roles,
  * committed metadata, or client state.
  *
- * State writes precede audit. There is no transaction across blobs, Identity,
- * email, and events: a successful state change is never rolled back because
- * an event append failed, and a crash can honestly leave a real access change
- * with no audit event. The coordinator's recovery and transfer markers make
- * account bootstrap and ownership transfer resumable; they never promise
- * audit repair.
+ * State writes precede audit. There is no transaction across blobs and events:
+ * a successful state change is never rolled back because an event append
+ * failed, and a crash can honestly leave a real access change with no audit
+ * event. The coordinator's transfer marker makes ownership transfer resumable;
+ * it never promises audit repair.
+ *
+ * ## Inviting somebody no longer provisions them an account
+ *
+ * Until ACN-006 a share did four things: it wrote an invitation record, scanned
+ * the identity provider for an existing account, created one with a random
+ * password if there was none, and asked the provider to mail a password-reset
+ * link. Three of those four were Netlify Identity, and the durable
+ * recovery-marker saga in the write coordinator existed to make that sequence
+ * resumable across a crash.
+ *
+ * There is nothing left to resume. Sign-in is Auth0, open to anyone with a
+ * Google or GitHub account, so an invited person already has — or can obtain —
+ * an identity without this deployment provisioning one, and there is no
+ * password for it to set. An invitation is now exactly what its storage key
+ * always said it was: a record naming a role, addressed to the hash of a
+ * normalized email. It is satisfied when somebody signs in whose *verified*
+ * address hashes to that key, and `resolveRole()` in `netlify/lib/access.mjs`
+ * consumes it there and nowhere else.
+ *
+ * So this route mails nothing and creates nothing. An owner shares a document
+ * by writing a record and telling the person the URL.
  */
 
-import { admin, requestPasswordRecovery } from "@netlify/identity";
 import { randomBytes } from "node:crypto";
-import { identify, isOrgEmail, requireOrigin } from "../lib/identity.mjs";
+import { identify, requireOrigin } from "../lib/identity.mjs";
 import {
   AccessError,
   accessDocumentKey,
@@ -50,7 +69,7 @@ const JSON_HEADERS = Object.freeze({
   ...NO_STORE,
 });
 
-const IDENTITY_KEYS = Object.freeze(["sub", "email", "name", "isOrg"]);
+const IDENTITY_KEYS = Object.freeze(["sub", "email", "emailVerified", "name"]);
 const DOC_ID_PATTERN = /^[0-9a-f]{6}$/;
 const INVITATION_HASH_PATTERN = /^[0-9a-f]{32}$/;
 const LEASE_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -66,9 +85,6 @@ const INVITE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_LIVE_INVITES = 10;
 const MIN_NOW_MS = 1_000_000_000_000;
 const MAX_NOW_MS = 9_999_999_999_999;
-const IDENTITY_PAGE_SIZE = 100;
-const MAX_IDENTITY_PAGES = 100;
-const PASSWORD_BYTES = 32;
 const LEASE_ID_BYTES = 16;
 
 const BASE_PATH = "/api/access";
@@ -76,12 +92,6 @@ const TRANSFER_PATH = "/api/access/transfer";
 const BASE_ALLOW = "GET, POST, PATCH, DELETE";
 const TRANSFER_ALLOW = "POST";
 
-const RECOVERY_PHASES = Object.freeze([
-  "invitation-pending",
-  "account-create-requested",
-  "recovery-required",
-  "recovery-sent",
-]);
 const TRANSFER_PHASES = Object.freeze([
   "owner-pending",
   "owner-committed",
@@ -89,14 +99,10 @@ const TRANSFER_PHASES = Object.freeze([
 ]);
 
 const WRITE_RECORD_KEYS = Object.freeze([
-  "v", "docId", "epoch", "lease", "recovery", "transfer",
+  "v", "docId", "epoch", "lease", "transfer",
 ]);
 const LEASE_KEYS = Object.freeze(["id", "holder", "acquiredAt", "expiresAt"]);
 const ACTOR_KEYS = Object.freeze(["sub", "name", "email"]);
-const RECOVERY_KEYS = Object.freeze([
-  "invitationKey", "email", "role", "invitedBy", "invitedAt", "expiresAt",
-  "phase", "accountSub",
-]);
 const TRANSFER_KEYS = Object.freeze([
   "fromOwner", "toOwner", "targetGrant", "at", "phase",
 ]);
@@ -105,8 +111,7 @@ const LEASE_OPTION_KEYS = Object.freeze(["store", "doc", "nowMs", "run"]);
 
 const DEPENDENCY_KEYS = Object.freeze([
   "requireOriginFn", "identifyFn", "resolveRoleFn", "storeFn", "appendEventFn",
-  "listUsersFn", "createUserFn", "requestPasswordRecoveryFn", "randomBytesFn",
-  "nowFn",
+  "randomBytesFn", "nowFn",
 ]);
 
 /** The closed request-body variants, keyed by `<METHOD> <pathname>`. */
@@ -123,9 +128,6 @@ const BODY_VARIANTS = Object.freeze({
   ]),
   "POST /api/access/transfer": Object.freeze([Object.freeze(["doc", "sub"])]),
 });
-
-const BASE64URL_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /* ------------------------------------------------------------------ *
  * Shared descriptor helpers (P3-H).
@@ -248,27 +250,6 @@ function hexOf(bytes, size) {
   return hex;
 }
 
-function base64url(bytes) {
-  let out = "";
-  for (let index = 0; index < bytes.length; index += 3) {
-    const first = bytes[index];
-    const second = bytes[index + 1];
-    const third = bytes[index + 2];
-    out += BASE64URL_ALPHABET[first >> 2];
-    if (second === undefined) {
-      out += BASE64URL_ALPHABET[(first & 0b11) << 4];
-      break;
-    }
-    out += BASE64URL_ALPHABET[((first & 0b11) << 4) | (second >> 4)];
-    if (third === undefined) {
-      out += BASE64URL_ALPHABET[(second & 0b1111) << 2];
-      break;
-    }
-    out += BASE64URL_ALPHABET[((second & 0b1111) << 2) | (third >> 6)];
-    out += BASE64URL_ALPHABET[third & 0b111111];
-  }
-  return out;
-}
 
 /* ------------------------------------------------------------------ *
  * The public error boundary.
@@ -298,7 +279,6 @@ const forbidden = () => httpError(403, "forbidden");
 const notFound = () => httpError(404, "not-found");
 const conflict = () => httpError(409, "conflict");
 const accessBusy = () => httpError(409, "access-busy", { "Retry-After": "2" });
-const recoveryPending = () => httpError(409, "recovery-pending");
 const memberLimit = () => httpError(409, "member-limit");
 const inviteRateLimit = () =>
   httpError(429, "invite-rate-limit", { "Retry-After": "3600" });
@@ -367,11 +347,11 @@ function validateIdentity(value) {
   if (!isExactPlainDataObject(value, IDENTITY_KEYS, true)) throw new TypeError("Invalid identity");
   const sub = ownDataDescriptor(value, "sub").value;
   const email = ownDataDescriptor(value, "email").value;
+  const emailVerified = ownDataDescriptor(value, "emailVerified").value;
   const name = ownDataDescriptor(value, "name").value;
-  const isOrg = ownDataDescriptor(value, "isOrg").value;
   if (typeof sub !== "string" || typeof email !== "string" ||
-      typeof name !== "string" || typeof isOrg !== "boolean" ||
-      isOrg !== isOrgEmail(email) || assertIdentitySub(sub) !== sub) {
+      typeof emailVerified !== "boolean" || typeof name !== "string" ||
+      assertIdentitySub(sub) !== sub) {
     throw new TypeError("Invalid identity");
   }
   return value;
@@ -578,55 +558,6 @@ function assertLease(value) {
   };
 }
 
-function assertRecoveryMarker(value, docId) {
-  if (!isUnorderedPlainDataObject(value, RECOVERY_KEYS)) {
-    throw new TypeError("Invalid recovery marker");
-  }
-  let email;
-  try {
-    email = normalizeEmail(value.email);
-  } catch {
-    throw new TypeError("Invalid recovery marker");
-  }
-  const prefix = `access/${docId}/i/`;
-  if (email !== value.email ||
-      typeof value.invitationKey !== "string" ||
-      !value.invitationKey.startsWith(prefix) ||
-      !value.invitationKey.endsWith(".json") ||
-      !INVITATION_HASH_PATTERN.test(
-        value.invitationKey.slice(prefix.length, -".json".length),
-      ) ||
-      !GRANTABLE_ROLES.includes(value.role) ||
-      !isTimestamp(value.invitedAt) || !isTimestamp(value.expiresAt) ||
-      Date.parse(value.expiresAt) - Date.parse(value.invitedAt) !== INVITATION_LIFETIME_MS ||
-      !RECOVERY_PHASES.includes(value.phase)) {
-    throw new TypeError("Invalid recovery marker");
-  }
-  const invitedBy = assertMarkerActor(value.invitedBy);
-  const early = value.phase === "invitation-pending" ||
-    value.phase === "account-create-requested";
-  let accountSub = null;
-  if (early) {
-    if (value.accountSub !== null) throw new TypeError("Invalid recovery marker");
-  } else {
-    try {
-      accountSub = assertIdentitySub(value.accountSub);
-    } catch {
-      throw new TypeError("Invalid recovery marker");
-    }
-  }
-  return {
-    invitationKey: value.invitationKey,
-    email,
-    role: value.role,
-    invitedBy,
-    invitedAt: value.invitedAt,
-    expiresAt: value.expiresAt,
-    phase: value.phase,
-    accountSub,
-  };
-}
-
 function assertTransferMarker(value, docId) {
   if (!isUnorderedPlainDataObject(value, TRANSFER_KEYS) ||
       !isTimestamp(value.at) || !TRANSFER_PHASES.includes(value.phase)) {
@@ -694,16 +625,10 @@ function assertAccessWriteRecord(value, docId, key) {
     throw new TypeError("Invalid write record");
   }
   const lease = value.lease === null ? null : assertLease(value.lease);
-  const recovery = value.recovery === null
-    ? null
-    : assertRecoveryMarker(value.recovery, docId);
   const transfer = value.transfer === null
     ? null
     : assertTransferMarker(value.transfer, docId);
-  if (recovery !== null && transfer !== null) {
-    throw new TypeError("Invalid write record");
-  }
-  return { v: 1, docId, epoch: value.epoch, lease, recovery, transfer };
+  return { v: 1, docId, epoch: value.epoch, lease, transfer };
 }
 
 function writeCoordinatorKey(docId) {
@@ -714,7 +639,7 @@ function writeCoordinatorKey(docId) {
 }
 
 function initialWriteRecord(docId) {
-  return { v: 1, docId, epoch: 0, lease: null, recovery: null, transfer: null };
+  return { v: 1, docId, epoch: 0, lease: null, transfer: null };
 }
 
 function withLease(record, lease) {
@@ -723,7 +648,6 @@ function withLease(record, lease) {
     docId: record.docId,
     epoch: record.epoch,
     lease,
-    recovery: record.recovery,
     transfer: record.transfer,
   };
 }
@@ -983,12 +907,6 @@ export function createAccessHandler(dependencies = {}) {
   const resolveRoleFn = pick("resolveRoleFn", resolveRole);
   const storeFn = pick("storeFn", docState);
   const appendEventFn = pick("appendEventFn", (options) => appendEvent(options));
-  const listUsersFn = pick("listUsersFn", (options) => admin.listUsers(options));
-  const createUserFn = pick("createUserFn", (options) => admin.createUser(options));
-  const requestPasswordRecoveryFn = pick(
-    "requestPasswordRecoveryFn",
-    (email) => requestPasswordRecovery(email),
-  );
   const randomBytesFn = pick("randomBytesFn", (size) => randomBytes(size));
   const nowFn = pick("nowFn", () => Date.now());
 
@@ -1140,24 +1058,12 @@ export function createAccessHandler(dependencies = {}) {
     ctx.coordinator = assertAccessWriteRecord(result.value, ctx.doc, key);
   }
 
-  function setRecovery(ctx, recovery) {
-    return updateCoordinator(ctx, (record) => ({
-      v: 1,
-      docId: record.docId,
-      epoch: record.epoch,
-      lease: record.lease,
-      recovery,
-      transfer: record.transfer,
-    }));
-  }
-
   function setTransfer(ctx, transfer) {
     return updateCoordinator(ctx, (record) => ({
       v: 1,
       docId: record.docId,
       epoch: record.epoch,
       lease: record.lease,
-      recovery: record.recovery,
       transfer,
     }));
   }
@@ -1294,278 +1200,17 @@ export function createAccessHandler(dependencies = {}) {
     return "deleted";
   }
 
-  /* ---------------- Identity ---------------- */
-
-  function validateProviderUser(value, expectedEmail) {
-    if (value === null || typeof value !== "object" || Array.isArray(value) ||
-        Object.getOwnPropertySymbols(value).length !== 0) {
-      throw internalError();
-    }
-    for (const name of Object.getOwnPropertyNames(value)) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, name);
-      if (!Object.prototype.hasOwnProperty.call(descriptor, "value")) throw internalError();
-    }
-    const id = Object.getOwnPropertyDescriptor(value, "id");
-    const email = Object.getOwnPropertyDescriptor(value, "email");
-    for (const descriptor of [id, email]) {
-      if (descriptor === undefined ||
-          !Object.prototype.hasOwnProperty.call(descriptor, "value") ||
-          descriptor.enumerable !== true || descriptor.writable !== true ||
-          descriptor.configurable !== true || typeof descriptor.value !== "string") {
-        throw internalError();
-      }
-    }
-    let sub;
-    let normalized;
-    try {
-      sub = assertIdentitySub(id.value);
-      normalized = normalizeEmail(email.value);
-    } catch {
-      throw internalError();
-    }
-    if (normalized !== email.value) throw internalError();
-    if (expectedEmail !== undefined && normalized !== expectedEmail) throw internalError();
-    return { sub, email: normalized };
-  }
-
-  function validateUserPage(value) {
-    if (!isDenseArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
-        value.length > IDENTITY_PAGE_SIZE) {
-      throw internalError();
-    }
-    return value;
-  }
-
-  /**
-   * Determine whether exactly one canonical account exists for one address.
-   *
-   * Scanning continues past a match so a duplicate normalized email is proved
-   * malformed provider state rather than silently accepted. Reaching the page
-   * ceiling without a short terminating page is `unavailable`, because
-   * completeness is unproven. No user is logged or returned to the client.
-   */
-  async function findAccount(email) {
-    const subjects = new Set();
-    const emails = new Set();
-    let match = null;
-    for (let page = 1; page <= MAX_IDENTITY_PAGES; page += 1) {
-      let users;
-      try {
-        users = await listUsersFn({ page, perPage: IDENTITY_PAGE_SIZE });
-      } catch {
-        throw unavailable();
-      }
-      const list = validateUserPage(users);
-      for (const entry of list) {
-        const user = validateProviderUser(entry);
-        if (subjects.has(user.sub) || emails.has(user.email)) throw internalError();
-        subjects.add(user.sub);
-        emails.add(user.email);
-        if (user.email === email) match = user.sub;
-      }
-      if (list.length < IDENTITY_PAGE_SIZE) {
-        return match;
-      }
-    }
-    throw unavailable();
-  }
-
-  async function createAccount(email) {
-    const password = base64url(assertRandomBytes(randomBytesFn(PASSWORD_BYTES), PASSWORD_BYTES));
-    let created;
-    try {
-      created = await createUserFn({ email, password, data: { role: "guest" } });
-    } catch {
-      throw unavailable();
-    }
-    return validateProviderUser(created, email).sub;
-  }
-
-  async function requestRecovery(email) {
-    try {
-      await requestPasswordRecoveryFn(email);
-    } catch {
-      throw unavailable();
-    }
-  }
-
   /* ---------------- invitation creation ---------------- */
 
-  function buildInvitation(docId, marker) {
-    return {
-      v: 1,
-      docId,
-      email: marker.email,
-      role: marker.role,
-      invitedBy: {
-        sub: marker.invitedBy.sub,
-        name: marker.invitedBy.name,
-        email: marker.invitedBy.email,
-      },
-      invitedAt: marker.invitedAt,
-      expiresAt: marker.expiresAt,
-      accountCreated: false,
-    };
-  }
-
   /**
-   * Make the exact phase-derived invitation present, or report that P2-G has
-   * already consumed it. Only `invitation-pending` may create an absent key.
-   */
-  async function ensureInvitation(ctx, marker, expected) {
-    const key = marker.invitationKey;
-    let current;
-    try {
-      current = readValue(await read(ctx.store, key));
-    } catch (error) {
-      if (isUnavailable(error)) throw unavailable();
-      throw internalError();
-    }
-    if (current !== null) {
-      let existing;
-      try {
-        existing = await assertAccessInvitationAtKey(current, ctx.doc, key, marker.email);
-      } catch {
-        throw internalError();
-      }
-      const allowTrue = marker.phase === "recovery-sent";
-      const candidates = allowTrue
-        ? [{ ...expected, accountCreated: false }, { ...expected, accountCreated: true }]
-        : [{ ...expected, accountCreated: false }];
-      if (!candidates.some((candidate) => canonical(candidate) === canonical(existing))) {
-        throw conflict();
-      }
-      return { state: "present", record: existing };
-    }
-    if (marker.phase === "recovery-sent") {
-      return { state: "absent" };
-    }
-    if (marker.phase !== "invitation-pending") {
-      throw conflict();
-    }
-    await ownerFence(ctx);
-    let result;
-    try {
-      result = await ctx.store.setJSON(key, expected, { onlyIfNew: true });
-    } catch {
-      throw unavailable();
-    }
-    const modified = modifiedOf(result);
-    if (modified === null) throw unavailable();
-    if (modified === false) throw conflict();
-    return { state: "created", record: expected };
-  }
-
-  function modifiedOf(result) {
-    if (result === null || typeof result !== "object" || Array.isArray(result)) {
-      return null;
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(result, "modified");
-    if (descriptor === undefined ||
-        !Object.prototype.hasOwnProperty.call(descriptor, "value") ||
-        typeof descriptor.value !== "boolean") {
-      return null;
-    }
-    return descriptor.value;
-  }
-
-  /** Prove that P2-G already converted this invitation into its exact grant. */
-  async function assertConsumedGrant(ctx, marker) {
-    if (marker.accountSub === null) throw conflict();
-    const key = accessGrantKey(ctx.doc, marker.accountSub);
-    let current;
-    try {
-      current = readValue(await read(ctx.store, key));
-    } catch (error) {
-      if (isUnavailable(error)) throw unavailable();
-      throw internalError();
-    }
-    if (current === null) throw conflict();
-    let grant;
-    try {
-      grant = assertAccessGrant(current, ctx.doc, marker.accountSub);
-    } catch {
-      throw internalError();
-    }
-    if (grant.email !== marker.email || grant.role !== marker.role ||
-        grant.fromInvitation === null) {
-      throw conflict();
-    }
-  }
-
-  /**
-   * Resume or run the account-bootstrap saga for one absent invitation.
+   * Invite one address to one document, at one role.
    *
-   * Every crash point before the event is resumable from the durable marker,
-   * and an identical owner POST never creates a second account. Recovery mail
-   * is explicitly at-least-once: an ambiguous request may be repeated rather
-   * than strand an account nobody can sign in to.
+   * One record and one event. The account-bootstrap saga this used to drive —
+   * durable marker, provider scan, account creation, recovery mail, four
+   * resumable phases — is gone with Netlify Identity; see the module header.
+   * What is left is the write that was always the actual invitation.
    */
-  async function runBootstrap(ctx, marker) {
-    const expected = buildInvitation(ctx.doc, marker);
-    const presence = await ensureInvitation(ctx, marker, expected);
-    let phase = marker.phase;
-    let accountSub = marker.accountSub;
-
-    if (phase === "invitation-pending" || phase === "account-create-requested") {
-      const found = await findAccount(marker.email);
-      if (phase === "invitation-pending" && found !== null) {
-        await ownerFence(ctx);
-        await setRecovery(ctx, null);
-        await ownerFence(ctx);
-        await attemptEvent(ctx, "access.invite", { email: marker.email },
-          `invited a reviewer as ${marker.role}`);
-        return noContentResponse();
-      }
-      if (found === null) {
-        if (phase === "invitation-pending") {
-          await ownerFence(ctx);
-          await setRecovery(ctx, { ...marker, phase: "account-create-requested" });
-          phase = "account-create-requested";
-        }
-        accountSub = await createAccount(marker.email);
-      } else {
-        accountSub = found;
-      }
-      await ownerFence(ctx);
-      await setRecovery(ctx, { ...marker, phase: "recovery-required", accountSub });
-      phase = "recovery-required";
-    }
-
-    if (phase === "recovery-required") {
-      await requestRecovery(marker.email);
-      await ownerFence(ctx);
-      await setRecovery(ctx, { ...marker, phase: "recovery-sent", accountSub });
-      phase = "recovery-sent";
-    }
-
-    if (presence.state === "absent") {
-      await assertConsumedGrant(ctx, { ...marker, accountSub });
-    } else if (presence.record.accountCreated !== true) {
-      await ownerFence(ctx);
-      const snapshot = { ...expected, accountCreated: false };
-      await mutate(ctx.store, marker.invitationKey, null, (draft) => {
-        if (draft === null) throw conflict();
-        if (canonical(draft) === canonical({ ...expected, accountCreated: true })) return null;
-        if (canonical(draft) !== canonical(snapshot)) throw conflict();
-        return { ...snapshot, accountCreated: true };
-      });
-    }
-
-    await ownerFence(ctx);
-    await setRecovery(ctx, null);
-    await ownerFence(ctx);
-    await attemptEvent(ctx, "access.invite", { email: marker.email },
-      `invited a reviewer as ${marker.role}`);
-    return noContentResponse();
-  }
-
-  /* ---------------- operations ---------------- */
-
-  async function createInvitation(ctx, body, roster, resumedMarker) {
-    if (resumedMarker !== null) {
-      return runBootstrap(ctx, resumedMarker);
-    }
+  async function createInvitation(ctx, body, roster) {
     const invitationKey = await accessInvitationKey(ctx.doc, body.email);
     if (body.email === ctx.actor.email || body.email === roster.document.ownerEmail) {
       throw conflict();
@@ -1578,7 +1223,13 @@ export function createAccessHandler(dependencies = {}) {
     if (existing !== undefined) {
       if (existing.record.expiresAt > ctx.now) {
         if (existing.record.role !== body.role) throw conflict();
-        return reissueRecovery(ctx, existing.record);
+        /* The identical invitation is already live. There is no mail to send a
+           second time now, so the honest answer to "invite them again at the
+           same role" is that they are already invited: no record changes, no
+           expiry is extended, and no event is appended for a share that did not
+           happen. Re-inviting at a *different* role is still a conflict, which
+           is what stops this from being a silent role change. */
+        return noContentResponse();
       }
       return renewInvitation(ctx, body, existing, roster);
     }
@@ -1586,8 +1237,9 @@ export function createAccessHandler(dependencies = {}) {
     if (childCount(roster) >= MAX_KEYS) throw memberLimit();
     assertInviteRate(ctx, roster);
 
-    const marker = {
-      invitationKey,
+    const invitation = {
+      v: 1,
+      docId: ctx.doc,
       email: body.email,
       role: body.role,
       invitedBy: {
@@ -1597,12 +1249,40 @@ export function createAccessHandler(dependencies = {}) {
       },
       invitedAt: ctx.now,
       expiresAt: new Date(ctx.nowMs + INVITATION_LIFETIME_MS).toISOString(),
-      phase: "invitation-pending",
-      accountSub: null,
+      /* Vestigial and now always false: nothing in this deployment creates an
+         account any more. It stays on the record because the record shape is
+         still validated field for field, and a field silently dropped from a
+         schema is how a stored value stops being checked. ACN-008 owns the
+         invitation record's next revision. */
+      accountCreated: false,
     };
+
+    /* Fence, then create-only. The fence proves this owner still holds the
+       lease at the epoch they took it at; `onlyIfNew` proves nobody else
+       created this exact key in between. Both, because they answer different
+       questions and the second is the one that survives a lost lease. */
     await ownerFence(ctx);
-    await setRecovery(ctx, marker);
-    return runBootstrap(ctx, marker);
+    let result;
+    try {
+      result = await ctx.store.setJSON(invitationKey, invitation, { onlyIfNew: true });
+    } catch {
+      throw unavailable();
+    }
+    if (result === null || typeof result !== "object" || Array.isArray(result)) {
+      throw unavailable();
+    }
+    const modified = Object.getOwnPropertyDescriptor(result, "modified");
+    if (modified === undefined ||
+        !Object.prototype.hasOwnProperty.call(modified, "value") ||
+        typeof modified.value !== "boolean") {
+      throw unavailable();
+    }
+    if (modified.value === false) throw conflict();
+
+    await ownerFence(ctx);
+    await attemptEvent(ctx, "access.invite", { email: body.email },
+      `invited a reviewer as ${body.role}`);
+    return noContentResponse();
   }
 
   function assertInviteRate(ctx, roster) {
@@ -1610,21 +1290,6 @@ export function createAccessHandler(dependencies = {}) {
     const recent = liveInvitations(roster, ctx.now)
       .filter(({ record }) => record.invitedAt > windowStart);
     if (recent.length >= MAX_LIVE_INVITES) throw inviteRateLimit();
-  }
-
-  /**
-   * Reissue the setup message for a live same-role invitation.
-   *
-   * Deliberately changes no record, extends no expiry, and appends no event.
-   * This is at-least-once mail, which is safe precisely because it can create
-   * neither an account nor access.
-   */
-  async function reissueRecovery(ctx, invitation) {
-    const found = await findAccount(invitation.email);
-    if (found === null) throw conflict();
-    await ownerFence(ctx);
-    await requestRecovery(invitation.email);
-    return noContentResponse();
   }
 
   /** Replace an expired same-key invitation in place under the lease. */
@@ -1651,11 +1316,6 @@ export function createAccessHandler(dependencies = {}) {
       if (canonical(draft) !== canonical(snapshot)) throw conflict();
       return renewed;
     });
-    if (snapshot.accountCreated === true) {
-      const found = await findAccount(snapshot.email);
-      if (found === null) throw conflict();
-      await requestRecovery(snapshot.email);
-    }
     await ownerFence(ctx);
     await attemptEvent(ctx, "access.invite", { email: snapshot.email },
       `invited a reviewer as ${body.role}`);
@@ -1912,13 +1572,13 @@ export function createAccessHandler(dependencies = {}) {
 
   /* ---------------- mutation dispatch ---------------- */
 
-  async function dispatch(ctx, routeKey, body, resumedMarker) {
+  async function dispatch(ctx, routeKey, body) {
     if (routeKey === "PATCH /api/access" && body.keys.includes("orgDefault")) {
       return changeOrgDefault(ctx, body);
     }
     const roster = await inventory(ctx);
     if (routeKey === "POST /api/access") {
-      return createInvitation(ctx, body, roster, resumedMarker);
+      return createInvitation(ctx, body, roster);
     }
     if (routeKey === "PATCH /api/access") {
       return body.keys.includes("sub")
@@ -1936,13 +1596,18 @@ export function createAccessHandler(dependencies = {}) {
   /**
    * Reconcile a stored marker before the requested operation.
    *
-   * A pending recovery marker admits only the identical resuming POST; a
-   * pending transfer marker admits only the old owner's identical transfer
+   * A pending transfer marker admits only the old owner's identical transfer
    * POST before the authority CAS, or the new owner afterwards, who must
    * finish the repair and its one event attempt first.
+   *
+   * There was a second marker here, and ACN-006 removed it with the thing it
+   * made resumable: an invitation used to be a four-phase account-bootstrap
+   * saga, so a crash mid-share left a durable recovery marker that only the
+   * identical resuming POST was allowed past. An invitation is one create-only
+   * write now, which either happened or did not, and needs no marker to be
+   * resumable.
    */
   async function reconcileMarkers(ctx, routeKey, body) {
-    const recovery = ctx.coordinator.recovery;
     const transfer = ctx.coordinator.transfer;
     if (transfer !== null) {
       if (transfer.fromOwner.sub === ctx.actor.sub) {
@@ -1950,23 +1615,15 @@ export function createAccessHandler(dependencies = {}) {
           body.sub === transfer.toOwner.sub && transfer.phase === "owner-pending";
         if (!identical) throw conflict();
         await runTransfer(ctx, transfer);
-        return { completed: true, marker: null };
+        return { completed: true };
       }
       if (transfer.toOwner.sub === ctx.actor.sub) {
         await runTransfer(ctx, transfer);
-        return { completed: false, marker: null };
+        return { completed: false };
       }
       throw conflict();
     }
-    if (recovery !== null) {
-      const key = await accessInvitationKey(ctx.doc, recovery.email);
-      if (key !== recovery.invitationKey) throw internalError();
-      const identical = routeKey === "POST /api/access" &&
-        body.email === recovery.email && body.role === recovery.role;
-      if (!identical) throw recoveryPending();
-      return { completed: false, marker: recovery };
-    }
-    return { completed: false, marker: null };
+    return { completed: false };
   }
 
   async function runMutation(req, routeKey) {
@@ -1996,11 +1653,21 @@ export function createAccessHandler(dependencies = {}) {
     await authorize(user, body.doc);
 
     const store = openStore();
+    /* Every record this route writes stamps the actor's address into
+       `invitedBy` or `grantedBy`, and those are validated addresses, not free
+       text. An identity carrying no usable address therefore cannot perform a
+       mutation here — it has nothing to sign the change with.
+       That is now a reachable case rather than a theoretical one: a GitHub
+       identity with no email is a valid session (ACN-006), and one that had
+       been granted ownership by subject would reach this line. It is a refusal
+       the caller can understand and act on by adding an address to their
+       account, so it answers 403 rather than the blanket 500 a malformed
+       server identity gets. */
     let actorEmail;
     try {
       actorEmail = normalizeEmail(user.email);
     } catch {
-      throw internalError();
+      throw forbidden();
     }
     const actor = { sub: user.sub, name: user.name, email: actorEmail };
     const nowMs = nowFn();
@@ -2026,7 +1693,7 @@ export function createAccessHandler(dependencies = {}) {
       const reconciled = await reconcileMarkers(ctx, routeKey, body);
       primary = reconciled.completed
         ? noContentResponse()
-        : await dispatch(ctx, routeKey, body, reconciled.marker);
+        : await dispatch(ctx, routeKey, body);
     } catch (error) {
       failure = error;
     }
@@ -2070,14 +1737,6 @@ export function createAccessHandler(dependencies = {}) {
       return errorResponse(error);
     }
   };
-}
-
-/** Require exactly `size` bytes from an injected or production `randomBytes`. */
-function assertRandomBytes(bytes, size) {
-  if (!(bytes instanceof Uint8Array) || bytes.length !== size) {
-    throw new TypeError("Invalid random bytes");
-  }
-  return bytes;
 }
 
 const productionHandler = createAccessHandler();

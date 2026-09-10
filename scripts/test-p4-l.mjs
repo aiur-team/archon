@@ -62,7 +62,6 @@ function session(role, extra = {}) {
     sub: owner ? "owner-1" : "member-1",
     email: owner ? OWNER_EMAIL : EDITOR_EMAIL,
     name: "",
-    roles: ["member"],
     canComment: true,
     canEdit: true,
     doc: DOC,

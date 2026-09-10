@@ -260,10 +260,14 @@ test("a hosted module cannot reach the collaboration tree", () => {
 });
 
 test("a hosted module cannot import a package the hosted tree may not use", () => {
-  /* One merged manifest is the union of two dependency sets, and the union carries
-     `@netlify/identity` - the legacy authority the hosted boundary exists to keep
-     out. Root-declared is necessary and not sufficient: `allowed-pkg` below is
-     declared, resolves, and links, and is still refused for hosted code. */
+  /* One merged manifest is the union of two dependency sets, so root-declared is
+     necessary and not sufficient: `allowed-pkg` below is declared, resolves, and
+     links, and is still refused for hosted code. The union used to carry
+     `@netlify/identity` - the legacy authority this barrier was written to keep
+     out - and no longer does, because ACN-006 deleted the last import of it.
+     The rule stays: the union is still wider than the hosted subset, and a
+     package added to the root manifest for a collaboration handler must not
+     silently become importable by hosted code. */
   assertRejected(
     (root, deploy) =>
       write(

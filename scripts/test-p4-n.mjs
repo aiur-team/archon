@@ -1694,7 +1694,7 @@ async function runtimeMatrix() {
 
   const editDeps = (overrides = {}) => ({
     requireOrigin: () => {},
-    identify: async () => ({ sub: SUB, email: EMAIL, name: NAME, isOrg: true }),
+    identify: async () => ({ sub: SUB, email: EMAIL, emailVerified: true, name: NAME }),
     resolveRole: async () => roleAccess("editor"),
     capabilitiesFor: access.capabilitiesFor,
     readEffectiveBase: async () => ({
@@ -2038,7 +2038,7 @@ async function runtimeMatrix() {
 
   {
     const handler = editModule.createEditHandler(editDeps({
-      identify: async () => ({ sub: SUB, email: "", name: "", isOrg: false }),
+      identify: async () => ({ sub: SUB, email: "", emailVerified: false, name: "" }),
       applyText: async (input) => {
         eq(input.author, { sub: SUB, name: "", email: "" },
           "the route forwards the canonical empty actor without projection");
@@ -2059,7 +2059,7 @@ async function runtimeMatrix() {
   ];
 
   const pendingDeps = (overrides = {}) => ({
-    identify: async () => ({ sub: SUB, email: EMAIL, name: NAME, isOrg: true }),
+    identify: async () => ({ sub: SUB, email: EMAIL, emailVerified: true, name: NAME }),
     resolveRole: async () => roleAccess("editor"),
     capabilitiesFor: access.capabilitiesFor,
     assertIdentitySub: access.assertIdentitySub,

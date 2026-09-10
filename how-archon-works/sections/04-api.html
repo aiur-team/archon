@@ -30,7 +30,7 @@ decides who may see HTML, and it never decides who may write.</p>
 <div class="tw"><table>
   <thead><tr><th>Route</th><th class="n">Methods</th><th>Takes</th><th>Returns</th><th>Requires</th></tr></thead>
   <tbody>
-    <tr><td><code>/api/session</code></td><td class="n">GET</td><td><code>?doc=</code> six-hex</td><td><code>sub, email, name, roles, canComment, canEdit, doc, role, shared, canSuggest, canAccept, canShare, canSeeMembers</code></td><td><span class="pill warn">A session</span></td></tr>
+    <tr><td><code>/api/session</code></td><td class="n">GET</td><td><code>?doc=</code> six-hex</td><td><code>sub, email, name, canComment, canEdit, doc, role, shared, canSuggest, canAccept, canShare, canSeeMembers</code></td><td><span class="pill warn">A session</span></td></tr>
     <tr><td><code>/api/pending</code></td><td class="n">GET</td><td><code>?doc=</code></td><td>Map of <code>aid</code> &rarr; <code>{text, by, at, pr, via?}</code></td><td><span class="pill ok">canRead</span></td></tr>
     <tr><td><code>/api/threads</code></td><td class="n">GET, POST</td><td><code>?doc=&amp;limit=&amp;cursor=</code>; body <code>{kind, section, anchor|title, docVersion, body}</code></td><td><code>{threads, nextCursor}</code>; <code>201 {thread}</code></td><td><span class="pill ok">canRead</span> / <span class="pill warn">canComment</span></td></tr>
     <tr><td><code>/api/threads/:doc/:id</code></td><td class="n">POST, PATCH</td><td><code>{body}</code> to reply; <code>{status}</code> to resolve or reopen</td><td><code>{thread}</code></td><td><span class="pill warn">canComment</span> / <span class="pill warn">threadControl</span></td></tr>
@@ -41,9 +41,10 @@ decides who may see HTML, and it never decides who may write.</p>
     <tr><td><code>/api/access</code></td><td class="n">GET, POST, PATCH, DELETE</td><td><code>{doc, email|sub, role}</code> or <code>{doc, orgDefault}</code></td><td><code>{doc, orgDefault, members, invitations}</code>; <code>204</code> on write</td><td><span class="pill risk">canSeeMembers</span> / owner and <code>canShare</code></td></tr>
     <tr><td><code>/api/access/transfer</code></td><td class="n">POST</td><td><code>{doc, sub}</code></td><td><code>204</code></td><td><span class="pill risk">Owner only</span></td></tr>
     <tr><td><code>/api/realtime-token</code></td><td class="n">GET</td><td><code>?doc=</code></td><td><code>{token, issued, expires, capability, clientId}</code>, or <b>204</b></td><td><span class="pill ok">canRead</span></td></tr>
-    <tr><td><code>/api/login</code></td><td class="n">POST</td><td>Form: <code>email, password, next</code></td><td><code>302</code>, always</td><td><span class="pill n">Origin</span></td></tr>
-    <tr><td><code>/api/logout</code></td><td class="n">POST</td><td>&mdash;</td><td><code>302 /login/</code>, always</td><td><span class="pill n">Origin</span></td></tr>
-    <tr><td><code>/api/accept</code></td><td class="n">POST</td><td><code>{token, password}</code></td><td><code>204</code></td><td><span class="pill n">Origin</span></td></tr>
+    <tr><td><code>/api/hosted/session</code></td><td class="n">GET</td><td>&mdash;</td><td><code>{v, authenticated}</code>, or that plus <code>accountId, login, email, emailVerified, csrfToken</code></td><td><span class="pill n">Nothing</span></td></tr>
+    <tr><td><code>/api/hosted/auth/start</code></td><td class="n">POST</td><td>Form: <code>destination, switchAccount?, csrfToken?</code></td><td><code>303</code> to Auth0</td><td><span class="pill n">Origin</span></td></tr>
+    <tr><td><code>/api/hosted/auth/callback</code></td><td class="n">GET</td><td><code>?code=&amp;state=</code></td><td><code>303</code>, always</td><td><span class="pill n">Signed state</span></td></tr>
+    <tr><td><code>/api/hosted/auth/logout</code></td><td class="n">POST</td><td>&mdash;</td><td><code>303</code> to Auth0's logout</td><td><span class="pill n">Origin + CSRF</span></td></tr>
     <tr><td><code>retention</code></td><td class="n">&mdash;</td><td>No route. <code>schedule: "@daily"</code></td><td>One log line</td><td><span class="pill n">Nothing</span></td></tr>
   </tbody>
 </table></div>
@@ -58,11 +59,12 @@ actor stored anywhere comes from the session.</p>
 PATCH and DELETE is otherwise exposed to cross-site forgery. <code>requireOrigin(req)</code> is the first
 statement, not a middleware someone can forget to register.</p>
 
-<p><b>Failure is uninformative on purpose.</b> <code>/api/accept</code> collapses a malformed token, an
-expired token and an already-redeemed token into one identical <code>400
-{"error":"invalid-invitation"}</code>. <code>/api/suggestion</code> answers a withdrawal by a
-non-author with <code>403</code> if they can read the document and <code>404</code> if they cannot, so
-the status code never reveals that a suggestion exists.</p>
+<p><b>Failure is uninformative on purpose.</b> The sign-in routes collapse a bad state, a bad PKCE
+verifier, a refused consent and an unexpected scope into one <code>/login/?status=expired</code>, because a
+message that distinguished them would tell somebody probing the callback which half of the transaction they
+had guessed right. <code>/api/suggestion</code> answers a withdrawal by a non-author with <code>403</code>
+if they can read the document and <code>404</code> if they cannot, so the status code never reveals that a
+suggestion exists.</p>
 
 <p><b>Absence is a status code, not an error.</b> With no <code>ABLY_API_KEY</code>,
 <code>/api/realtime-token</code> returns <b>204</b>. That single switch is the entire degradation story:
@@ -86,11 +88,17 @@ otherwise.</p>
 </table></div>
 
 <p>Resolution has a fixed precedence: the bound owner subject, then an explicit grant by subject, then an
-unexpired invitation matched on the proven email, then the organisation default if the caller's email
-matches the configured domain, then <code>none</code>. Sharing is opt-in &mdash; a document with no
-access record behaves exactly as it did before roles existed, and shows no share panel. The first owner
-is captured once from the <code>DOC_OWNERS</code> environment variable on that person's first sign-in,
-by a create-only write, so ownership is not first-come and not seizable from the client.</p>
+unexpired invitation matched on the caller's <b>verified</b> email, then <code>PUBLIC_DEFAULT_ROLE</code>
+for any other signed-in caller, then <code>none</code>. "Verified" is load-bearing: sign-in is open to
+anyone with a Google or GitHub account, so anyone can present any address to an identity provider, and the
+provider's verification claim is the only thing standing between an invitation and whoever guessed the
+invited address. An unverified match resolves <code>none</code> and consumes nothing, and an identity
+carrying no address at all is a valid session that matches no invitation.</p>
+
+<p>Sharing is opt-in &mdash; a document with no access record behaves exactly as it did before roles
+existed, and shows no share panel. The first owner is captured once from the <code>DOC_OWNERS</code>
+environment variable on that person's first sign-in, by a create-only write, so ownership is not
+first-come and not seizable from the client.</p>
 
 <p class="note"><b><code>threadControl: "own"</code> is checked inside the compare-and-swap, not before
 it.</b> A commenter resolving somebody else's thread is refused against every fresh draft the retry loop
@@ -100,10 +108,20 @@ for "already resolved" would tell a non-owner the thread's current status.</p>
 <details class="dx">
   <summary><span class="dxn">A</span>The edge gate, and how it learns which document it is guarding</summary>
   <div class="dxb">
-    <p>The gate runs on <code>/*</code>, excluding <code>/login/*</code>, <code>/api/*</code> and
-    <code>/_assets/*</code>, and it passes <code>/invite/*</code> through unconditionally because
-    invitation acceptance has to be reachable before a session exists. No session redirects to
-    <code>/login/?next=</code>.</p>
+    <p>The gate runs on <code>/*</code> and decides the exclusions in code: <code>/api/*</code>,
+    <code>/_assets/*</code>, <code>/login/*</code>, <code>/docs/*</code>, <code>/publish/*</code> and
+    <code>/invite/*</code> pass through with no session check, because sign-in and the invitation prompt
+    have to be reachable before a session exists. Everything else is gated, which is a default-deny
+    rather than a list of guarded paths.</p>
+    <p>It has no way to validate the session cookie itself &mdash; that means reading the session store,
+    and this is a Deno edge function. So it asks: an internal <code>GET /api/hosted/session</code> with the
+    browser's <code>Cookie</code> header forwarded and nothing else. That route is one of the pass-through
+    paths, so the call cannot recurse. There are exactly three answers. A principal continues below. Nobody
+    gets <code>303 /login/?destination=</code>, and the destination is only ever a path the sign-in
+    grammar already accepts &mdash; a path that is not expressible is simply not offered, rather than
+    widening the allowlist. And an outage &mdash; a 503, a malformed body, a transport failure &mdash; gets
+    a plain <code>503</code> and <b>never</b> a redirect to sign-in, because telling a visitor they are
+    signed out is a claim the gate has no evidence for.</p>
     <p>With a session, it fetches the downstream response and reads <b>only the first line of the body</b>,
     which must match <code>&lt;meta name="doc-id" content="([0-9a-f]{6})"&gt;</code> within 96 bytes.
     That is why <code>&#123;&#123;DOC_ID&#125;&#125;</code> is the first placeholder in <code>layout.html</code>: it lets the

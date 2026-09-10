@@ -90,19 +90,26 @@ const RESERVED_ROUTES = new Set([
 const NEVER_DESCEND = new Set(["_site", "node_modules", "dist", "netlify"]);
 
 /**
- * Root static page trees, copied under their own name: `_site/login/...`.
+ * Root static page trees, copied under their own name: `_site/invite/...`.
+ *
+ * `login` used to be here too, and the repository carried two sign-in pages:
+ * the collaboration layer's email-and-password form at the root, and the hosted
+ * Auth0 page under `netlify/public/`. Both wrote `login/index.html` and the
+ * copy order decided which one a visitor actually got — a real file collision
+ * standing in for a decision nobody had written down. ACN-006 deleted the root
+ * page along with the password login it posted to, so the hosted tree is now
+ * the only source of `login/index.html`.
  */
-const STATIC_PAGES = ["login", "invite"];
+const STATIC_PAGES = ["invite"];
 
 /**
  * The hosted application's static tree. Its contents land at the root of the
  * publish tree, so `netlify/public/viewer.js` becomes `_site/viewer.js` and
  * `netlify/public/login/index.html` becomes `_site/login/index.html`.
  *
- * It is copied after `STATIC_PAGES`, which is the whole reason the two can both
- * carry a `login/index.html`: the hosted sign-in page is the one a merged site
- * has to serve, and the later write is what decides that rather than a rule
- * written down somewhere else.
+ * It is still copied after `STATIC_PAGES`, but nothing rests on the order any
+ * more: there is one `login/index.html` in the repository now, and it is this
+ * tree's.
  */
 const HOSTED_TREE = "netlify/public";
 
@@ -665,8 +672,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
 
   // Preflight everything before the previous _site/ is deleted or any
   // committed artifact is rebuilt: enhancer type, the document inventory,
-  // every entry in an existing login/ or invite/ tree, and the two renderer
-  // origins.
+  // every entry in an existing invite/ tree, and the two renderer origins.
   const enhancer = preflightEnhancer(root);
   const renderer = await preflightRenderShell(root, production);
 
@@ -719,7 +725,6 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
   }
 
   for (const page of STATIC_PAGES) copyStaticTree(root, outDir, page);
-  // After the root pages, so the hosted sign-in page wins `login/index.html`.
   // The tree's *contents* land at the root: `netlify/public/viewer.js` is
   // `/viewer.js`, `netlify/public/publish/authorize.html` is
   // `/publish/authorize.html`, which is the path the rewrite above names.

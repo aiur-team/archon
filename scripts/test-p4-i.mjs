@@ -931,7 +931,6 @@ const SESSION_EDITOR = {
   sub: "u_fixture_writer_31",
   email: "writer@example.com",
   name: "Dale Ferro",
-  roles: ["member"],
   canComment: true,
   canEdit: true,
   doc: DOC_ID,

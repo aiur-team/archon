@@ -1763,7 +1763,7 @@ decides who may see HTML, and it never decides who may write.</p>
 <div class="tw"><table>
   <thead><tr><th data-aid="a4999528e">Route</th><th class="n" data-aid="a7e4ac680">Methods</th><th data-aid="a4cea3ddc">Takes</th><th data-aid="a9582a02f">Returns</th><th data-aid="a63c2178c">Requires</th></tr></thead>
   <tbody>
-    <tr><td data-aid="ab400b287"><code>/api/session</code></td><td class="n" data-aid="af030bbbd">GET</td><td data-aid="a549df16a"><code>?doc=</code> six-hex</td><td data-aid="ab7663f66"><code>sub, email, name, roles, canComment, canEdit, doc, role, shared, canSuggest, canAccept, canShare, canSeeMembers</code></td><td data-aid="a81580999"><span class="pill warn">A session</span></td></tr>
+    <tr><td data-aid="ab400b287"><code>/api/session</code></td><td class="n" data-aid="af030bbbd">GET</td><td data-aid="a549df16a"><code>?doc=</code> six-hex</td><td data-aid="ab7663f66"><code>sub, email, name, canComment, canEdit, doc, role, shared, canSuggest, canAccept, canShare, canSeeMembers</code></td><td data-aid="a81580999"><span class="pill warn">A session</span></td></tr>
     <tr><td data-aid="a8dc85364"><code>/api/pending</code></td><td class="n" data-aid="a319a0fd2">GET</td><td data-aid="a074652fb"><code>?doc=</code></td><td data-aid="aabcc2a02">Map of <code>aid</code> &rarr; <code>{text, by, at, pr, via?}</code></td><td data-aid="a6ece221e"><span class="pill ok">canRead</span></td></tr>
     <tr><td data-aid="a97248e01"><code>/api/threads</code></td><td class="n" data-aid="ad68106b0">GET, POST</td><td data-aid="a8b7b3b37"><code>?doc=&amp;limit=&amp;cursor=</code>; body <code>{kind, section, anchor|title, docVersion, body}</code></td><td data-aid="a2c1e8b63"><code>{threads, nextCursor}</code>; <code>201 {thread}</code></td><td data-aid="a9abced2e"><span class="pill ok">canRead</span> / <span class="pill warn">canComment</span></td></tr>
     <tr><td data-aid="ad589e6a8"><code>/api/threads/:doc/:id</code></td><td class="n" data-aid="acedd1db9">POST, PATCH</td><td data-aid="a4ebcf56e"><code>{body}</code> to reply; <code>{status}</code> to resolve or reopen</td><td data-aid="a086ff148"><code>{thread}</code></td><td data-aid="a7b277084"><span class="pill warn">canComment</span> / <span class="pill warn">threadControl</span></td></tr>
@@ -1774,9 +1774,10 @@ decides who may see HTML, and it never decides who may write.</p>
     <tr><td data-aid="a705fc5c3"><code>/api/access</code></td><td class="n" data-aid="a9ff80548">GET, POST, PATCH, DELETE</td><td data-aid="afe837c63"><code>{doc, email|sub, role}</code> or <code>{doc, orgDefault}</code></td><td data-aid="ab5e88951"><code>{doc, orgDefault, members, invitations}</code>; <code>204</code> on write</td><td data-aid="ac05c91c7"><span class="pill risk">canSeeMembers</span> / owner and <code>canShare</code></td></tr>
     <tr><td data-aid="a32cec05a"><code>/api/access/transfer</code></td><td class="n" data-aid="a35128445">POST</td><td data-aid="ac8bc2c9c"><code>{doc, sub}</code></td><td data-aid="a1cc64195"><code>204</code></td><td data-aid="ae91f02d9"><span class="pill risk">Owner only</span></td></tr>
     <tr><td data-aid="a194e4864"><code>/api/realtime-token</code></td><td class="n" data-aid="a040f791c">GET</td><td data-aid="a4e761de1"><code>?doc=</code></td><td data-aid="aa6c946f2"><code>{token, issued, expires, capability, clientId}</code>, or <b>204</b></td><td data-aid="a16db58fc"><span class="pill ok">canRead</span></td></tr>
-    <tr><td data-aid="a6a17b494"><code>/api/login</code></td><td class="n" data-aid="aa544e542">POST</td><td data-aid="abddb3e9d">Form: <code>email, password, next</code></td><td data-aid="a9e64ef12"><code>302</code>, always</td><td data-aid="a44ab85a2"><span class="pill n">Origin</span></td></tr>
-    <tr><td data-aid="aebadc7d2"><code>/api/logout</code></td><td class="n" data-aid="adcca9a62">POST</td><td data-aid="a1b93795b">&mdash;</td><td data-aid="a49592b24"><code>302 /login/</code>, always</td><td data-aid="a1b26abe0"><span class="pill n">Origin</span></td></tr>
-    <tr><td data-aid="a356fe188"><code>/api/accept</code></td><td class="n" data-aid="a5c2f4a49">POST</td><td data-aid="a27edd2e3"><code>{token, password}</code></td><td data-aid="a6719bdcc"><code>204</code></td><td data-aid="aa1b5b7a5"><span class="pill n">Origin</span></td></tr>
+    <tr><td data-aid="a6a95feeb"><code>/api/hosted/session</code></td><td class="n" data-aid="aeee914a7">GET</td><td data-aid="a338737e4">&mdash;</td><td data-aid="a0f78cf6f"><code>{v, authenticated}</code>, or that plus <code>accountId, login, email, emailVerified, csrfToken</code></td><td data-aid="a91211a7c"><span class="pill n">Nothing</span></td></tr>
+    <tr><td data-aid="aac41aa76"><code>/api/hosted/auth/start</code></td><td class="n" data-aid="aa544e542">POST</td><td data-aid="a323fdaed">Form: <code>destination, switchAccount?, csrfToken?</code></td><td data-aid="a5c8691ee"><code>303</code> to Auth0</td><td data-aid="a44ab85a2"><span class="pill n">Origin</span></td></tr>
+    <tr><td data-aid="a2c0559c8"><code>/api/hosted/auth/callback</code></td><td class="n" data-aid="aff2bcff9">GET</td><td data-aid="ad62942d8"><code>?code=&amp;state=</code></td><td data-aid="a07f7ac12"><code>303</code>, always</td><td data-aid="ad4862cec"><span class="pill n">Signed state</span></td></tr>
+    <tr><td data-aid="adeb2d983"><code>/api/hosted/auth/logout</code></td><td class="n" data-aid="adcca9a62">POST</td><td data-aid="a1b93795b">&mdash;</td><td data-aid="ab39ae2a0"><code>303</code> to Auth0's logout</td><td data-aid="a1b26abe0"><span class="pill n">Origin + CSRF</span></td></tr>
     <tr><td data-aid="a31e69adf"><code>retention</code></td><td class="n" data-aid="a312a21ba">&mdash;</td><td data-aid="aa997c8d6">No route. <code>schedule: "@daily"</code></td><td data-aid="a5e0d6814">One log line</td><td data-aid="a44819483"><span class="pill n">Nothing</span></td></tr>
   </tbody>
 </table></div>
@@ -1791,11 +1792,12 @@ actor stored anywhere comes from the session.</p>
 PATCH and DELETE is otherwise exposed to cross-site forgery. <code>requireOrigin(req)</code> is the first
 statement, not a middleware someone can forget to register.</p>
 
-<p data-aid="aaf90dbea"><b>Failure is uninformative on purpose.</b> <code>/api/accept</code> collapses a malformed token, an
-expired token and an already-redeemed token into one identical <code>400
-{"error":"invalid-invitation"}</code>. <code>/api/suggestion</code> answers a withdrawal by a
-non-author with <code>403</code> if they can read the document and <code>404</code> if they cannot, so
-the status code never reveals that a suggestion exists.</p>
+<p data-aid="aaf90dbea"><b>Failure is uninformative on purpose.</b> The sign-in routes collapse a bad state, a bad PKCE
+verifier, a refused consent and an unexpected scope into one <code>/login/?status=expired</code>, because a
+message that distinguished them would tell somebody probing the callback which half of the transaction they
+had guessed right. <code>/api/suggestion</code> answers a withdrawal by a non-author with <code>403</code>
+if they can read the document and <code>404</code> if they cannot, so the status code never reveals that a
+suggestion exists.</p>
 
 <p data-aid="a3b5485bf"><b>Absence is a status code, not an error.</b> With no <code>ABLY_API_KEY</code>,
 <code>/api/realtime-token</code> returns <b>204</b>. That single switch is the entire degradation story:
@@ -1818,12 +1820,18 @@ otherwise.</p>
   </tbody>
 </table></div>
 
-<p data-aid="a313e3a06">Resolution has a fixed precedence: the bound owner subject, then an explicit grant by subject, then an
-unexpired invitation matched on the proven email, then the organisation default if the caller's email
-matches the configured domain, then <code>none</code>. Sharing is opt-in &mdash; a document with no
-access record behaves exactly as it did before roles existed, and shows no share panel. The first owner
-is captured once from the <code>DOC_OWNERS</code> environment variable on that person's first sign-in,
-by a create-only write, so ownership is not first-come and not seizable from the client.</p>
+<p data-aid="a5e221a8e">Resolution has a fixed precedence: the bound owner subject, then an explicit grant by subject, then an
+unexpired invitation matched on the caller's <b>verified</b> email, then <code>PUBLIC_DEFAULT_ROLE</code>
+for any other signed-in caller, then <code>none</code>. "Verified" is load-bearing: sign-in is open to
+anyone with a Google or GitHub account, so anyone can present any address to an identity provider, and the
+provider's verification claim is the only thing standing between an invitation and whoever guessed the
+invited address. An unverified match resolves <code>none</code> and consumes nothing, and an identity
+carrying no address at all is a valid session that matches no invitation.</p>
+
+<p data-aid="a2b5af8ec">Sharing is opt-in &mdash; a document with no access record behaves exactly as it did before roles
+existed, and shows no share panel. The first owner is captured once from the <code>DOC_OWNERS</code>
+environment variable on that person's first sign-in, by a create-only write, so ownership is not
+first-come and not seizable from the client.</p>
 
 <p class="note" data-aid="a7294225b"><b><code>threadControl: "own"</code> is checked inside the compare-and-swap, not before
 it.</b> A commenter resolving somebody else's thread is refused against every fresh draft the retry loop
@@ -1833,10 +1841,20 @@ for "already resolved" would tell a non-owner the thread's current status.</p>
 <details class="dx">
   <summary><span class="dxn">A</span>The edge gate, and how it learns which document it is guarding</summary>
   <div class="dxb">
-    <p data-aid="a24ab63f8">The gate runs on <code>/*</code>, excluding <code>/login/*</code>, <code>/api/*</code> and
-    <code>/_assets/*</code>, and it passes <code>/invite/*</code> through unconditionally because
-    invitation acceptance has to be reachable before a session exists. No session redirects to
-    <code>/login/?next=</code>.</p>
+    <p data-aid="ae3db6def">The gate runs on <code>/*</code> and decides the exclusions in code: <code>/api/*</code>,
+    <code>/_assets/*</code>, <code>/login/*</code>, <code>/docs/*</code>, <code>/publish/*</code> and
+    <code>/invite/*</code> pass through with no session check, because sign-in and the invitation prompt
+    have to be reachable before a session exists. Everything else is gated, which is a default-deny
+    rather than a list of guarded paths.</p>
+    <p data-aid="aba83f8ba">It has no way to validate the session cookie itself &mdash; that means reading the session store,
+    and this is a Deno edge function. So it asks: an internal <code>GET /api/hosted/session</code> with the
+    browser's <code>Cookie</code> header forwarded and nothing else. That route is one of the pass-through
+    paths, so the call cannot recurse. There are exactly three answers. A principal continues below. Nobody
+    gets <code>303 /login/?destination=</code>, and the destination is only ever a path the sign-in
+    grammar already accepts &mdash; a path that is not expressible is simply not offered, rather than
+    widening the allowlist. And an outage &mdash; a 503, a malformed body, a transport failure &mdash; gets
+    a plain <code>503</code> and <b>never</b> a redirect to sign-in, because telling a visitor they are
+    signed out is a claim the gate has no evidence for.</p>
     <p data-aid="a04fb30b3">With a session, it fetches the downstream response and reads <b>only the first line of the body</b>,
     which must match <code>&lt;meta name="doc-id" content="([0-9a-f]{6})"&gt;</code> within 96 bytes.
     That is why <code>&#123;&#123;DOC_ID&#125;&#125;</code> is the first placeholder in <code>layout.html</code>: it lets the
@@ -2666,7 +2684,7 @@ function installEdit() {
   const ENTRY_KEYS = ["text", "by", "at", "pr"];
   const ACTOR_KEYS = ["sub", "name", "email"];
   const SESSION_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+    "sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SUGGESTION_KEYS = [
@@ -2906,20 +2924,11 @@ function installEdit() {
     if (typeof body.sub !== "string") return null;
     if (typeof body.email !== "string") return null;
     if (typeof body.name !== "string") return null;
-    const roleNames = Array.isArray(body.roles) ? Object.getOwnPropertyNames(body.roles) : [];
-    if (!Array.isArray(body.roles) || !Object.isFrozen(body.roles) ||
-        Object.getPrototypeOf(body.roles) !== Array.prototype ||
-        Object.getOwnPropertySymbols(body.roles).length !== 0 || body.roles.length !== 1 ||
-        roleNames.length !== 2 || roleNames[0] !== "0" || roleNames[1] !== "length") return null;
-    const roleDescriptor = Object.getOwnPropertyDescriptor(body.roles, "0");
-    const lengthDescriptor = Object.getOwnPropertyDescriptor(body.roles, "length");
-    if (roleDescriptor === undefined || !hasOwn(roleDescriptor, "value") ||
-        roleDescriptor.enumerable !== true || roleDescriptor.writable !== false ||
-        roleDescriptor.configurable !== false ||
-        (roleDescriptor.value !== "member" && roleDescriptor.value !== "guest")) return null;
-    if (lengthDescriptor === undefined || !hasOwn(lengthDescriptor, "value") ||
-        lengthDescriptor.value !== 1 || lengthDescriptor.enumerable !== false ||
-        lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return null;
+    /* The frozen one-element `roles` array was validated here descriptor by
+       descriptor. It reported `member` or `guest` from a site-wide organisation
+       email suffix, which ACN-006 removed, so the field is gone from the body
+       and `body.role` -- the document role, which was always the authority --
+       is the only role this page reads. */
     if (typeof body.canComment !== "boolean") return null;
     if (typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;
@@ -4351,7 +4360,7 @@ function installComments() {
   const ANCHOR_KEYS = ["block", "exact", "prefix", "suffix", "start"];
   const PAGE_KEYS = ["threads", "nextCursor"];
   const ENVELOPE_KEYS = ["thread"];
-  const SESSION_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit", "doc", "role",
+  const SESSION_KEYS = ["sub", "email", "name", "canComment", "canEdit", "doc", "role",
     "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
   const SESSION_FLAGS = ["canComment", "canEdit", "shared", "canSuggest", "canAccept",
     "canShare", "canSeeMembers"];
@@ -5873,7 +5882,6 @@ function installComments() {
     if (typeof detail.sub !== "string" || !SUB.test(detail.sub)) return null;
     if (typeof detail.name !== "string" || typeof detail.email !== "string") return null;
     if (!ROLES.includes(detail.role)) return null;
-    if (!Array.isArray(detail.roles) || !Object.isFrozen(detail.roles)) return null;
     for (const flag of SESSION_FLAGS) if (typeof detail[flag] !== "boolean") return null;
     return { sub: detail.sub, role: detail.role, canComment: detail.canComment };
   }
@@ -7684,9 +7692,9 @@ runHistory();
   const RAIL_EDGE_PX = 4;
   const COLOURS = 8;
 
-  const LEGACY_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit"];
+  const LEGACY_KEYS = ["sub", "email", "name", "canComment", "canEdit"];
   const FINAL_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const FINAL_BOOLEANS = ["shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
@@ -7907,7 +7915,6 @@ runHistory();
       if (typeof detail.sub !== "string") return null;
       if (typeof detail.email !== "string") return null;
       if (typeof detail.name !== "string") return null;
-      if (!validRoles(detail.roles)) return null;
       if (typeof detail.canComment !== "boolean") return null;
       if (typeof detail.canEdit !== "boolean") return null;
 
@@ -7924,49 +7931,22 @@ runHistory();
     }
   }
 
-  // A frozen dense ordinary string array: exact index descriptors, the ordinary
-  // `length`, and nothing else. Checked by descriptor so an index accessor is
-  // never invoked.
-  function validRoles(roles) {
-    try {
-      if (!Array.isArray(roles)) return false;
-      if (Object.getPrototypeOf(roles) !== Array.prototype) return false;
-      if (!Object.isFrozen(roles)) return false;
-      if (Object.getOwnPropertySymbols(roles).length !== 0) return false;
-
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(roles, "length");
-      if (lengthDescriptor === undefined || !own(lengthDescriptor, "value")) return false;
-      if (lengthDescriptor.enumerable !== false) return false;
-      if (lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return false;
-
-      const length = lengthDescriptor.value;
-      if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) return false;
-
-      const names = Object.getOwnPropertyNames(roles);
-      if (names.length !== length + 1) return false;
-      if (names[length] !== "length") return false;
-
-      for (let index = 0; index < length; index += 1) {
-        if (names[index] !== String(index)) return false;
-        const descriptor = Object.getOwnPropertyDescriptor(roles, names[index]);
-        if (descriptor === undefined || !own(descriptor, "value")) return false;
-        if (descriptor.enumerable !== true) return false;
-        if (descriptor.writable !== false || descriptor.configurable !== false) return false;
-        if (typeof descriptor.value !== "string") return false;
-      }
-      return true;
-    } catch (ignored) {
-      return false;
-    }
-  }
-
-  // Presentation only. The sole `member` role is the one shape that may carry a
-  // server-supplied name; everything else is privacy-conservatively external
-  // and broadcasts the literal `Guest`. There is no email, sub, role or domain
-  // fallback in either branch.
+  // Presentation only, and conservative by construction: a name is broadcast to
+  // everybody else in the document, so it is only ever the name of somebody the
+  // owner has actually admitted.
+  //
+  // The test used to be the compatibility `roles` field -- one of `member` or
+  // `guest`, derived from a site-wide organisation email suffix. ACN-006 removed
+  // that suffix rule and the field with it, so the successor is the document
+  // role, which is both the thing that was always authoritative and a narrower
+  // question: not "does this address end the right way" but "has this person
+  // been given access to this document". A caller with no role, and a legacy
+  // body that carries no role at all, both stay `Guest`.
+  //
+  // There is no email, sub, role or domain fallback in either branch.
   function deriveLabel(detail) {
-    const roles = detail.roles;
-    if (roles.length !== 1 || roles[0] !== "member") return "Guest";
+    const role = detail.role;
+    if (typeof role !== "string" || !ROLE_VALUES.includes(role) || role === "none") return "Guest";
 
     const name = detail.name;
     if (typeof name !== "string" || CONTROL_RE.test(name)) return "Member";
@@ -9908,8 +9888,6 @@ function mountSharePanel(event) {
     }
     if (typeof body.sub !== "string" || typeof body.email !== "string"
       || typeof body.name !== "string") return null;
-    if (!Array.isArray(body.roles) || body.roles.length !== 1) return null;
-    if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
     if (typeof body.canComment !== "boolean" || typeof body.canEdit !== "boolean") return null;
     if (body.doc !== docId) return null;
     if (!SESSION_ROLES.includes(body.role)) return null;
@@ -9989,7 +9967,7 @@ function mountSharePanel(event) {
     + " If setup stops during transfer, the new owner may need to invite you again.";
   const DEFAULT_LABELS = { commenter: "Commenter", viewer: "Viewer", none: "No access" };
   const FINAL_SESSION_FIELDS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const SESSION_ROLES = ["owner", "editor", "commenter", "viewer", "none"];
@@ -10083,10 +10061,12 @@ function validSession(body, docId) {
   if (typeof body.sub !== "string") return null;
   if (typeof body.email !== "string") return null;
   if (typeof body.name !== "string") return null;
-  if (!Array.isArray(body.roles)) return null;
-  for (const entry of body.roles) {
-    if (typeof entry !== "string") return null;
-  }
+  /* `roles` used to be checked here. It carried one of `member` or `guest`,
+     derived from a site-wide organisation email suffix, and it was never
+     authorization -- the document role below is. ACN-006 removed the suffix
+     rule, which left the field with nothing to report, so it is gone from the
+     body rather than always saying `guest`. A field that is always the same
+     value is one a client eventually believes. */
   if (typeof body.canComment !== "boolean") return null;
   if (typeof body.canEdit !== "boolean") return null;
   if (reservedPresent === 0) return body;
@@ -10099,8 +10079,6 @@ function validSession(body, docId) {
   if (typeof body.canAccept !== "boolean") return null;
   if (typeof body.canShare !== "boolean") return null;
   if (typeof body.canSeeMembers !== "boolean") return null;
-  if (body.roles.length !== 1) return null;
-  if (body.roles[0] !== "member" && body.roles[0] !== "guest") return null;
   return body;
 }
 
