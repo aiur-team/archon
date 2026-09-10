@@ -1,4 +1,4 @@
-import { identify } from "../lib/identity.mjs";
+import { normalizeEmailOrNull } from "../lib/hosted/email.mjs";
 import {
   capabilitiesFor,
   resolveRole,
@@ -33,7 +33,43 @@ const ACCESS_UNAVAILABLE = "Document access is temporarily unavailable.";
 const UNVERIFIED = "Document access could not be verified.";
 const DENIED = "You do not have access to this document.";
 
-const IDENTITY_KEYS = ["sub", "email", "name", "isOrg"];
+const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
+
+/** The route the gate asks who a request is. Outside the gate's own gated set. */
+const SESSION_ROUTE = "/api/hosted/session";
+
+/**
+ * The session cookie's name, restated for one question: is there anything to ask
+ * about? It is `netlify/lib/hosted/identity.mjs`'s `SESSION_COOKIE`, copied
+ * rather than imported because that module reaches a store and this is an edge
+ * function. The name is a constant of the deployment, and a wrong copy fails in
+ * the safe direction -- every visitor is asked about, which is the old behaviour.
+ */
+const SESSION_COOKIE = "__Host-archon_session";
+
+/**
+ * The sign-in destination grammar ACN-005 froze, restated here for the one
+ * question this file asks of it: is the path we are about to refuse one the
+ * sign-in page is allowed to send a visitor back to?
+ *
+ * It is a copy rather than an import because `netlify/lib/hosted/identity.mjs`
+ * *throws* on a rejected destination and reaches a store on the way to the rest
+ * of its surface, and this is an edge function that must answer with a plain
+ * redirect and no store at all. The authority is still that module: it
+ * validates the value again when the callback returns, and a value this pattern
+ * admitted but that one refuses is a sign-in that fails closed rather than a
+ * redirect that goes somewhere unintended.
+ */
+const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
+const RESERVED_FIRST_SEGMENTS = [
+  "login",
+  "invite",
+  "publish",
+  "docs",
+  "api",
+  "_assets",
+  "_render",
+];
 const CONTENT_TYPE_TOKEN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
 const CONTENT_TYPE_QUOTED = '"(?:[\\t !#-\\[\\]-~]|\\\\[\\t !-~])*"';
 const CONTENT_TYPE_PARAMETER = `;[\\t ]*${CONTENT_TYPE_TOKEN}[\\t ]*=[\\t ]*(?:${CONTENT_TYPE_TOKEN}|${CONTENT_TYPE_QUOTED})[\\t ]*`;
@@ -87,14 +123,19 @@ function exactMutableRecord(
 
 function validIdentity(
   value: unknown,
-): value is { sub: string; email: string; name: string; isOrg: boolean } {
+): value is {
+  sub: string;
+  email: string;
+  emailVerified: boolean;
+  name: string;
+} {
   const record = exactMutableRecord(value, IDENTITY_KEYS);
   return (
     record !== null &&
     typeof record.sub === "string" &&
     typeof record.email === "string" &&
-    typeof record.name === "string" &&
-    typeof record.isOrg === "boolean"
+    typeof record.emailVerified === "boolean" &&
+    typeof record.name === "string"
   );
 }
 
@@ -243,7 +284,7 @@ function readHostEnv(): Record<string, string | undefined> {
 
 /**
  * The renderer host serves exactly the four shell files under an internal
- * rewrite and refuses everything else. It never calls `identify()`, never
+ * rewrite and refuses everything else. It never resolves a session, never
  * resolves a role, never emits `Set-Cookie` and never emits a body on a
  * refusal, so an artifact-rendering origin holds no identity authority.
  */
@@ -291,6 +332,7 @@ async function applicationHost(
   req: Request,
   url: URL,
   context: GateContext,
+  env: Record<string, string | undefined>,
 ): Promise<Response> {
   /* The renderer shell prefix is never a first-party page on the application
      origin, so it is a not-found before any session check. */
@@ -320,7 +362,7 @@ async function applicationHost(
     return withApplicationHeaders(passed);
   }
 
-  return withApplicationHeaders(await sessionGate(req, url, context));
+  return withApplicationHeaders(await sessionGate(req, url, context, env));
 }
 
 export default async function gate(
@@ -335,34 +377,186 @@ export default async function gate(
      with `X-Robots-Tag: noindex` so it is never indexed. */
   if (host === "other") return notFoundForeignHost();
   if (host === "render") return renderHost(url, context, env);
-  return applicationHost(req, url, context);
+  return applicationHost(req, url, context, env);
+}
+
+
+/** The three answers the gate's identity step may produce, and nothing else. */
+type SessionOutcome =
+  | { kind: "principal"; user: { sub: string; email: string; emailVerified: boolean; name: string } }
+  | { kind: "anonymous" }
+  | { kind: "unavailable" };
+
+/**
+ * Who this request is, by asking the hosted session route.
+ *
+ * The gate cannot validate the session cookie itself. Doing so means reading the
+ * session store, and the store adapter is a Node module over `@netlify/blobs`
+ * that this Deno edge function neither can nor should link. So the gate asks the
+ * one service that already answers the question, over an internal request that
+ * forwards the browser's `Cookie` header and nothing else.
+ *
+ * `/api/hosted/session` is inside the gate's `isApplicationPassThrough` set, so
+ * the subrequest reaches the route without re-entering this function's session
+ * logic. That is what stops the call from recursing, and it is a property of the
+ * route's *address* rather than of a flag somebody has to remember to set.
+ *
+ * ## The response is read for one thing, and the rest is dropped
+ *
+ * The route issues a fresh pre-login CSRF binding on every call, signed-in or
+ * not, as a `Set-Cookie`. That header belongs to the browser that asked, and
+ * this browser did not ask — it asked for a document. So nothing from the
+ * subrequest's headers reaches the visitor: the gate reads the JSON body and
+ * discards the response. The cost is one abandoned transient record per gated
+ * page view, bounded by that record's fifteen-minute lifetime.
+ *
+ * ## Three outcomes, and the third is the point
+ *
+ * A store outage must not read as "signed out". `identifyHosted` throws rather
+ * than answering null for exactly that reason, and the route turns the throw
+ * into a 503; anything that is not a well-formed 200 — a 503, a non-JSON body, a
+ * body that does not match the frozen contract, a transport failure — is an
+ * outage here too. Failing closed on a malformed answer is deliberate: the only
+ * other reading of "I could not understand the reply" is "nobody is signed in",
+ * which is the fail-open this whole shape exists to avoid.
+ */
+async function resolveSession(
+  req: Request,
+  url: URL,
+  env: Record<string, string | undefined>,
+): Promise<SessionOutcome> {
+  const cookie = req.headers.get("cookie");
+
+  /* A request carrying no session cookie has nothing for the route to validate:
+     `identifyHosted` answers null on the absent cookie before it reads anything.
+     Asking anyway is not merely wasted -- the route mints a fresh pre-login CSRF
+     binding on every call, so each cookieless request would write a record this
+     gate then discards, and an unauthenticated flood of gated URLs would be free
+     write amplification against the same store every signed-in read depends on.
+     The check is presence-only: a cookie that is expired, revoked or forged is
+     still resolved by the route, because only the route can tell. */
+  if (cookie === null || !cookie.includes(`${SESSION_COOKIE}=`)) {
+    return { kind: "anonymous" };
+  }
+
+  const headers = new Headers();
+  headers.set("cookie", cookie);
+  headers.set("accept", "application/json");
+
+  /* The configured origin in preference to the request's own. They are the same
+     origin on a configured deployment -- `classifyHost` has already refused every
+     other hostname by the time this runs -- but a deployment with no `HOSTED_*`
+     configuration classifies every host as the application, and there the
+     request's own origin is the only one there is. Preferring the configured
+     value means the session cookie is never re-sent to a host the deployment did
+     not name whenever it has named one. */
+  const configured = applicationOrigin(env);
+  const target = new URL(SESSION_ROUTE, configured ?? url.origin).toString();
+
+  let response: Response;
+  try {
+    response = await fetch(target, {
+      method: "GET",
+      headers,
+      redirect: "manual",
+    });
+    if (!(response instanceof Response)) return { kind: "unavailable" };
+  } catch {
+    return { kind: "unavailable" };
+  }
+
+  let body: unknown;
+  try {
+    if (response.status !== 200) return { kind: "unavailable" };
+    body = await response.json();
+  } catch {
+    return { kind: "unavailable" };
+  }
+
+  const record = body as Record<string, unknown> | null;
+  if (record === null || typeof record !== "object" || Array.isArray(record)) {
+    return { kind: "unavailable" };
+  }
+  if (record.v !== 1 || typeof record.authenticated !== "boolean") {
+    return { kind: "unavailable" };
+  }
+  if (record.authenticated === false) return { kind: "anonymous" };
+
+  if (
+    typeof record.accountId !== "string" ||
+    typeof record.login !== "string" ||
+    typeof record.emailVerified !== "boolean" ||
+    (record.email !== null && typeof record.email !== "string")
+  ) {
+    return { kind: "unavailable" };
+  }
+
+  /* The same projection `netlify/lib/identity.mjs` performs, because the two
+     have to agree about who somebody is. One address grammar, applied on the way
+     in, so the value that becomes an invitation-key hash is the same value on
+     both paths; an address the grammar refuses degrades to "no usable address"
+     rather than denying a visitor a document they already own. */
+  const email = normalizeEmailOrNull(record.email) ?? "";
+  const user = {
+    sub: record.accountId,
+    email,
+    emailVerified: record.emailVerified === true && email !== "",
+    name: record.login,
+  };
+  return { kind: "principal", user };
 }
 
 /**
- * The application host's session and access gate: the pre-existing edge logic,
- * unchanged. Identity is validated, the document's `doc-id` meta line is read
- * from the first bytes of the body, the role is resolved and the response is
- * replayed only when the role can read.
+ * The `?destination=` a refused path is worth offering the sign-in page, or
+ * `null` when the path is not one ACN-005's grammar accepts.
+ *
+ * A path that is not expressible is simply not offered. Widening the allowlist
+ * to make one fit is the failure this returns `null` instead of: the grammar is
+ * the sign-in flow's redirect allowlist, and a gate that could add to it would
+ * be a redirect-injection primitive reachable by requesting a URL.
+ */
+function signInDestination(pathname: string): string | null {
+  const slug = COLLABORATION_SLUG.exec(pathname);
+  if (slug === null || RESERVED_FIRST_SEGMENTS.includes(slug[1])) return null;
+  return pathname;
+}
+
+/**
+ * The application host's session and access gate. Identity is resolved through
+ * the hosted session route, the document's `doc-id` meta line is read from the
+ * first bytes of the body, the role is resolved and the response is replayed
+ * only when the role can read.
  */
 async function sessionGate(
   req: Request,
   url: URL,
   context: GateContext,
+  env: Record<string, string | undefined>,
 ): Promise<Response> {
-  let user: unknown;
-  try {
-    user = await identify(req);
-  } catch {
-    return plainResponse(503, AUTH_UNAVAILABLE);
-  }
+  const outcome = await resolveSession(req, url, env);
 
-  if (user === null) {
-    const next = encodeURIComponent(url.pathname + url.search);
+  /* An outage is a plain 503 and never a sign-in redirect. Sending a visitor to
+     `/login/` during a store outage would tell them they are signed out, which
+     is a claim this gate has no evidence for — and it would put them on a page
+     whose own bootstrap reads the same unreachable store. */
+  if (outcome.kind === "unavailable") return plainResponse(503, AUTH_UNAVAILABLE);
+
+  if (outcome.kind === "anonymous") {
+    /* 303 rather than 302: the answer to "who are you" is a different resource
+       from the one that was asked for, and a browser must fetch it with GET
+       whatever this request's method was. `HEAD` is a GET for this purpose too. */
+    const destination = signInDestination(url.pathname);
+    const location =
+      destination === null
+        ? "/login/"
+        : `/login/?destination=${encodeURIComponent(destination)}`;
     return new Response(null, {
-      status: 302,
-      headers: { Location: `/login/?next=${next}`, ...NO_STORE },
+      status: 303,
+      headers: { Location: location, ...NO_STORE },
     });
   }
+
+  const user: unknown = outcome.user;
   if (!validIdentity(user)) return plainResponse(500, UNVERIFIED);
 
   const isHead = req.method === "HEAD";

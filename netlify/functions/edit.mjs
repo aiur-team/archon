@@ -32,7 +32,7 @@ const BODY_KEYS = Object.freeze(["docId", "aid", "text"]);
 const OPTIONAL_BODY_KEYS = Object.freeze(["baseHash"]);
 const IGNORED_BODY_KEYS = Object.freeze(["author", "email", "name"]);
 
-const IDENTITY_KEYS = Object.freeze(["sub", "email", "name", "isOrg"]);
+const IDENTITY_KEYS = Object.freeze(["sub", "email", "emailVerified", "name"]);
 const RECEIPT_KEYS = Object.freeze(["v", "aid", "text", "by", "at", "baseHash", "pr"]);
 const DIRECT_KEYS = Object.freeze([...RECEIPT_KEYS, "via"]);
 const SUGGESTION_KEYS = Object.freeze([...DIRECT_KEYS, "sugId", "acceptedBy", "acceptedAt"]);
@@ -200,12 +200,12 @@ function captureDependencies(dependencies) {
  */
 function requireIdentity(user) {
   if (!isExactRecord(user, IDENTITY_KEYS)) throw fail("invalid-state");
-  const { sub, email, name, isOrg } = user;
+  const { sub, email, emailVerified, name } = user;
   if (typeof sub !== "string" || !SUBJECT_PATTERN.test(sub)) throw fail("invalid-state");
   if (typeof name !== "string" || name.length > MAX_NAME_UNITS) throw fail("invalid-state");
   if (typeof email !== "string") throw fail("invalid-state");
   if (email.length !== 0 && !isNormalizedEmail(email)) throw fail("invalid-state");
-  if (typeof isOrg !== "boolean") throw fail("invalid-state");
+  if (typeof emailVerified !== "boolean") throw fail("invalid-state");
   return user;
 }
 

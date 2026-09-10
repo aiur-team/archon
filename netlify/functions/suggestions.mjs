@@ -399,9 +399,9 @@ async function readBody(req) {
 }
 
 function identityActor(value) {
-  if (!exactObject(value, ["sub", "email", "name", "isOrg"])) throw fail("invalid-state");
+  if (!exactObject(value, ["sub", "email", "emailVerified", "name"])) throw fail("invalid-state");
   const actor = actorOf({ sub: value.sub, name: value.name, email: value.email });
-  if (actor === null || actor.sub === "system" || typeof value.isOrg !== "boolean") {
+  if (actor === null || actor.sub === "system" || typeof value.emailVerified !== "boolean") {
     throw fail("invalid-state");
   }
   return actor;

@@ -28,7 +28,7 @@
  *     a request at a server rather than by the absence of an exception.
  *
  * It is self-supervised and self-contained, in the shape
- * `scripts/test-p4-k-browser.mjs` established: the parent installs exactly one
+ * `scripts/test-p4-a.mjs` established: the parent installs exactly one
  * pinned Playwright and its two browsers into a mode-0700 temporary root outside
  * the worktree, runs the matrix as a detached child under a real deadline,
  * escalates `SIGTERM` to `SIGKILL`, proves the process group is gone and removes

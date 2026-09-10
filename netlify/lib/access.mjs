@@ -40,7 +40,7 @@ import {
 
 /** @typedef {"owner" | "editor" | "commenter" | "viewer" | "none"} DocumentRole */
 /** @typedef {"any" | "own" | "none"} ThreadControl */
-/** @typedef {{ sub: string, email: string, name: string, isOrg: boolean }} AccessUser */
+/** @typedef {{ sub: string, email: string, emailVerified: boolean, name: string }} AccessUser */
 /** @typedef {{ sub: string, name: string, email: string }} AccessActor */
 /**
  * @typedef {{
@@ -159,7 +159,7 @@ export const ORG_DEFAULTS = Object.freeze(["commenter", "viewer", "none"]);
  */
 export const PUBLIC_DEFAULT_ROLES = Object.freeze(["viewer", "commenter"]);
 
-const USER_KEYS = Object.freeze(["email", "isOrg", "name", "sub"]);
+const USER_KEYS = Object.freeze(["email", "emailVerified", "name", "sub"]);
 const ACTOR_KEYS = Object.freeze(["email", "name", "sub"]);
 const DOCUMENT_KEYS = Object.freeze([
   "boundAt",
@@ -894,23 +894,40 @@ function validateOptions(options) {
 }
 
 /**
- * Validate a non-null server user and return its retained normalized email.
- * A bad subject keeps `assertIdentitySub()`'s narrower error; every other
- * malformed user, including an email that fails normalization, is
- * `invalid-user`.
+ * Validate a non-null server user and return the normalized email this
+ * resolution may *match on*. A bad subject keeps `assertIdentitySub()`'s
+ * narrower error; every other malformed user, including an email that fails
+ * normalization, is `invalid-user`.
+ *
+ * ## An unproven address matches nothing
+ *
+ * The returned value is `""` unless `emailVerified` is exactly `true`. Every
+ * email-keyed decision below reads this one result — the `DOC_OWNERS` seed
+ * comparison and the invitation lookup both — so "an invitation is satisfied
+ * only by a proven address" is one line here rather than a condition each call
+ * site has to remember. A signed-in visitor whose provider has not proved the
+ * address is treated exactly like one carrying no address at all: they match no
+ * invitation, seed no ownership, and consume nothing.
+ *
+ * That matters because sign-in is open. Anyone can present any address to an
+ * identity provider; `emailVerified` is the provider's statement that they
+ * proved control of it, and it is the only thing standing between an invitation
+ * and whoever guessed the invited address.
  *
  * @param {unknown} user
- * @returns {string} The normalized email, or `""` for a degraded identity.
+ * @returns {string} The normalized proven email, or `""` for a degraded or
+ *   unverified identity.
  */
 function validateUser(user) {
   if (!hasExactShape(user, USER_KEYS)) {
     throw accessError("invalid-user");
   }
   assertIdentitySub(user.sub);
-  if (!isName(user.name) || typeof user.isOrg !== "boolean" || typeof user.email !== "string") {
+  if (!isName(user.name) || typeof user.emailVerified !== "boolean" ||
+      typeof user.email !== "string") {
     throw accessError("invalid-user");
   }
-  if (user.email === "") {
+  if (user.email === "" || user.emailVerified !== true) {
     return "";
   }
   try {
@@ -1070,7 +1087,6 @@ async function liveInvitation(store, docId, key, email, now) {
  * bound ownerSub
  *   > explicit grant by sub
  *   > live invitation by normalized proven email
- *   > orgDefault for isOrg
  *   > PUBLIC_DEFAULT_ROLE for any other authenticated caller
  *   > none
  * ```
@@ -1216,9 +1232,18 @@ export async function resolveRole(docId, user, options = {}) {
     }
   }
 
-  if (user.isOrg) {
-    return resolved(orgDefault, shared);
-  }
+  /* The organisation tier that used to sit here is gone with `ORG_EMAIL_DOMAIN`
+     (ACN-006). It read a site-wide email suffix and handed `orgDefault` to
+     anybody whose address ended with it, which is both the wrong granularity —
+     one setting for every document on the deployment — and the wrong test, since
+     `endsWith` calls `member@example.com.evil.com` a member. Per-document domain
+     lists replace it in ACN-008, evaluated label by label.
+
+     `orgDefault` itself stays on the stored record and stays validated until
+     ACN-008 removes it. A field left on a record but no longer checked is how a
+     malformed value survives a migration and means something again later; and it
+     is still read below, where an explicit `"none"` suppresses the public
+     default. */
 
   /* The public default is the last thing consulted before denial, and only for
      a signed-in visitor who matched nothing above. An explicit document-level

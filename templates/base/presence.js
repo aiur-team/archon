@@ -47,9 +47,9 @@
   const RAIL_EDGE_PX = 4;
   const COLOURS = 8;
 
-  const LEGACY_KEYS = ["sub", "email", "name", "roles", "canComment", "canEdit"];
+  const LEGACY_KEYS = ["sub", "email", "name", "canComment", "canEdit"];
   const FINAL_KEYS = [
-    "sub", "email", "name", "roles", "canComment", "canEdit",
+    "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
   ];
   const FINAL_BOOLEANS = ["shared", "canSuggest", "canAccept", "canShare", "canSeeMembers"];
@@ -270,7 +270,6 @@
       if (typeof detail.sub !== "string") return null;
       if (typeof detail.email !== "string") return null;
       if (typeof detail.name !== "string") return null;
-      if (!validRoles(detail.roles)) return null;
       if (typeof detail.canComment !== "boolean") return null;
       if (typeof detail.canEdit !== "boolean") return null;
 
@@ -287,49 +286,31 @@
     }
   }
 
-  // A frozen dense ordinary string array: exact index descriptors, the ordinary
-  // `length`, and nothing else. Checked by descriptor so an index accessor is
-  // never invoked.
-  function validRoles(roles) {
-    try {
-      if (!Array.isArray(roles)) return false;
-      if (Object.getPrototypeOf(roles) !== Array.prototype) return false;
-      if (!Object.isFrozen(roles)) return false;
-      if (Object.getOwnPropertySymbols(roles).length !== 0) return false;
+  // Presentation only, and conservative by construction: a label is broadcast to
+  // everybody else in the document, so it is only ever a name somebody chose to
+  // put on a document they were deliberately given access to.
+  //
+  // The test used to be the compatibility `roles` field -- one of `member` or
+  // `guest`, derived from a site-wide organisation email suffix. ACN-006 removed
+  // that suffix rule and the field with it. The successor is the document role,
+  // which is both what was always authoritative and a narrower question: not
+  // "does this address end the right way" but "has this person been given access
+  // to this document".
+  //
+  // `viewer` is deliberately excluded from the named set even though it is a
+  // real role. Sign-in is open to anyone with a Google or GitHub account, and on
+  // a deployment with `PUBLIC_DEFAULT_ROLE` set, `viewer` is exactly the role a
+  // stranger who was never named receives -- the page cannot tell that apart from
+  // an invited viewer, so it broadcasts a name for neither. An owner, editor or
+  // commenter reached that role only by being granted or invited.
+  //
+  // A caller with no role, and a legacy body carrying no role at all, stay
+  // `Guest`. There is no email, sub, role or domain fallback in either branch.
+  const NAMED_ROLES = ["owner", "editor", "commenter"];
 
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(roles, "length");
-      if (lengthDescriptor === undefined || !own(lengthDescriptor, "value")) return false;
-      if (lengthDescriptor.enumerable !== false) return false;
-      if (lengthDescriptor.writable !== false || lengthDescriptor.configurable !== false) return false;
-
-      const length = lengthDescriptor.value;
-      if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) return false;
-
-      const names = Object.getOwnPropertyNames(roles);
-      if (names.length !== length + 1) return false;
-      if (names[length] !== "length") return false;
-
-      for (let index = 0; index < length; index += 1) {
-        if (names[index] !== String(index)) return false;
-        const descriptor = Object.getOwnPropertyDescriptor(roles, names[index]);
-        if (descriptor === undefined || !own(descriptor, "value")) return false;
-        if (descriptor.enumerable !== true) return false;
-        if (descriptor.writable !== false || descriptor.configurable !== false) return false;
-        if (typeof descriptor.value !== "string") return false;
-      }
-      return true;
-    } catch (ignored) {
-      return false;
-    }
-  }
-
-  // Presentation only. The sole `member` role is the one shape that may carry a
-  // server-supplied name; everything else is privacy-conservatively external
-  // and broadcasts the literal `Guest`. There is no email, sub, role or domain
-  // fallback in either branch.
   function deriveLabel(detail) {
-    const roles = detail.roles;
-    if (roles.length !== 1 || roles[0] !== "member") return "Guest";
+    const role = detail.role;
+    if (typeof role !== "string" || !NAMED_ROLES.includes(role)) return "Guest";
 
     const name = detail.name;
     if (typeof name !== "string" || CONTROL_RE.test(name)) return "Member";

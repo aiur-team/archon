@@ -431,7 +431,7 @@ class FakeGitHub {
 }
 
 function identityFor(overrides) {
-  return { sub: SUB, email: EMAIL, name: NAME, isOrg: true, ...overrides };
+  return { sub: SUB, email: EMAIL, emailVerified: true, name: NAME, ...overrides };
 }
 
 async function serverMatrix() {
@@ -655,13 +655,14 @@ async function serverMatrix() {
     eq((await built.handle(post(valid))).status, 500, "a thrown identity is 500");
   }
   for (const [label, identity] of [
-    ["missing email", { sub: SUB, name: NAME, isOrg: true }],
+    ["missing email", { sub: SUB, emailVerified: true, name: NAME }],
     ["empty email", identityFor({ email: "" })],
     ["uppercase email", identityFor({ email: "Avery@example.com" })],
     ["padded email", identityFor({ email: " avery@example.com" })],
     ["bad subject", identityFor({ sub: "-nope" })],
     ["long name", identityFor({ name: "x".repeat(201) })],
-    ["non-boolean isOrg", identityFor({ isOrg: "yes" })],
+    ["non-boolean emailVerified", identityFor({ emailVerified: "yes" })],
+    ["the removed organisation field", { sub: SUB, email: EMAIL, name: NAME, isOrg: true }],
     ["extra field", { ...identityFor({}), role: "owner" }],
   ]) {
     const built = build({ identity });
@@ -670,11 +671,14 @@ async function serverMatrix() {
     eq(built.github.calls.length, 0, `identity with ${label} performs no provider work`);
   }
   {
-    // P4-M owns the write gate now: `isOrg` no longer decides anything, and a
-    // document role without `canEdit` is the denial P4-B's apply path must
-    // never see. The full capability matrix lives in scripts/test-p4-m.mjs.
-    const built = build({ identity: identityFor({ isOrg: false }), role: "owner" });
-    eq((await built.handle(post(valid))).status, 200, "isOrg no longer gates the write");
+    // P4-M owns the write gate: the document role decides, and a role without
+    // `canEdit` is the denial P4-B's apply path must never see. The identity's
+    // own fields decide nothing here -- `isOrg` used to, and after ACN-006
+    // there is no field on an identity that could. The full capability matrix
+    // lives in scripts/test-p4-m.mjs.
+    const built = build({ identity: identityFor({ emailVerified: false }), role: "owner" });
+    eq((await built.handle(post(valid))).status, 200,
+      "no identity field gates the write");
     const denied = build({ role: "viewer" });
     const response = await denied.handle(post(valid));
     eq(response.status, 403, "a role without canEdit is 403");
@@ -1600,7 +1604,6 @@ const SESSION_EDITOR = Object.freeze({
   sub: SUB,
   email: EMAIL,
   name: NAME,
-  roles: Object.freeze(["member"]),
   canComment: true,
   canEdit: true,
   doc: DOC_ID,

@@ -30,10 +30,17 @@
  * ACN-003 folded the second deployment into this one. `netlify/lib/hosted/` and
  * `netlify/functions/hosted-*.mjs` are the hosted publishing application; the rest
  * of `netlify/` is the collaboration deployment. They share a manifest, a lockfile
- * and this gate, and they do not share a boundary: the hosted tree was built to be
- * unable to reach Netlify Identity, `DOC_OWNERS` and the organisation role
- * defaults, which live in `netlify/lib/access.mjs` and `netlify/lib/identity.mjs`
- * one directory up.
+ * and this gate, and the boundary between them runs one way: the hosted tree was
+ * built to be unable to reach `DOC_OWNERS` and the collaboration role defaults,
+ * which live in `netlify/lib/access.mjs` and `netlify/lib/identity.mjs` one
+ * directory up.
+ *
+ * The other direction is open, and ACN-006 made it load-bearing:
+ * `netlify/lib/identity.mjs` now validates the hosted session cookie through
+ * `netlify/lib/hosted/identity.mjs`, because there is one identity system on this
+ * site. That is not a hole in the barrier — the barrier is about which tree is
+ * allowed to *depend* on the other's authority, and the collaboration layer
+ * deferring to the hosted session is exactly the intended direction.
  *
  * So the rules below come in two scopes, and the distinction is load-bearing
  * rather than tidy. Whole-tree rules hold for every deployed module. Hosted-scoped
@@ -89,17 +96,17 @@
  *      gate's "sole barrier". Under two trees it read "nothing under `hosted/`
  *      resolves outside `hosted/`", and containment against the deploy root said
  *      the same thing. It does not any more: `netlify/lib/access.mjs` and
- *      `netlify/lib/identity.mjs` - Netlify Identity, `DOC_OWNERS`, the
- *      organisation role defaults - are now *inside* the deploy tree and one
- *      relative segment away, so `import { DOC_OWNERS } from "../access.mjs"` in a
- *      hosted handler passes W1 and deploys. So the barrier is restated against the
+ *      `netlify/lib/identity.mjs` - `DOC_OWNERS` and the collaboration role
+ *      defaults - are now *inside* the deploy tree and one relative segment away,
+ *      so `import { DOC_OWNERS } from "../access.mjs"` in a hosted handler passes
+ *      W1 and deploys. So the barrier is restated against the
  *      hosted subtree: a hosted module's relative imports must land in
  *      `netlify/lib/hosted/` or on another `netlify/functions/hosted-*.mjs`.
  *      Membership is fail-closed - see `looksHosted` - because a rule that only
  *      applies to files it recognises is a rule a rename turns off.
  *  H0b. **A hosted bare import is one of `HOSTED_DEPENDENCIES`.** One manifest is
- *      the union of two dependency sets, and the union contains
- *      `@netlify/identity`. Root-declared is necessary and not sufficient.
+ *      the union of two dependency sets, and the union is wider than either.
+ *      Root-declared is necessary and not sufficient.
  *  H1. **No dynamic `import(`.** The rules above are exact for a static import,
  *      because the resolver observes every one of them at link time. A dynamic
  *      import inside a function body is never evaluated by this gate and would
@@ -240,12 +247,15 @@ const HOSTED_FUNCTION_PREFIX = "hosted-";
  *
  * The old `hosted/package.json` declared exactly these two, and "every bare import
  * is a declared hosted dependency" was rule 2. One merged manifest would have
- * quietly widened that to the union: the root manifest also declares
- * `@netlify/identity`, which is the legacy authority the hosted boundary exists to
- * keep out, and `import { ... } from "@netlify/identity"` inside a hosted handler
- * would have linked and deployed. So the hosted subset stays a list here, where
- * adding to it is a deliberate edit a reviewer can see, on top of the whole-tree
- * rule that every bare import be root-declared.
+ * quietly widened that to the union: the root manifest also declared
+ * `@netlify/identity`, which was the legacy authority the hosted boundary existed
+ * to keep out, and `import { ... } from "@netlify/identity"` inside a hosted
+ * handler would have linked and deployed. ACN-006 removed that package from the
+ * manifest entirely, so that particular escape is gone — but the subset stays a
+ * list here, where adding to it is a deliberate edit a reviewer can see, on top
+ * of the whole-tree rule that every bare import be root-declared. The union is
+ * still the union, and the next package a collaboration handler needs would
+ * otherwise become importable by hosted code for free.
  */
 const HOSTED_DEPENDENCIES = Object.freeze(["@netlify/blobs", "jose", "tldts"]);
 
@@ -797,8 +807,8 @@ function resolutionFault(record, context) {
     const name = packageOf(specifier);
     if (!dependencies.has(name)) return `${from} imports ${name}, which is not a dependency in package.json`;
     /* And the hosted subset on top, because one merged manifest is the union of two
-       dependency sets. `@netlify/identity` is root-declared and is exactly the
-       legacy authority the hosted boundary exists to keep out. */
+       dependency sets, and a package declared for a collaboration handler must not
+       become importable by hosted code for free. */
     if (hosted && !HOSTED_DEPENDENCIES.includes(name)) {
       return `${from} imports ${name}, which is not one of the packages the hosted deploy tree may import (${HOSTED_DEPENDENCIES.join(", ")})`;
     }
@@ -824,9 +834,9 @@ function resolutionFault(record, context) {
   /* The hosted boundary, at the strength it had before the merge. Under two deploy
      trees this was "nothing under `hosted/` resolves outside `hosted/`", and the
      move alone would have dissolved it: `netlify/lib/access.mjs` and
-     `netlify/lib/identity.mjs` - Netlify Identity, `DOC_OWNERS` and the
-     organisation role defaults - are now one relative segment from every hosted
-     module and are inside the deploy tree, so containment says nothing about them.
+     `netlify/lib/identity.mjs` - `DOC_OWNERS` and the collaboration role
+     defaults - are now one relative segment from every hosted module and are
+     inside the deploy tree, so containment says nothing about them.
      A hosted handler importing `../access.mjs` would have deployed green. The rule
      is therefore restated against the hosted subtree rather than the deploy root,
      which is the same barrier addressed to the same code. */

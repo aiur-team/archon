@@ -259,6 +259,20 @@ jobs:
           # the application's registrable site with every other gate green.
           node --test scripts/check-site-hostname.test.mjs
           node --experimental-vm-modules --test netlify/lib/identity.test.mjs
+          # ACN-006's suites. `identity.test.mjs` above drives the collaboration
+          # identity boundary over an injected session store; these three cover
+          # what that change reaches. `access.test.mjs` holds the role
+          # precedence after the organisation tier was removed -- including the
+          # stale-subject row a Netlify Identity grant leaves behind.
+          # `session.test.mjs` is the route-level suite for `/api/session`, and
+          # is where the store-outage 503 is proved rather than asserted.
+          # `identity-removal.test.mjs` is the grep the acceptance criteria ask
+          # for, run as a test: no import of the retired identity package, no
+          # `/api/login`, `/api/logout` or `/api/accept`, and exactly one
+          # `login/index.html` in the publish tree.
+          node --test netlify/lib/access.test.mjs
+          node --test netlify/functions/session.test.mjs
+          node --test netlify/test/identity-removal.test.mjs
           # The permanent regression runners are standalone supervisors, not
           # `node --test` files: each one names itself, forks its own matrices
           # and prints its own PASS lines. They are heavier than the docbuild
@@ -288,10 +302,6 @@ jobs:
           # needs operator credentials no build has, so CI runs it only far
           # enough to prove it refuses to touch a provider account without
           # them -- which is also what names the file for the inventory gate.
-          #
-          # test-p4-k.mjs has one mode and needs no credential; its sibling
-          # browser runner installs its own pinned Playwright and Chromium the
-          # same way test-p4-a.mjs does.
           node scripts/test-p4-a.mjs
           node scripts/test-p4-b.mjs
           node scripts/test-p4-i.mjs
@@ -320,8 +330,6 @@ jobs:
           # all -- the edge function is TypeScript for Deno, so the runner
           # transpiles it with the TypeScript the typecheck step installed.
           node scripts/test-access-row.mjs
-          node --experimental-vm-modules scripts/test-p4-k.mjs contract
-          node scripts/test-p4-k-browser.mjs
           # AHU-005's renderer oracle. It builds `renderer/` into a temporary
           # root, serves that output on its own loopback origin under the
           # header set the build spells out as `headersFile`, and drives the
@@ -407,20 +415,6 @@ jobs:
       # themselves rather than surfacing as an unexplained crash.
       - name: the published package works for a clean consumer
         run: node scripts/test-publish-package.mjs
-
-      # P4-K's hosted oracle creates and deletes a real Netlify site and needs
-      # operator credentials no build has. It is named here so the test
-      # inventory gate above sees it wired, and it runs only when an operator
-      # supplies the credentials -- never on an untrusted pull request.
-      - name: P4-K hosted acceptance (operator credentials only)
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-        run: |
-          if [ -n "${NETLIFY_AUTH_TOKEN:-}" ]; then
-            node scripts/test-p4-k-hosted.mjs
-          else
-            echo "SKIP scripts/test-p4-k-hosted.mjs (no operator credentials)"
-          fi
 
       # One site, one deploy configuration, and its safety is mostly in what it
       # does NOT say.

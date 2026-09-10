@@ -163,7 +163,7 @@ function providerHeaders(key) {
 }
 
 /**
- * @param {{sub: string, isOrg: boolean}} session
+ * @param {{sub: string}} session
  * @param {string} docId
  * @returns {Promise<null | {
  *   token: string,
@@ -183,8 +183,7 @@ export async function mintToken(session, docId) {
     session === null ||
     typeof session !== "object" ||
     typeof session.sub !== "string" ||
-    !IDENTITY_SUB_RE.test(session.sub) ||
-    typeof session.isOrg !== "boolean"
+    !IDENTITY_SUB_RE.test(session.sub)
   ) {
     throw new TypeError("Invalid realtime session");
   }
@@ -197,9 +196,27 @@ export async function mintToken(session, docId) {
       [serverChannel]: ["subscribe"],
       [clientChannel]: ["publish", "subscribe"],
     });
-    const clientId = session.isOrg
-      ? session.sub
-      : `g_${randomBytes(6).toString("hex")}`;
+    /* Presence identity, and the privacy default behind it.
+       The rule used to read `isOrg`: a member of the configured organisation
+       appeared on the presence channel under their stable subject, and everybody
+       else got a fresh random id per connection, so an outsider's presence could
+       not be correlated across documents or sessions. Most people were outsiders,
+       so anonymity was the common case and the exception was narrow.
+       ACN-006 removed the organisation rule, and nothing that survives it means
+       what `isOrg` meant. `emailVerified` looked like the successor and is not:
+       sign-in is open to anyone with a Google or GitHub account and both prove an
+       address, so keying on it would make the anonymous branch nearly unreachable
+       and quietly invert the default this line exists to hold. The document role
+       is not available here either, and would not separate an invited viewer from
+       one arriving by `PUBLIC_DEFAULT_ROLE` if it were.
+       So every session gets a fresh per-connection identifier. That is what an
+       outsider always got; it is now what everybody gets, because there is no
+       longer any notion of insider for this decision to read. The cost is that a
+       person's own two tabs are two presences rather than one. The presence label
+       is carried separately in the beat payload, so a participant is still named
+       to the people who should see the name -- the channel identifier just stops
+       being a durable handle on them. */
+    const clientId = `g_${randomBytes(6).toString("hex")}`;
     const requestTimestamp = Date.now();
     const response = await fetch(
       `${ABLY_ORIGIN}/keys/${encodeURIComponent(keyName)}/requestToken`,

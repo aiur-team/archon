@@ -46,7 +46,7 @@ const INVITE_EMAIL = "cleo@example.com";
 const ADDRESSES = [OWNER_EMAIL, EDITOR_EMAIL, VIEWER_EMAIL, INVITE_EMAIL];
 
 const OWNER_SESSION = {
-  sub: "owner-1", email: OWNER_EMAIL, name: "", roles: ["member"],
+  sub: "owner-1", email: OWNER_EMAIL, name: "",
   canComment: true, canEdit: true, doc: DOC, role: "owner", shared: true,
   canSuggest: true, canAccept: true, canShare: true, canSeeMembers: true,
 };

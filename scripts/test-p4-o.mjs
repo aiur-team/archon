@@ -562,18 +562,16 @@ function rawBodyAt(body, bytes) {
 }
 
 /** Production imports are loaded so their real validation helpers run, but
- * the hermetic worker must never resolve a provider SDK. These two packages
- * are the only bare provider imports in the server dependency graph, and the
- * defaults are poisoned because every request test injects its dependencies. */
+ * the hermetic worker must never resolve a provider SDK. `@netlify/blobs` is
+ * the only bare provider import left in the server dependency graph -- ACN-006
+ * removed `@netlify/identity`, and identity now arrives through the hosted
+ * session store, which this store stub already stands in front of. The default
+ * is poisoned because every request test injects its dependencies. */
 function bindProviderPackages() {
   const source = (text) => `data:text/javascript,${encodeURIComponent(text)}`;
   const stubs = new Map([
     ["@netlify/blobs", source(
       'export function getStore(){throw new Error("provider store default reached")}\n',
-    )],
-    ["@netlify/identity", source(
-      'export async function getUser(){throw new Error("provider identity default reached")}\n' +
-      'export function verifyRequestOrigin(){throw new Error("provider origin default reached")}\n',
     )],
   ]);
   registerHooks({
@@ -640,7 +638,7 @@ async function runtimeMatrix() {
     ["bad hash", { ...valid, baseHash: "A".repeat(64) }],
     ["bad version", { ...valid, docVersion: "opaque" }],
     ["long actor name", { ...valid, by: { ...ACTOR, name: "n".repeat(201) } }],
-    ["actor extra", { ...valid, by: { ...ACTOR, isOrg: false } }],
+    ["actor extra", { ...valid, by: { ...ACTOR, emailVerified: false } }],
   ];
   for (const [label, record] of invalidRecords) {
     throwsSync(
@@ -670,7 +668,7 @@ async function runtimeMatrix() {
     requireOriginFn: () => calls.push("origin"),
     identifyFn: async () => {
       calls.push("identify");
-      return { ...ACTOR, isOrg: false };
+      return { ...ACTOR, emailVerified: false };
     },
     resolveRoleFn: async (_identity, _docId, options) => {
       calls.push(["role", options]);
@@ -947,7 +945,7 @@ async function runtimeMatrix() {
     const isolated = new FakeStore();
     response = await many.createSuggestionsHandler(manyDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...ACTOR, email: "", isOrg: false }),
+      identifyFn: async () => ({ ...ACTOR, email: "", emailVerified: false }),
       readEffectiveBaseFn: async () => effective(BASE_HASH, {
         mode: "repository",
         text: BASE_TEXT,
@@ -1137,7 +1135,7 @@ async function runtimeMatrix() {
     const resultReceipt = receipt(BASE_HASH);
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...DECIDER, isOrg: false }),
+      identifyFn: async () => ({ ...DECIDER, emailVerified: false }),
       applyTextFn: async (input) => {
         sequence.push(["apply", clone(input)]);
         return { receipt: resultReceipt, pr: null };
@@ -1189,7 +1187,7 @@ async function runtimeMatrix() {
     const sequence = [];
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...(action === "withdraw" ? ACTOR : DECIDER), isOrg: false }),
+      identifyFn: async () => ({ ...(action === "withdraw" ? ACTOR : DECIDER), emailVerified: false }),
       appendEventFn: async (event) => sequence.push(["event", clone(event)]),
       notifyFn: (_context, notification) => {
         sequence.push(["notify", clone(notification)]);
@@ -1222,14 +1220,14 @@ async function runtimeMatrix() {
     isolated.seed(key(valid), valid);
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...DECIDER, isOrg: false }),
+      identifyFn: async () => ({ ...DECIDER, emailVerified: false }),
       resolveRoleFn: async () => access("none"),
     }))(request("POST", "/api/suggestion", actionBody("withdraw")), CONTEXT);
     await responseJson(response, 404, "not-found");
     const missing = new FakeStore();
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => missing,
-      identifyFn: async () => ({ ...DECIDER, isOrg: false }),
+      identifyFn: async () => ({ ...DECIDER, emailVerified: false }),
       resolveRoleFn: async () => access("none"),
     }))(request("POST", "/api/suggestion", actionBody("withdraw")), CONTEXT);
     await responseJson(response, 404, "not-found");
@@ -1240,7 +1238,7 @@ async function runtimeMatrix() {
     isolated.seed(key(valid), valid);
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...ACTOR, isOrg: false }),
+      identifyFn: async () => ({ ...ACTOR, emailVerified: false }),
       resolveRoleFn: async () => access("none"),
     }))(request("POST", "/api/suggestion", actionBody("withdraw")), CONTEXT);
     eq(await response.text(), '{"ok":true}', "revoked author may withdraw known suggestion");
@@ -1252,7 +1250,7 @@ async function runtimeMatrix() {
     let reads = 0;
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...DECIDER, isOrg: false }),
+      identifyFn: async () => ({ ...DECIDER, emailVerified: false }),
       readApplyReceiptFn: async () => { reads += 1; return replayed; },
       applyTextFn: async () => { throw new Error("replay must not reapply"); },
       notifyFn: () => { throw new Error("replay must not notify"); },
@@ -1276,7 +1274,7 @@ async function runtimeMatrix() {
     let sideEffects = 0;
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...DECIDER, isOrg: false }),
+      identifyFn: async () => ({ ...DECIDER, emailVerified: false }),
       readApplyReceiptFn: async () => directReceipt,
       applyTextFn: async () => { sideEffects += 1; },
       appendEventFn: async () => { sideEffects += 1; },
@@ -1293,7 +1291,7 @@ async function runtimeMatrix() {
     isolated.seed(key(valid), valid);
     response = await one.createSuggestionHandler(oneDeps({
       storeFn: () => isolated,
-      identifyFn: async () => ({ ...(action === "withdraw" ? ACTOR : DECIDER), isOrg: false }),
+      identifyFn: async () => ({ ...(action === "withdraw" ? ACTOR : DECIDER), emailVerified: false }),
       appendEventFn: async () => { throw new Error("audit unavailable"); },
     }))(request("POST", "/api/suggestion", actionBody(action, reason)), CONTEXT);
     ok([500, 503].includes(response.status), `${action} append failure fails safely`);

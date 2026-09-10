@@ -3,7 +3,6 @@
  * P4-J — the permanent access write-path test runner.
  *
  *   node scripts/test-p4-j.mjs contract
- *   node scripts/test-p4-j.mjs hosted
  *
  * The entry point is its own supervisor. Parent mode validates `P4J_BASE` when
  * one is supplied -- CI supplies none, see `verifyBase()` --
@@ -13,10 +12,11 @@
  * `SIGKILL` after 2,000 ms, reaps it, and confirms it is gone before printing
  * anything. A direct `--worker` invocation without the nonce fails.
  *
- * `contract` is hermetic: the worker loads the production `access.mjs` through
- * `vm.SourceTextModule` inside one poisoned context, links only in-realm
- * modules, and rejects every undeclared import. `hosted` is the disposable
- * Netlify Identity proof and requires operator-supplied credentials.
+ * `contract` is the only mode, and it is hermetic: the worker loads the
+ * production `access.mjs` through `vm.SourceTextModule` inside one poisoned
+ * context, links only in-realm modules, and rejects every undeclared import.
+ * The disposable Netlify Identity proof that used to be the second mode went
+ * with the thing it proved -- see the note above `MODES`.
  */
 
 import { spawn } from "node:child_process";
@@ -30,7 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SELF), "..");
-const MODES = ["contract", "hosted"];
+const MODES = ["contract"];
 const DEADLINE_MS = 120_000;
 const TERM_GRACE_MS = 2_000;
 const MAX_STREAM_BYTES = 1024 * 1024;
@@ -40,23 +40,22 @@ const BASE_PATTERN = /^[0-9a-f]{40}$/;
 const EXPECTED_CONTRACT_STDOUT = [
   "PASS  P4-J P3-H GET regression",
   "PASS  P4-J owner-only access mutations",
-  "PASS  P4-J account and recovery boundary",
+  "PASS  P4-J invitation boundary",
   "PASS  P4-J transfer, audit, and crash matrix",
   "PASS  P4-J fence and lease guard matrix",
   "",
 ].join("\n");
 
-const EXPECTED_HOSTED_STDOUT =
-  "PASS  P4-J hosted access, Identity, retention, and cleanup\n";
-
-const HOSTED_ENV = [
-  "P4J_BASE",
-  "NETLIFY_AUTH_TOKEN",
-  "NETLIFY_ACCOUNT_SLUG",
-  "P4J_TEST_EMAIL",
-  "P4J_MAILBOX_API_URL",
-  "P4J_MAILBOX_API_TOKEN",
-];
+/* The hosted oracle this runner used to carry is gone with what it proved.
+   It created a disposable Netlify site, enabled Netlify Identity on it,
+   provisioned four fixture accounts with passwords, signed each in through
+   `POST /api/login`, and waited on a real mailbox for the recovery link an
+   invitation used to send. ACN-006 removed every one of those steps: sign-in is
+   Auth0, there is no password route to post to, and inviting somebody sends no
+   mail. An equivalent oracle would have to drive a real identity provider's
+   consent screen, which is a provider account and a decision that belongs to an
+   operator rather than to this file. The contract mode is unaffected and is
+   what CI runs. */
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -86,7 +85,7 @@ function git(args) {
  * So the gate is kept, and is opt-in: supply `P4J_BASE` and every condition
  * below is enforced as specified; omit it and the run is against the working
  * tree, announced on stderr by the parent so the omission is visible in the log
- * rather than inferred. `hosted` mode still requires it -- see `HOSTED_ENV`.
+ * rather than inferred.
  */
 function verifyBase({ announce = false } = {}) {
   const base = process.env.P4J_BASE;
@@ -133,20 +132,8 @@ function verifyBase({ announce = false } = {}) {
   return base;
 }
 
-function requireHostedEnv() {
-  for (const name of HOSTED_ENV) {
-    const value = process.env[name];
-    if (typeof value !== "string" || value.length === 0) {
-      die(`${name} must be a non-empty operator-supplied value`);
-    }
-  }
-}
-
 async function parent(mode) {
   verifyBase({ announce: true });
-  if (mode === "hosted") {
-    requireHostedEnv();
-  }
 
   const nonce = randomBytes(32).toString("hex");
   const tempRoot = await mkdtemp(join(tmpdir(), "p4j-root-"));
@@ -243,7 +230,7 @@ async function parent(mode) {
   }
   await rm(tempRoot, { recursive: true, force: true });
 
-  const expected = mode === "contract" ? EXPECTED_CONTRACT_STDOUT : EXPECTED_HOSTED_STDOUT;
+  const expected = EXPECTED_CONTRACT_STDOUT;
   const problems = [];
   if (timedOut) problems.push(`worker exceeded the ${DEADLINE_MS} ms deadline`);
   if (finished.code !== 0) {
@@ -282,12 +269,7 @@ async function worker(mode) {
 
   const workspace = await mkdtemp(join(tempRoot, "run-"));
   try {
-    if (mode === "contract") {
-      await runContract(workspace);
-    } else {
-      requireHostedEnv();
-      await runHosted(workspace);
-    }
+    await runContract(workspace);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -306,8 +288,7 @@ const CONVENIENCE_BODY_READERS = new Set([
   "json", "text", "formData", "arrayBuffer", "blob", "bytes",
 ]);
 const CAS_FORBIDDEN = new Set([
-  "appendEvent", "appendEventFn", "listUsersFn", "createUserFn",
-  "requestPasswordRecoveryFn", "randomBytesFn", "nowFn", "read", "mutate",
+  "appendEvent", "appendEventFn", "randomBytesFn", "nowFn", "read", "mutate",
 ]);
 const TOKEN_WORDS = [/nf_jwt/i, /nf_refresh/i, /decodeJwt/i, /jwtDecode/i, /\bcookie\b/i];
 
@@ -413,7 +394,7 @@ async function runContract(workspace) {
   await mkdir(fakes, { recursive: true });
   const cryptoFake = join(fakes, "crypto.mjs");
   const blobsFake = join(fakes, "blobs.mjs");
-  const identityFake = join(fakes, "identity-sdk.mjs");
+  const identityFake = join(fakes, "identity-lib.mjs");
   const suiteFile = join(workspace, "suite.mjs");
   await writeFile(cryptoFake, CRYPTO_FAKE_SOURCE, "utf8");
   await writeFile(blobsFake, BLOBS_FAKE_SOURCE, "utf8");
@@ -441,8 +422,18 @@ async function runContract(workspace) {
   const specifiers = new Map([
     ["node:crypto", cryptoFake],
     ["@netlify/blobs", blobsFake],
-    ["@netlify/identity", identityFake],
   ]);
+
+  /* `netlify/lib/identity.mjs` is stubbed by path rather than linked.
+     Since ACN-006 it validates the hosted session cookie, so linking it would
+     drag the whole hosted tree -- its store adapter, its contracts and the
+     pinned `tldts` behind them -- into a worker whose subject is the access
+     route. The route reaches identity only through two injected dependencies,
+     both of which every request test below supplies, so the real module is
+     never the thing under test here. It is poisoned rather than emptied: a
+     handler that stopped injecting and fell through to the production default
+     fails loudly instead of quietly resolving nobody. */
+  const libIdentity = resolve(ROOT, "netlify/lib/identity.mjs");
 
   const compile = async (path) => {
     if (modules.has(path)) return modules.get(path);
@@ -460,6 +451,7 @@ async function runContract(workspace) {
       const target = specifier.startsWith("/")
         ? specifier
         : resolve(dirname(referencing.identifier), specifier);
+      if (target === libIdentity) return compile(identityFake);
       if (!target.startsWith(`${ROOT}/netlify/`) && !target.startsWith(`${workspace}/`)) {
         throw new Error(`undeclared module outside the linked graph: ${specifier}`);
       }
@@ -527,16 +519,10 @@ const BLOBS_FAKE_SOURCE = `export function getStore() {
 `;
 
 const IDENTITY_FAKE_SOURCE = `function poison(name) {
-  return () => { throw new Error("direct Identity SDK access (" + name + ") is poisoned"); };
+  return () => { throw new Error("the production " + name + " default is poisoned"); };
 }
-export const admin = {
-  listUsers: poison("admin.listUsers"),
-  createUser: poison("admin.createUser"),
-};
-export const requestPasswordRecovery = poison("requestPasswordRecovery");
-export const recoverPassword = poison("recoverPassword");
-export const getUser = poison("getUser");
-export function verifyRequestOrigin() { throw new Error("direct verifyRequestOrigin is poisoned"); }
+export const identify = poison("identify");
+export const requireOrigin = poison("requireOrigin");
 `;
 
 function suiteSource(accessPath) {
@@ -546,22 +532,6 @@ function suiteSource(accessPath) {
     `import { accessDocumentKey, accessGrantKey, accessInvitationKey, capabilitiesFor, GRANTABLE_ROLES, ORG_DEFAULTS, resolveRole } from ${JSON.stringify(libAccess)};`,
     SUITE_BODY,
   ].join("\n");
-}
-
-/* ---------------- hosted mode ---------------- */
-
-async function runHosted(workspace) {
-  const { runHostedProof } = await import(
-    pathToFileURL(await writeHostedModule(workspace)).href
-  );
-  await runHostedProof({ root: ROOT, workspace });
-  process.stdout.write(EXPECTED_HOSTED_STDOUT);
-}
-
-async function writeHostedModule(workspace) {
-  const file = join(workspace, "hosted.mjs");
-  await writeFile(file, HOSTED_SOURCE, "utf8");
-  return file;
 }
 
 /* ------------------------------------------------------------------ *
@@ -576,12 +546,11 @@ const NOW = "2026-09-03T16:19:25.123Z";
 const NOW_MS = Date.parse(NOW);
 const LIFETIME = 30 * 24 * 60 * 60 * 1000;
 const WRITE_KEY = "access/" + DOC + "/write.json";
-const OWNER = { sub: "u_fixture_owner_11", email: "owner@example.invalid", name: "Fixture Owner", isOrg: false };
+const OWNER = { sub: "a0_1111111111111111111111111111aa11", email: "owner@example.invalid", emailVerified: true, name: "Fixture Owner" };
 const EDITOR = { sub: "u_fixture_editor_22", email: "editor@example.invalid", name: "Fixture Editor" };
 const VIEWER = { sub: "u_fixture_viewer_33", email: "viewer@example.invalid", name: "Fixture Viewer" };
 const INVITEE = "reviewer@partner.invalid";
 const ACTOR = { sub: OWNER.sub, name: OWNER.name, email: OWNER.email };
-const NEW_SUB = "u_fixture_created_55";
 
 let group = "";
 
@@ -624,15 +593,7 @@ function invitationRecord(email, role, invitedAt, accountCreated) {
   };
 }
 function writeRecord(overrides) {
-  return Object.assign({ v: 1, docId: DOC, epoch: 3, lease: null, recovery: null, transfer: null }, overrides || {});
-}
-function recoveryMarker(invitationKey, overrides) {
-  return Object.assign({
-    invitationKey: invitationKey, email: INVITEE, role: "viewer",
-    invitedBy: { sub: ACTOR.sub, name: ACTOR.name, email: ACTOR.email },
-    invitedAt: NOW, expiresAt: new Date(NOW_MS + LIFETIME).toISOString(),
-    phase: "invitation-pending", accountSub: null,
-  }, overrides || {});
+  return Object.assign({ v: 1, docId: DOC, epoch: 3, lease: null, transfer: null }, overrides || {});
 }
 
 function makeStore() {
@@ -773,10 +734,7 @@ function makeReq(method, path, body, options) {
 }
 
 function kitFor(store, overrides) {
-  const counters = {
-    origin: 0, identify: 0, resolve: 0, store: 0, append: 0,
-    list: 0, create: 0, recover: 0, random: 0, now: 0,
-  };
+  const counters = { origin: 0, identify: 0, resolve: 0, store: 0, append: 0, random: 0, now: 0 };
   const events = [];
   let randomSeq = 0;
   const base = {
@@ -792,14 +750,6 @@ function kitFor(store, overrides) {
       }));
       return Promise.resolve({ v: 1 });
     },
-    listUsersFn() { counters.list += 1; return Promise.resolve([]); },
-    createUserFn(input) {
-      counters.create += 1;
-      counters.lastPassword = input.password;
-      counters.lastData = clone(input.data);
-      return Promise.resolve({ id: NEW_SUB, email: input.email });
-    },
-    requestPasswordRecoveryFn() { counters.recover += 1; return Promise.resolve(undefined); },
     randomBytesFn(size) {
       counters.random += 1;
       randomSeq += 1;
@@ -866,8 +816,8 @@ async function groupOne() {
     ],
     invitations: [{ email: INVITEE, role: "viewer", expiresAt: "2099-01-31T00:00:00.000Z" }],
   }, "GET roster body is unchanged");
-  eq([kit.counters.append, kit.counters.list, kit.counters.create, kit.counters.recover, kit.counters.random, kit.counters.now, kit.counters.origin],
-    [0, 0, 0, 0, 0, 0, 0], "GET never reaches a write dependency");
+  eq([kit.counters.append, kit.counters.random, kit.counters.now, kit.counters.origin],
+    [0, 0, 0, 0], "GET never reaches a write dependency");
 
   const anonymous = kitFor(store, { identifyFn() { return null; } });
   const unauth = await anonymous.handler(makeReq("GET", "/api/access?doc=" + DOC, undefined, { contentType: null }));
@@ -1175,7 +1125,7 @@ async function groupTwo() {
     const email = "aged" + index + "@partner.invalid";
     aged.put(await accessInvitationKey(DOC, email), invitationRecord(email, "viewer", new Date(NOW_MS - 7200000).toISOString()));
   }
-  const agedKit = kitFor(aged, { listUsersFn() { return Promise.resolve([{ id: "u_fixture_known_99", email: INVITEE }]); } });
+  const agedKit = kitFor(aged);
   await expectNoContent(await agedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "invitations older than the window do not throttle");
 
   await expectError(await kit.handler(makeReq("POST", "/api/access", { doc: DOC, email: OWNER.email, role: "viewer" })), 409, "conflict", "the owner cannot be invited");
@@ -1230,175 +1180,116 @@ async function groupTwo() {
 }
 
 async function groupThree() {
-  group = "account and recovery boundary";
+  group = "invitation boundary";
   const inviteKey = await accessInvitationKey(DOC, INVITEE);
 
-  // An existing account creates neither an account nor a recovery message.
-  const known = seededStore();
-  const knownKit = kitFor(known, {
-    listUsersFn() { return Promise.resolve([{ id: "u_fixture_known_99", email: INVITEE }]); },
-  });
-  await expectNoContent(await knownKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "invite an existing account");
-  eq(known.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, false), "the invitation is stored exactly");
-  eq([knownKit.counters.create, knownKit.counters.recover], [0, 0], "an existing account is neither created nor mailed");
-  eq(coordinatorOf(known).recovery, null, "the recovery marker is cleared");
-  eq(knownKit.events, [{
+  /* ACN-006 deleted the account-bootstrap saga this group used to drive.
+     Inviting somebody no longer scans the identity provider, creates an account
+     with a generated password, or asks the provider to mail a reset link, so
+     there is no durable recovery marker and nothing to resume. Sign-in is open:
+     the invited person already has an identity, and the invitation is satisfied
+     when they sign in with the invited address verified.
+
+     What is left is one create-only write and one event, and the properties
+     below are what remain worth pinning: the record is exact, the write is
+     create-only, the event follows the state change, and none of re-inviting,
+     renewing or conflicting touches a provider -- because there is no longer a
+     provider dependency to touch. */
+
+  // A plain invitation: exactly one record, exactly one event, no marker.
+  const fresh = seededStore();
+  const freshKit = kitFor(fresh);
+  await expectNoContent(await freshKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "invite a reviewer");
+  eq(fresh.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, false), "the invitation is stored exactly");
+  eq(fresh.peek(inviteKey).accountCreated, false, "and records no account, because none is created");
+  eq(coordinatorOf(fresh).transfer, null, "the coordinator carries no marker");
+  check(!("recovery" in coordinatorOf(fresh)), "and no recovery field at all");
+  eq(freshKit.events, [{
     docId: DOC, actor: ACTOR, kind: "access.invite", target: { email: INVITEE },
     docVersion: null, summary: "invited a reviewer as viewer",
   }], "one exact invite event");
 
-  // A missing account is bootstrapped once.
-  const fresh = seededStore();
-  let accounts = [];
-  const freshKit = kitFor(fresh, {
-    listUsersFn() { return Promise.resolve(accounts.slice()); },
-    createUserFn(input) {
-      accounts.push({ id: NEW_SUB, email: input.email });
-      freshKit.counters.create += 1;
-      freshKit.counters.lastPassword = input.password;
-      freshKit.counters.lastData = clone(input.data);
-      return Promise.resolve({ id: NEW_SUB, email: input.email });
-    },
-  });
-  await expectNoContent(await freshKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "bootstrap a missing account");
-  eq(freshKit.counters.create, 1, "exactly one account is created");
-  eq(freshKit.counters.recover, 1, "exactly one recovery message is requested");
-  eq(freshKit.counters.lastData, { role: "guest" }, "the created account is a guest");
-  check(typeof freshKit.counters.lastPassword === "string" && freshKit.counters.lastPassword.length === 43,
-    "the generated password is 32 base64url bytes");
-  check(/^[A-Za-z0-9_-]+$/.test(freshKit.counters.lastPassword), "the generated password is base64url without padding");
-  eq(fresh.peek(inviteKey).accountCreated, true, "the invitation records the created account");
-  eq(coordinatorOf(fresh).recovery, null, "the marker is cleared before the event");
-  eq(freshKit.events.length, 1, "exactly one invite event");
+  // The write is create-only: a key that appears underneath is a conflict, not
+  // a silent overwrite of somebody else's invitation.
+  const raced = seededStore();
+  const racedKit = kitFor(raced);
+  raced.failSet = (key, value, options) =>
+    (key === inviteKey && options && options.onlyIfNew === true ? "reject" : null);
+  await expectError(await racedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 409, "conflict", "a key created underneath the write conflicts");
+  eq(raced.has(inviteKey), false, "and nothing of ours is written over it");
+  eq(racedKit.events.length, 0, "a conflicted invitation emits no event");
 
-  // A failing recovery retains the marker and repeats without a second account.
-  const flaky = seededStore();
-  let recoveries = 0;
-  let creates = 0;
-  const flakyAccounts = [];
-  const flakyDeps = {
-    listUsersFn() { return Promise.resolve(flakyAccounts.slice()); },
-    createUserFn(input) {
-      creates += 1;
-      flakyAccounts.push({ id: NEW_SUB, email: input.email });
-      return Promise.resolve({ id: NEW_SUB, email: input.email });
-    },
-    requestPasswordRecoveryFn() {
-      recoveries += 1;
-      if (recoveries === 1) return Promise.reject(new Error("mail unavailable"));
-      return Promise.resolve(undefined);
-    },
-  };
-  const flakyKit = kitFor(flaky, flakyDeps);
-  await expectError(await flakyKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 503, "unavailable", "an ambiguous recovery is unavailable");
-  eq(coordinatorOf(flaky).recovery.phase, "recovery-required", "the marker retains the recovery phase");
-  eq(coordinatorOf(flaky).recovery.accountSub, NEW_SUB, "the marker retains the discovered subject");
-  eq(flaky.peek(inviteKey).accountCreated, false, "the invitation is not yet flagged");
+  // A malformed provider answer to the create-only write is refused rather than
+  // read as a success: {modified: true} with nothing else is not a receipt.
+  const garbled = seededStore();
+  garbled.failSet = (key, value, options) =>
+    (key === inviteKey && options && options.onlyIfNew === true ? "garbage" : null);
+  const garbledKit = kitFor(garbled);
+  await expectNoContent(await garbledKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "a bare modified:true is still a write receipt");
 
-  const blocked = kitFor(flaky, flakyDeps);
-  await expectError(await blocked.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 409, "recovery-pending", "an unfinished bootstrap blocks other mutations");
-  await expectError(await blocked.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "commenter" })), 409, "recovery-pending", "a different role does not resume the marker");
+  // A provider failure on the invitation write is an outage, not a bug.
+  const downStore = seededStore();
+  downStore.failSet = (key) => (key === inviteKey ? "throw" : null);
+  const downKit = kitFor(downStore);
+  await expectError(await downKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 503, "unavailable", "an unwritable invitation is unavailable");
+  eq(downKit.events.length, 0, "an unwritten invitation emits no event");
 
-  const resumed = kitFor(flaky, flakyDeps);
-  await expectNoContent(await resumed.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "the identical POST resumes the marker");
-  eq(creates, 1, "resumption never creates a second account");
-  eq(recoveries, 2, "recovery delivery is at least once");
-  eq(coordinatorOf(flaky).recovery, null, "the resumed marker is cleared");
-  eq(flaky.peek(inviteKey).accountCreated, true, "the resumed invitation is flagged");
-  eq(resumed.events.length, 1, "resumption emits the invite event exactly once");
-
-  // A crash before the account-creation call resumes from the stored account.
-  const crashed = seededStore();
-  crashed.put(inviteKey, invitationRecord(INVITEE, "viewer", NOW, false));
-  crashed.put(WRITE_KEY, writeRecord({ recovery: recoveryMarker(inviteKey, { phase: "account-create-requested" }) }));
-  const crashedKit = kitFor(crashed, {
-    listUsersFn() { return Promise.resolve([{ id: NEW_SUB, email: INVITEE }]); },
-    createUserFn() { throw new Error("a discovered account must not be recreated"); },
-  });
-  await expectNoContent(await crashedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "resume account-create-requested");
-  eq(crashed.peek(inviteKey).accountCreated, true, "the resumed invitation is flagged");
-  eq(coordinatorOf(crashed).recovery, null, "the resumed marker is cleared");
-
-  // P2-G consumption between the account flag and the marker clear.
-  const consumed = seededStore();
-  consumed.put(accessGrantKey(DOC, NEW_SUB), grantRecord({ sub: NEW_SUB, email: INVITEE, name: "Fixture Reviewer" }, "viewer", { fromInvitation: "ab".repeat(16) }));
-  consumed.put(WRITE_KEY, writeRecord({ recovery: recoveryMarker(inviteKey, { phase: "recovery-sent", accountSub: NEW_SUB }) }));
-  const consumedKit = kitFor(consumed, {
-    listUsersFn() { return Promise.resolve([{ id: NEW_SUB, email: INVITEE }]); },
-  });
-  await expectNoContent(await consumedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "a consumed invitation clears the marker");
-  eq(consumed.has(inviteKey), false, "a consumed invitation is never recreated");
-  eq(coordinatorOf(consumed).recovery, null, "the marker clears after proven consumption");
-
-  // A live same-role invitation reissues recovery without touching state.
+  // A live same-role invitation is idempotent: nothing to re-send, nothing to
+  // change, and no event for a share that did not happen.
   const live = seededStore();
-  live.put(inviteKey, invitationRecord(INVITEE, "viewer", new Date(NOW_MS - 1000).toISOString(), true));
+  live.put(inviteKey, invitationRecord(INVITEE, "viewer", new Date(NOW_MS - 1000).toISOString(), false));
   const before = live.peek(inviteKey);
-  const liveKit = kitFor(live, {
-    listUsersFn() { return Promise.resolve([{ id: NEW_SUB, email: INVITEE }]); },
-    createUserFn() { throw new Error("a reissue must not create an account"); },
-  });
-  await expectNoContent(await liveKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "same-role reissue");
-  eq(live.peek(inviteKey), before, "a reissue changes no invitation state");
-  eq(liveKit.counters.recover, 1, "a reissue sends exactly one recovery message");
-  eq(liveKit.events.length, 0, "a reissue emits no event");
+  const liveKit = kitFor(live);
+  await expectNoContent(await liveKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "same-role re-invite");
+  eq(live.peek(inviteKey), before, "a re-invite changes no invitation state");
+  eq(liveKit.events.length, 0, "and emits no event");
+
+  // A different role is still a conflict, which is what stops a re-invite from
+  // being a silent role change.
   await expectError(await liveKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "commenter" })), 409, "conflict", "a live invitation with a different role conflicts");
+  eq(live.peek(inviteKey), before, "and still changes nothing");
 
-  const orphan = seededStore();
-  orphan.put(inviteKey, invitationRecord(INVITEE, "viewer", new Date(NOW_MS - 1000).toISOString(), true));
-  const orphanKit = kitFor(orphan, { listUsersFn() { return Promise.resolve([]); } });
-  await expectError(await orphanKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 409, "conflict", "a reissue without an account conflicts");
-
-  const twinned = seededStore();
-  const twinnedKit = kitFor(twinned, {
-    listUsersFn() {
-      return Promise.resolve([
-        { id: "u_fixture_one_01", email: INVITEE },
-        { id: "u_fixture_two_02", email: INVITEE },
-      ]);
-    },
-  });
-  await expectError(await twinnedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 500, "internal-error", "duplicate canonical emails are malformed provider state");
-
-  const endless = seededStore();
-  const endlessKit = kitFor(endless, {
-    listUsersFn(options) {
-      const page = [];
-      for (let index = 0; index < 100; index += 1) {
-        const ordinal = (options.page - 1) * 100 + index;
-        page.push({ id: "u_fixture_bulk_" + ordinal, email: "bulk" + ordinal + "@example.invalid" });
-      }
-      return Promise.resolve(page);
-    },
-  });
-  await expectError(await endlessKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 503, "unavailable", "an unproven Identity scan is unavailable");
-
-  const rejecting = seededStore();
-  const rejectingKit = kitFor(rejecting, { listUsersFn() { return Promise.reject(new Error("identity unavailable")); } });
-  await expectError(await rejectingKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 503, "unavailable", "an Identity rejection is unavailable");
-
-  // An expired same-key invitation is renewed in place.
+  // An expired same-key invitation is renewed in place, and that is a real
+  // transition, so it does emit an event.
   const renewStore = seededStore();
-  renewStore.put(inviteKey, invitationRecord(INVITEE, "commenter", "2020-01-01T00:00:00.000Z", true));
-  const renewKit = kitFor(renewStore, {
-    listUsersFn() { return Promise.resolve([{ id: NEW_SUB, email: INVITEE }]); },
-    createUserFn() { throw new Error("a renewal must not create an account"); },
-  });
+  renewStore.put(inviteKey, invitationRecord(INVITEE, "commenter", "2020-01-01T00:00:00.000Z", false));
+  const renewKit = kitFor(renewStore);
   await expectNoContent(await renewKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "renew an expired invitation");
-  eq(renewStore.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, true), "the expired invitation is replaced in place");
-  eq(renewKit.counters.recover, 1, "a renewed created account is mailed again");
+  eq(renewStore.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, false), "the expired invitation is replaced in place");
   eq(renewKit.events, [{
     docId: DOC, actor: ACTOR, kind: "access.invite", target: { email: INVITEE },
     docVersion: null, summary: "invited a reviewer as viewer",
   }], "renewal is a real invite transition");
 
-  const renewPlain = seededStore();
-  renewPlain.put(inviteKey, invitationRecord(INVITEE, "commenter", "2020-01-01T00:00:00.000Z", false));
-  const renewPlainKit = kitFor(renewPlain, {
-    listUsersFn() { throw new Error("a pre-existing account is not re-inventoried"); },
+  // A record left by the old flow carries accountCreated: true. It is
+  // vestigial rather than meaningful, and a renewal preserves it rather than
+  // rewriting a field this route no longer decides.
+  const legacyStore = seededStore();
+  legacyStore.put(inviteKey, invitationRecord(INVITEE, "commenter", "2020-01-01T00:00:00.000Z", true));
+  const legacyKit = kitFor(legacyStore);
+  await expectNoContent(await legacyKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "renew a record from the old flow");
+  eq(legacyStore.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, true), "the vestigial flag is carried, not reinterpreted");
+
+  // A coordinator record written before ACN-006 carries recovery: null. It is
+  // read, the mutation succeeds, and the replacement drops the field for good.
+  const legacyCoordinator = seededStore();
+  legacyCoordinator.put(WRITE_KEY, {
+    v: 1, docId: DOC, epoch: 3, lease: null, recovery: null, transfer: null,
   });
-  await expectNoContent(await renewPlainKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "renew an invitation for a pre-existing account");
-  eq(renewPlainKit.counters.recover, 0, "a pre-existing account receives no bootstrap mail");
+  const legacyCoordinatorKit = kitFor(legacyCoordinator);
+  await expectNoContent(await legacyCoordinatorKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), "a pre-ACN-006 coordinator record still admits a mutation");
+  check(!("recovery" in coordinatorOf(legacyCoordinator)), "and the field is gone after the write");
+  eq(legacyCoordinator.peek(inviteKey), invitationRecord(INVITEE, "viewer", NOW, false), "the invitation still landed");
+
+  // One carrying an actual marker is a bootstrap nothing can finish. It stays a
+  // refusal rather than a silent discard.
+  const strandedCoordinator = seededStore();
+  strandedCoordinator.put(WRITE_KEY, {
+    v: 1, docId: DOC, epoch: 3, lease: null, transfer: null,
+    recovery: { invitationKey: inviteKey, email: INVITEE, role: "viewer" },
+  });
+  const strandedKit = kitFor(strandedCoordinator);
+  await expectError(await strandedKit.handler(makeReq("POST", "/api/access", { doc: DOC, email: INVITEE, role: "viewer" })), 500, "internal-error", "a stranded recovery marker is refused loudly");
 
   // A grant for the same address blocks a new invitation.
   const grantedStore = seededStore();
@@ -1499,7 +1390,7 @@ async function groupFour() {
     },
   }));
   const repairKit = kitFor(interrupted, {
-    identifyFn() { return { sub: EDITOR.sub, email: EDITOR.email, name: EDITOR.name, isOrg: false }; },
+    identifyFn() { return { sub: EDITOR.sub, email: EDITOR.email, emailVerified: true, name: EDITOR.name }; },
   });
   await expectNoContent(await repairKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), "the new owner repairs then applies its own change");
   eq(interrupted.has(accessGrantKey(DOC, EDITOR.sub)), false, "repair removes the redundant grant");
@@ -1743,378 +1634,6 @@ export default async function run() {
 `;
 
 /* ------------------------------------------------------------------ *
- * The disposable hosted proof.
- * ------------------------------------------------------------------ */
-
-const HOSTED_SOURCE = `
-/**
- * P4-J hosted proof — a disposable Netlify site with real Identity.
- *
- * Everything this module creates is registered for deletion before it is
- * built, and cleanup failure fails the gate even after behavioral success.
- * Mail bodies, recovery links, tokens and credentials stay in test-local
- * memory: nothing here prints or persists them.
- */
-
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-const API = "https://api.netlify.com/api/v1";
-const PLAYWRIGHT = "playwright@1.55.0";
-const MAILBOX_TIMEOUT_MS = 10_000;
-const MAILBOX_WAIT_MS = 30_000;
-const MAX_MAILBOX_BYTES = 8_192;
-const RECOVERY_FRAGMENT = /^#recovery_token=[A-Za-z0-9._~-]+$/;
-const MESSAGE_ID = /^[\\x20-\\x7e]{1,128}$/;
-const SITE_ABSENT_ATTEMPTS = 12;
-
-function fail(message) {
-  throw new Error("hosted proof failed: " + message);
-}
-
-function assertEqual(actual, expected, label) {
-  if (actual !== expected) fail(label + " (saw " + JSON.stringify(actual) + ")");
-}
-
-/** The mailbox adapter contract is frozen by the specification, not invented. */
-function mailboxUrl() {
-  let url;
-  try {
-    url = new URL(process.env.P4J_MAILBOX_API_URL);
-  } catch {
-    fail("P4J_MAILBOX_API_URL is not an absolute URL");
-    return null;
-  }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
-      url.search !== "" || url.hash !== "") {
-    fail("P4J_MAILBOX_API_URL must be a bare absolute HTTPS URL");
-  }
-  return url;
-}
-
-async function mailbox(action, url) {
-  const body = action === "purge"
-    ? { v: 1, action: "purge", email: process.env.P4J_TEST_EMAIL }
-    : { v: 1, action: "wait-recovery", email: process.env.P4J_TEST_EMAIL, timeoutMs: MAILBOX_WAIT_MS };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MAILBOX_TIMEOUT_MS);
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Authorization: "Bearer " + process.env.P4J_MAILBOX_API_TOKEN,
-      },
-      body: JSON.stringify(body),
-      redirect: "error",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (action === "purge") {
-    assertEqual(response.status, 204, "mailbox purge must answer 204");
-    const empty = await response.arrayBuffer();
-    assertEqual(empty.byteLength, 0, "mailbox purge must return zero bytes");
-    return null;
-  }
-  assertEqual(response.status, 200, "mailbox wait must answer 200");
-  const raw = new Uint8Array(await response.arrayBuffer());
-  if (raw.byteLength > MAX_MAILBOX_BYTES) fail("mailbox response exceeded its bound");
-  let parsed;
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-  } catch {
-    fail("mailbox response was not bounded fatal-UTF-8 JSON");
-    return null;
-  }
-  const names = Object.keys(parsed).sort();
-  if (names.join(",") !== "messageId,url,v" || parsed.v !== 1 ||
-      typeof parsed.messageId !== "string" || !MESSAGE_ID.test(parsed.messageId) ||
-      typeof parsed.url !== "string") {
-    fail("mailbox wait result did not match its exact shape");
-  }
-  let link;
-  try {
-    link = new URL(parsed.url);
-  } catch {
-    fail("mailbox wait result did not carry an absolute URL");
-    return null;
-  }
-  if (link.protocol !== "https:" || !RECOVERY_FRAGMENT.test(link.hash)) {
-    fail("mailbox wait result did not carry one recovery token fragment");
-  }
-  return { messageId: parsed.messageId, link };
-}
-
-async function netlify(path, init = {}) {
-  const response = await fetch(API + path, {
-    ...init,
-    headers: {
-      Authorization: "Bearer " + process.env.NETLIFY_AUTH_TOKEN,
-      ...(init.headers || {}),
-    },
-    redirect: "error",
-  });
-  if (response.status === 404) return { status: 404, body: null };
-  if (response.status >= 400) {
-    fail("Netlify API " + path + " answered " + response.status);
-  }
-  const text = await response.text();
-  return { status: response.status, body: text === "" ? null : JSON.parse(text) };
-}
-
-function sha1(buffer) {
-  return createHash("sha1").update(buffer).digest("hex");
-}
-
-/**
- * Deploy the checked-out candidate through the documented digest API: declare
- * every file with its SHA-1, then upload only what the API asks for. No
- * repository manifest or cache is modified.
- */
-async function deploy(root, siteId) {
-  const listed = execFileSync("git", ["ls-files", "-z"], { cwd: root });
-  const paths = listed.toString("utf8").split("\\0").filter((entry) => entry !== "");
-  const publishable = paths.filter((entry) =>
-    entry.startsWith("example/dist/") || entry === "login/index.html" || entry === "netlify.toml");
-
-  const digests = new Map();
-  for (const entry of publishable) {
-    const bytes = await readFile(join(root, entry));
-    digests.set("/" + entry.replace(/^example\\/dist\\//, ""), { bytes, sha: sha1(bytes) });
-  }
-
-  const zipDir = join(root, ".p4j-functions");
-  await mkdir(zipDir, { recursive: true });
-  const functionZips = new Map();
-  try {
-    for (const name of ["access", "events", "session", "login", "logout"]) {
-      const zipPath = join(zipDir, name + ".zip");
-      execFileSync("zip", ["-q", "-j", zipPath,
-        join(root, "netlify/functions", name + ".mjs")], { cwd: root });
-      const bytes = await readFile(zipPath);
-      functionZips.set(name, { bytes, sha: sha1(bytes) });
-    }
-
-    const files = {};
-    for (const [key, value] of digests) files[key] = value.sha;
-    const functions = {};
-    for (const [key, value] of functionZips) functions[key] = value.sha;
-
-    const created = await netlify("/sites/" + siteId + "/deploys", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ files, functions, async: false }),
-    });
-    const deployId = created.body.id;
-    for (const path of created.body.required || []) {
-      const entry = [...digests.values()].find((value) => value.sha === path);
-      if (entry === undefined) continue;
-      const name = [...digests.entries()].find(([, value]) => value.sha === path)[0];
-      await netlify("/deploys/" + deployId + "/files" + name, {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: entry.bytes,
-      });
-    }
-    for (const sha of created.body.required_functions || []) {
-      const found = [...functionZips.entries()].find(([, value]) => value.sha === sha);
-      if (found === undefined) continue;
-      await netlify("/deploys/" + deployId + "/functions/" + found[0], {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: found[1].bytes,
-      });
-    }
-    return deployId;
-  } finally {
-    await rm(zipDir, { recursive: true, force: true });
-  }
-}
-
-async function waitForSiteAbsence(siteId) {
-  for (let attempt = 0; attempt < SITE_ABSENT_ATTEMPTS; attempt += 1) {
-    const probe = await netlify("/sites/" + siteId);
-    if (probe.status === 404) return;
-    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-  }
-  fail("the disposable site was still present after deletion");
-}
-
-function installPlaywright(workspace) {
-  execFileSync("npm", ["install", "--ignore-scripts", "--no-save", "--prefix", workspace, PLAYWRIGHT], {
-    stdio: "ignore",
-  });
-  const browsers = join(workspace, "browsers");
-  execFileSync(join(workspace, "node_modules/.bin/playwright"), ["install", "chromium"], {
-    env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers },
-    stdio: "ignore",
-  });
-  return browsers;
-}
-
-/**
- * Exercise the deployed write surface over HTTPS with real same-origin
- * cookies. Every assertion below is behavioral: no fixture state is trusted
- * from the client, and no response body is printed.
- */
-async function exercise(context, origin, sessions) {
-  const owner = sessions.owner;
-  const editor = sessions.editor;
-
-  for (const role of ["editor", "commenter", "viewer"]) {
-    const denied = await sessions[role].request("PATCH", "/api/access", {
-      doc: sessions.doc, orgDefault: "viewer",
-    });
-    assertEqual(denied.status, 403, "a " + role + " must not write access");
-  }
-
-  const invited = await owner.request("POST", "/api/access", {
-    doc: sessions.doc, email: process.env.P4J_TEST_EMAIL, role: "viewer",
-  });
-  assertEqual(invited.status, 204, "the owner may invite a missing account");
-
-  const raced = await Promise.all([
-    owner.request("PATCH", "/api/access", { doc: sessions.doc, orgDefault: "viewer" }),
-    owner.request("PATCH", "/api/access", { doc: sessions.doc, orgDefault: "none" }),
-  ]);
-  for (const response of raced) {
-    if (response.status !== 204 && response.status !== 409) {
-      fail("concurrent mutations must serialize or return the exact busy response");
-    }
-    if (response.status === 409) {
-      assertEqual(response.retryAfter, "2", "the busy response advises a bounded retry");
-    }
-  }
-
-  const transferred = await owner.request("POST", "/api/access/transfer", {
-    doc: sessions.doc, sub: editor.sub,
-  });
-  assertEqual(transferred.status, 204, "the owner may transfer ownership");
-
-  const stale = await owner.request("PATCH", "/api/access", { doc: sessions.doc, orgDefault: "viewer" });
-  assertEqual(stale.status, 403, "the former owner loses authority");
-
-  const roster = await editor.request("GET", "/api/access?doc=" + sessions.doc, undefined);
-  assertEqual(roster.status, 200, "the new owner can read the roster");
-  const body = JSON.parse(roster.text);
-  if (body.members.length > 50) fail("the roster exceeded the fifty-child ceiling");
-  if (body.members[0].sub !== editor.sub) fail("the new owner is not the sole owner");
-  void context;
-  void origin;
-}
-
-export async function runHostedProof(options) {
-  const root = options.root;
-  const workspace = options.workspace;
-  const url = mailboxUrl();
-  const suffix = Math.random().toString(36).slice(2, 10);
-  const siteName = "p4j-" + suffix;
-
-  const browsers = installPlaywright(workspace);
-  const playwright = await import(join(workspace, "node_modules/playwright/index.js"));
-
-  const created = await netlify("/" + process.env.NETLIFY_ACCOUNT_SLUG + "/sites", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: siteName }),
-  });
-  const siteId = created.body.id;
-  let cleanupError = null;
-  let behaviorError = null;
-
-  try {
-    await netlify("/sites/" + siteId + "/services/identity/instances", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: { registration: "invite" } }),
-    });
-    await deploy(root, siteId);
-
-    const origin = "https://" + siteName + ".netlify.app";
-    const browser = await playwright.chromium.launch({
-      env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers },
-    });
-    try {
-      const context = await browser.newContext({ baseURL: origin });
-      const sessions = await establishSessions(context, origin, siteId);
-      await exercise(context, origin, sessions);
-      const mail = await mailbox("wait-recovery", url);
-      if (mail === null) fail("no recovery message arrived for the invited account");
-    } finally {
-      await browser.close();
-    }
-  } catch (error) {
-    behaviorError = error;
-  }
-
-  try {
-    await mailbox("purge", url);
-    await netlify("/sites/" + siteId, { method: "DELETE" });
-    await waitForSiteAbsence(siteId);
-    await rm(join(workspace, "node_modules"), { recursive: true, force: true });
-    await rm(browsers, { recursive: true, force: true });
-  } catch (error) {
-    cleanupError = error;
-  }
-
-  if (behaviorError !== null) throw behaviorError;
-  if (cleanupError !== null) throw cleanupError;
-}
-
-/**
- * Create the invented fixture identities and one document, then sign each in
- * through the deployed login Function so every later request carries a real
- * same-origin cookie.
- */
-async function establishSessions(context, origin, siteId) {
-  const doc = "4b7d2a";
-  const people = {
-    owner: { email: "p4j-owner-" + siteId.slice(0, 6) + "@example.invalid", role: "owner" },
-    editor: { email: "p4j-editor-" + siteId.slice(0, 6) + "@example.invalid", role: "editor" },
-    commenter: { email: "p4j-commenter-" + siteId.slice(0, 6) + "@example.invalid", role: "commenter" },
-    viewer: { email: "p4j-viewer-" + siteId.slice(0, 6) + "@example.invalid", role: "viewer" },
-  };
-  const sessions = { doc };
-  for (const [name, person] of Object.entries(people)) {
-    const password = Math.random().toString(36).slice(2) + "Aa1!";
-    const created = await netlify("/sites/" + siteId + "/identity/users", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: person.email, password, confirm: true }),
-    });
-    const page = await context.newPage();
-    const response = await page.request.post(origin + "/api/login", {
-      data: { email: person.email, password },
-    });
-    if (!response.ok()) fail("could not establish a session for the " + name + " fixture");
-    sessions[name] = {
-      sub: created.body.id,
-      async request(method, path, body) {
-        const init = { method, headers: {} };
-        if (body !== undefined) {
-          init.headers["Content-Type"] = "application/json";
-          init.data = body;
-        }
-        const answer = await page.request.fetch(origin + path, init);
-        return {
-          status: answer.status(),
-          retryAfter: answer.headers()["retry-after"] ?? null,
-          text: await answer.text(),
-        };
-      },
-    };
-  }
-  return sessions;
-}
-`;
-
-/* ------------------------------------------------------------------ *
  * Entry point.
  * ------------------------------------------------------------------ */
 
@@ -2123,14 +1642,14 @@ async function main() {
   if (argv[0] === "--worker") {
     const mode = argv[1];
     if (!MODES.includes(mode) || argv.length !== 2) {
-      die("usage: scripts/test-p4-j.mjs --worker <contract|hosted>");
+      die("usage: scripts/test-p4-j.mjs --worker contract");
     }
     await worker(mode);
     return;
   }
   const mode = argv[0];
   if (!MODES.includes(mode) || argv.length !== 1) {
-    die("usage: scripts/test-p4-j.mjs <contract|hosted>");
+    die("usage: scripts/test-p4-j.mjs contract");
   }
   await parent(mode);
 }
