@@ -311,11 +311,16 @@ export const UNAVAILABLE_PAGE = `<!doctype html>
  * perfectly good corporate address would read as the link being broken and
  * would escalate to the owner rather than to their identity provider.
  *
- * The disclosure is bounded on purpose: `evaluateAccess` answers
- * `email_unverified` only when the reader's own domain is actually on this
- * document's list, so the page says nothing about a document whose list the
- * reader did not already match, and nothing at all about one that does not
- * exist. Like the other two it is a literal with no interpolation, it carries
+ * The disclosure is bounded, but be exact about the bound: `evaluateAccess`
+ * answers `email_unverified` only when the domain on the principal is on this
+ * document's list - and that address is unverified, so the domain is claimed
+ * rather than held. Somebody already holding the link can therefore sign up
+ * with an address at a guessed domain and learn from this page that the
+ * document lists it. What the page still never does is speak about a document
+ * whose list the caller did not name, or about one that does not exist, so it
+ * is an oracle over one id the caller already had rather than over the id
+ * space. See the note in `domain-access.mjs` for why that trade was taken.
+ * Like the other two it is a literal with no interpolation, it carries
  * `noindex`, and it names no document.
  */
 export const EMAIL_UNVERIFIED_PAGE = `<!doctype html>

@@ -355,9 +355,19 @@ test("the grammar is the one the collaboration tree uses", () => {
        "refuse non-ASCII, then lower-case" the right order rather than a
        stylistic one. */
     `ann@boo\u212A.example`,
+    /* Whitespace *inside* the address, which the grammar this replaced also
+       refused. It is worth its own row because the obvious implementation
+       admits it: `normalizeDomainOrNull` trims its own input, so asking it
+       only "is the domain legal?" accepts this and then hands back the address
+       with the space still in it - a value that stores fine and matches
+       nothing an identity provider will ever assert. */
+    "ann@ example.com",
+    "ann@\texample.com",
+    "ann @example.com",
   ]) {
     assert.equal(normalizeEmailOrNull(value), null, JSON.stringify(value));
   }
+  /* Trimming is an *edge* operation on the whole value, and stays one. */
   assert.equal(normalizeEmailOrNull("  Ann@Example.COM "), "ann@example.com");
 });
 

@@ -443,6 +443,13 @@ each of them is a support question:
 - **Verification is the provider's, not ours.** A reader whose address the
   identity provider has not verified is shown "Verify your email" rather than
   the document, however corporate the address looks. The fix is on their side.
+  Note what that page admits: the address it matched against is unverified, so
+  the domain is claimed rather than held. Somebody who already has a document
+  link can sign up with an address at a guessed domain and learn from the 403
+  that the document lists it. That is the accepted price of an actionable
+  message — it needs the unguessable link first, and it never speaks about a
+  document whose list the caller did not name — but it is why the list should
+  be treated as visible to anyone holding the link, not as a secret.
 - **Nothing is stored when a domain admits somebody.** The decision is recomputed
   from the reader's current verified address on every request, and a session
   lasts at most 24 hours — so removing a domain, or a reader losing the address,
@@ -459,6 +466,12 @@ each of them is a support question:
 every person who can sign up for an address at it, which is publishing the
 document while believing it is private. The owner sees
 `public_mailbox_domain` naming the domain they typed.
+
+**That list is exact, and it is not every free provider.** `hotmail.co.uk`,
+`me.com`, `gmx.de`, `yandex.com` and others are accepted today. Read the guard
+as "the most common accident is caught", never as "a domain it accepted is
+therefore a private one" — the owner is still responsible for knowing who can
+get an address at a domain they list.
 
 `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=true` lifts that refusal for the whole site.
 Set it only on a deployment where those really are the corporate mailboxes.

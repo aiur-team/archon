@@ -59,11 +59,28 @@
  *
  * Three reasons leave this module. `session_required` for a caller with no
  * principal, which discloses nothing because every id answers it the same way.
- * `email_unverified`, which is the one actionable message and is returned
- * *only* when the reader's own domain is actually on this document's list -
- * anything wider would answer "does this document list my domain" for a domain
- * the reader merely claimed. `not_found` for everything else, which is the same
- * answer a document that does not exist gives.
+ * `not_found` for everything else, which is the same answer a document that
+ * does not exist gives.
+ *
+ * `email_unverified` is the third, and it is the one refusal that tells the
+ * caller something. Be precise about what: it is returned only when the domain
+ * of the address on the principal matches this document's list - and at that
+ * point the address is, by definition, one the provider has *not* verified. So
+ * the domain is **claimed, not held**. A caller who already has a document id
+ * and is willing to sign up with an address at a guessed domain can therefore
+ * distinguish `403` from `404` and learn that the document exists and lists
+ * that domain, one guess at a time, up to the twenty entries a list may hold.
+ *
+ * That is the accepted cost of the message, not an oversight. The alternative -
+ * checking `emailVerified` before the domain at all - renders every such reader
+ * a flat `not_found`, which a person with a perfectly good corporate address
+ * reads as a broken link and escalates to the document's owner rather than to
+ * their identity provider. The disclosure is bounded by needing an unguessable
+ * 128-bit document id first, and it never reaches a document whose list the
+ * caller did not name. Do not widen it further: returning this reason for a
+ * document that does not list the domain, or for one that does not exist, would
+ * turn it into an oracle over the whole id space rather than over one id the
+ * caller already had.
  */
 
 import { emailDomain, normalizeDomainOrNull } from "./email.mjs";
@@ -85,6 +102,15 @@ export { emailDomain };
  * one is a one-line diff. The escape hatch is site-wide and deliberately blunt:
  * `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=true` for an operator who runs a deployment
  * where these really are corporate mailboxes.
+ *
+ * **This list is exact, and it is not every free provider.** Membership is
+ * `includes`, like the matching rule itself, so `hotmail.co.uk`, `me.com`,
+ * `gmx.de`, `yandex.com` and any number of others are listable today - the
+ * twelve names here are the ones ACN-007 froze, not a claim to completeness.
+ * Read the guard as "the most common way to publish a document by accident is
+ * caught", never as "a domain the guard accepted is therefore a private one".
+ * Widening it is a contract change, because a domain that stops being listable
+ * strands owners who already listed it.
  */
 export const PUBLIC_MAILBOX_DOMAINS = Object.freeze([
   "aol.com",

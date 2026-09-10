@@ -86,7 +86,19 @@ export function normalizeEmailOrNull(value) {
   const at = normalized.indexOf("@");
   if (at === -1 || normalized.indexOf("@", at + 1) !== -1) return null;
   if (!LOCAL_PATTERN.test(normalized.slice(0, at))) return null;
-  if (normalizeDomainOrNull(normalized.slice(at + 1)) === null) return null;
+
+  /* The domain must already *be* its own normalized form, not merely normalize
+     to something legal. `normalizeDomainOrNull` trims its own input, so asking
+     it only "is this a domain?" would accept `ann@ example.com` - the domain
+     trims to `example.com` and passes - and then return the address with the
+     space still in it. That is a wider grammar than the one this function
+     replaced, and the damage is silent rather than loud: a grant stored under
+     `ann@ example.com` never matches the `ann@example.com` an identity provider
+     asserts, so an owner adds a collaborator who simply never gets in, and a
+     `DOC_OWNERS` entry with a stray space locks the seed owner out of their own
+     document instead of failing as invalid configuration. */
+  const domain = normalized.slice(at + 1);
+  if (normalizeDomainOrNull(domain) !== domain) return null;
   return normalized;
 }
 
