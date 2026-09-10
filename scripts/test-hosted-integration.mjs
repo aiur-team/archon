@@ -1106,7 +1106,7 @@ const PACKAGE_DIR = join(ROOT, "templates", "docbuild");
 const INSTALLED = Object.freeze({
   docbuild: join("node_modules", ".bin", "docbuild"),
   publish: join("node_modules", ".bin", "archon-publish"),
-  skeleton: join("node_modules", "@aiur-team", "docbuild", "dist", "skeleton"),
+  skeleton: join("node_modules", "@aiur-team", "archon", "dist", "skeleton"),
 });
 const DOCUMENT_SENTINEL = "sentinel-integration-8b41f0";
 

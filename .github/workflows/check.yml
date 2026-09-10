@@ -409,7 +409,7 @@ jobs:
       # walk finds them -- so a source-checkout assumption passes all of them
       # and fails for the first person who runs `npm install`. This runner packs
       # the real tarball, installs it into a temporary directory outside the
-      # repository, and drives the installed `docbuild` and `archon-publish`
+      # repository, and drives the installed `archon` (and its `docbuild` alias) and `archon-publish`
       # exactly as the packaged skill tells a new user to.
       #
       # It is a step of its own rather than a line in `unit tests` because it is

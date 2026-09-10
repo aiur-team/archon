@@ -56,7 +56,7 @@ const compiledDir = dirname(fileURLToPath(import.meta.url));
 const anchorCoreSource = slot(compiledDir, "anchor-core.js");
 ```
 
-This is the same path rule in both supported layouts. In a vendored checkout, the running module and core are `templates/docbuild/dist/index.js` and `templates/docbuild/dist/anchor-core.js`. In an installed `@aiur-team/docbuild` package, both are siblings under that package's `dist/`. Do not derive the compiled path from the repository root or from `resolveBase()`, because an installed package has neither the vendored repository layout nor a root-level `templates/docbuild/` directory.
+This is the same path rule in both supported layouts. In a vendored checkout, the running module and core are `templates/docbuild/dist/index.js` and `templates/docbuild/dist/anchor-core.js`. In an installed `@aiur-team/archon` package, both are siblings under that package's `dist/`. Do not derive the compiled path from the repository root or from `resolveBase()`, because an installed package has neither the vendored repository layout nor a root-level `templates/docbuild/` directory.
 
 When `anchorCoreSource` is non-empty, its module element contains the compiled ESM followed by this adapter in the same module scope:
 
