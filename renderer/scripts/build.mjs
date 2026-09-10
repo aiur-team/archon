@@ -157,7 +157,12 @@ export function rendererHeaders(appOrigin) {
     "default-src 'none'",
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    /* No `'self'`: the shell has no images, and this directive is inherited by
+       the artifact. If the artifact's own `meta` policy were ever not applied --
+       an engine bug, or an edit that moved it after other content -- `'self'`
+       would leave the artifact a beacon to this origin, visible in the host's
+       access log. The fallback should be as tight as the intersection. */
+    "img-src data: blob:",
     "media-src data: blob:",
     "font-src data:",
     "frame-src 'self'",
@@ -175,23 +180,36 @@ export function rendererHeaders(appOrigin) {
      place an operator can read without reasoning about sandbox tokens. */
   const permissions = [
     "accelerometer",
+    "attribution-reporting",
     "autoplay",
+    "bluetooth",
+    "browsing-topics",
     "camera",
     "clipboard-read",
     "clipboard-write",
+    "compute-pressure",
     "display-capture",
     "encrypted-media",
     "fullscreen",
     "geolocation",
     "gyroscope",
+    "hid",
+    "identity-credentials-get",
+    "idle-detection",
+    "local-fonts",
     "magnetometer",
     "microphone",
     "midi",
+    "otp-credentials",
     "payment",
     "publickey-credentials-get",
     "screen-wake-lock",
     "serial",
+    "shared-storage",
+    "speaker-selection",
+    "storage-access",
     "usb",
+    "window-management",
     "xr-spatial-tracking",
   ]
     .map((feature) => `${feature}=()`)
@@ -202,6 +220,14 @@ export function rendererHeaders(appOrigin) {
     ["X-Content-Type-Options", "nosniff"],
     ["Referrer-Policy", "no-referrer"],
     ["Permissions-Policy", permissions],
+    /* `frame-ancestors` already decides who may embed this document; this header
+       is what keeps that permission usable if the account application ever
+       adopts `Cross-Origin-Embedder-Policy: require-corp`, which would otherwise
+       block the frame outright. It grants nothing `frame-ancestors` has not
+       already granted. There is deliberately no `Cross-Origin-Opener-Policy`:
+       it is ignored on a framed document, and the standalone page has no opener
+       and no session to protect. */
+    ["Cross-Origin-Resource-Policy", "cross-origin"],
     /* No private bytes are ever at rest on this origin, and the shell is the
        same three files for everybody. Revalidating on every load is what keeps a
        protocol change from being served to a page that has already moved on. */
@@ -254,6 +280,34 @@ export async function buildRenderer({ outDir, env = process.env, production = tr
   }
 
   const target = resolve(outDir);
+  /* The next line deletes this directory, so it is worth being sure what it is.
+     `--out .` from `renderer/` would otherwise delete `public/`, `scripts/` and
+     `netlify.toml` and then fail copying a file it had just removed -- the
+     working copy gone and nothing published. `--out ..` and `--out /` are the
+     same shape. A target that contains the source is refused rather than
+     emptied. */
+  const forbidden = [RENDERER_ROOT, PUBLIC_DIR, resolve(RENDERER_ROOT, "scripts"), process.cwd()];
+  for (const path of forbidden) {
+    if (target === path || path.startsWith(`${target}/`)) {
+      throw new RendererBuildError("--out", "must not be the renderer tree or a directory containing it");
+    }
+  }
+
+  /* `STATIC_FILES` is what gets copied *and* what the output is checked
+     against, so on its own the two sides would drift together in silence: add
+     `public/print.css`, link it from the shell, and the build copies three
+     files, passes its own five-file check and deploys a page that 404s its
+     stylesheet. Holding the list equal to the directory makes adding a file a
+     build failure until it is declared. */
+  const present = (await readdir(PUBLIC_DIR)).sort();
+  const declared = [...STATIC_FILES].sort();
+  if (present.join("\n") !== declared.join("\n")) {
+    throw new RendererBuildError(
+      "public",
+      `contains ${present.join(", ")} but STATIC_FILES declares ${declared.join(", ")}`,
+    );
+  }
+
   await rm(target, { recursive: true, force: true });
   await mkdir(target, { recursive: true });
   for (const name of STATIC_FILES) {
@@ -290,7 +344,12 @@ function parseArguments(argv) {
     }
     if (argument === "--out") {
       index += 1;
-      if (index >= argv.length) throw new RendererBuildError("--out", "requires a directory");
+      /* A missing value and a following flag are the same mistake. Without the
+         second check, `--out --local-test` writes into a directory literally
+         named `--local-test` and silently builds in production mode. */
+      if (index >= argv.length || argv[index].startsWith("--")) {
+        throw new RendererBuildError("--out", "requires a directory");
+      }
       out = argv[index];
       continue;
     }
