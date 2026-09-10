@@ -113,7 +113,7 @@ jobs:
       # and an agent-chosen title arriving as text. None of those can be
       # asserted against a hand-written DOM without asserting against an
       # approximation of one, so this drives a real Chromium against the real
-      # handlers and the real `public/publish/authorize.html`.
+      # handlers and the real `netlify/public/publish/authorize.html`.
       #
       # It gets its own step because it installs a pinned Playwright and one
       # Chromium into a temporary root first -- minutes of network on a cold
@@ -347,7 +347,7 @@ jobs:
           # document, and "one engine does this correctly" is not the same claim
           # as "browsers do this". It installs its own pinned Playwright,
           # Chromium and Firefox the way the two runners above do, and it needs
-          # the `hosted` install several steps up, because it holds the
+          # the root install several steps up, because it holds the
           # renderer's copy of the render-message contract equal to
           # `netlify/lib/hosted/contracts.mjs` before it starts a browser.
           node scripts/test-hosted-renderer.mjs

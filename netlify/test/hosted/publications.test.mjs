@@ -1,5 +1,5 @@
 /**
- * Regressions for the publication state machine in `../lib/publications.mjs`.
+ * Regressions for the publication state machine in `../../lib/hosted/publications.mjs`.
  *
  * The suite is organised around the races and the deadlines rather than around
  * the exported functions, because those are where a single-record design either

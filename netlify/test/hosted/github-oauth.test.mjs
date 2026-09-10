@@ -1,5 +1,5 @@
 /**
- * Regressions for `../lib/github-oauth.mjs`.
+ * Regressions for `../../lib/hosted/github-oauth.mjs`.
  *
  * No test here contacts GitHub. Every provider answer is a fixture, which is the
  * only way to exercise the responses that matter most - a refusal delivered with

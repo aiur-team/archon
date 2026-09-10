@@ -1,5 +1,5 @@
 /**
- * Regressions for `../lib/identity.mjs` - the C1 identity boundary.
+ * Regressions for `../../lib/hosted/identity.mjs` - the C1 identity boundary.
  *
  * The two tests this suite exists for are the ones whose guard is a single line
  * that looks removable: the storage outage that must throw rather than read as
@@ -214,7 +214,7 @@ test("a same-origin form navigation is accepted on its Fetch Metadata", () => {
      Fetch append the literal string `null` as the Origin of a non-CORS request,
      so an exact-origin check with no exemption refuses the product's only
      sign-in path in every browser. Observed in Chromium by
-     `test/approval-browser.mjs`, not reasoned about. */
+     `netlify/test/hosted/approval-browser.test.mjs`, not reasoned about. */
   const navigation = browserRequest("/x", {
     method: "POST",
     origin: "null",

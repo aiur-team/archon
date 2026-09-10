@@ -120,9 +120,12 @@ function cleanTree() {
   roots.push(root);
   const deploy = join(root, DEPLOY_DIR);
 
+  /* `tldts` by name, not a stand-in: the hosted dependency subset is a literal list
+     in the gate, so a fixture that invented a package name could not exercise it. */
   installPackage(join(root, "node_modules"), "allowed-pkg");
   installPackage(join(root, "node_modules"), "undeclared-pkg");
-  writeManifest(root, { "allowed-pkg": "1.0.0" });
+  installPackage(join(root, "node_modules"), "tldts");
+  writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0" });
 
   write(join(root, OUTSIDE_DIR, "legacy.mjs"), "export const legacy = true;\n");
   write(join(deploy, "test", "fixtures.mjs"), "export const FIXTURE = 1;\n");
@@ -145,7 +148,7 @@ function cleanTree() {
   /* The hosted half. */
   write(
     join(deploy, "lib", "hosted", "ok.mjs"),
-    'import { value } from "allowed-pkg";\nimport { createHash } from "node:crypto";\nexport const ok = value && typeof createHash === "function";\n',
+    'import { value } from "tldts";\nimport { createHash } from "node:crypto";\nexport const ok = value && typeof createHash === "function";\n',
   );
   write(
     join(deploy, "functions", "hosted-handler.mjs"),
@@ -169,13 +172,19 @@ function assertAccepted(plant) {
   return stdout;
 }
 
-/** Build a clean tree, apply `plant`, and assert the gate fails with `pattern`. */
-function assertRejected(plant, pattern) {
+/**
+ * Build a clean tree, apply `plant`, and assert the gate fails with `pattern`.
+ *
+ * `what` names the planted fault when a case loops over several, so a failure says
+ * which spelling slipped through rather than only which assertion ran.
+ */
+function assertRejected(plant, pattern, what = "") {
   const root = cleanTree();
   plant(root, join(root, DEPLOY_DIR));
   const { status, stderr } = runGate(root);
-  assert.equal(status, 1, `expected the gate to fail; it printed:\n${stderr}`);
-  assert.match(stderr, pattern);
+  const naming = what === "" ? "" : ` (${what})`;
+  assert.equal(status, 1, `expected the gate to fail${naming}; it printed:\n${stderr}`);
+  assert.match(stderr, pattern, `expected the fault to name the rule${naming}`);
   return stderr;
 }
 
@@ -218,6 +227,89 @@ test("a hosted module that reaches outside the deploy tree is refused", () => {
         `import { legacy } from "../../../${OUTSIDE_DIR}/legacy.mjs";\nexport const leak = legacy;\n`,
       ),
     /resolves outside netlify\//,
+  );
+});
+
+test("a hosted module cannot reach the collaboration tree", () => {
+  /* The rule the merge would have dissolved by itself. Under two deploy trees this
+     was "nothing under `hosted/` resolves outside `hosted/`", and containment
+     against the deploy root said the same thing. After the move it does not:
+     `netlify/lib/access.mjs` carries `DOC_OWNERS` and the organisation role
+     defaults, it is one relative segment from every hosted module, and it is
+     *inside* `netlify/` - so whole-tree containment passes it and the hosted
+     handler deploys reading the legacy authority. */
+  assertRejected(
+    (root, deploy) => {
+      write(join(deploy, "lib", "access.mjs"), "export const DOC_OWNERS = [];\n");
+      write(
+        join(deploy, "lib", "hosted", "leak.mjs"),
+        'import { DOC_OWNERS } from "../access.mjs";\nexport const owners = DOC_OWNERS;\n',
+      );
+    },
+    /leak\.mjs imports \.\.\/access\.mjs, which resolves to netlify\/lib\/access\.mjs, outside the hosted subtree/,
+  );
+  /* And the same barrier for a hosted function reaching a collaboration one. */
+  assertRejected(
+    (root, deploy) =>
+      write(
+        join(deploy, "functions", "hosted-borrow.mjs"),
+        'import "./handler.mjs";\nexport default async () => new Response();\nexport const config = { path: "/api/hosted/borrow" };\n',
+      ),
+    /hosted-borrow\.mjs imports \.\/handler\.mjs, which resolves to netlify\/functions\/handler\.mjs, outside the hosted subtree/,
+  );
+});
+
+test("a hosted module cannot import a package the hosted tree may not use", () => {
+  /* One merged manifest is the union of two dependency sets, and the union carries
+     `@netlify/identity` - the legacy authority the hosted boundary exists to keep
+     out. Root-declared is necessary and not sufficient: `allowed-pkg` below is
+     declared, resolves, and links, and is still refused for hosted code. */
+  assertRejected(
+    (root, deploy) =>
+      write(
+        join(deploy, "lib", "hosted", "borrows.mjs"),
+        'import { value } from "allowed-pkg";\nexport const v = value;\n',
+      ),
+    /borrows\.mjs imports allowed-pkg, which is not one of the packages the hosted deploy tree may import/,
+  );
+  /* The same package in a collaboration module is ordinary and stays ordinary. */
+  assertAccepted((root, deploy) =>
+    write(join(deploy, "lib", "borrows.mjs"), 'import { value } from "allowed-pkg";\nexport const v = value;\n'),
+  );
+});
+
+test("a path that reads as hosted but is not in the hosted set is refused", () => {
+  /* Membership is two exact shapes, so anything that looks hosted and matches
+     neither would silently lose every hosted rule while still deploying as a hosted
+     route. Both spellings below are what an ordinary tidying refactor produces. */
+  for (const [where, what] of [
+    [["functions", "hosted", "publish.mjs"], "a hosted function moved into a subdirectory"],
+    [["lib", "hosted-helper.mjs"], "a hosted library placed beside the hosted tree"],
+  ]) {
+    assertRejected(
+      (root, deploy) =>
+        write(
+          join(deploy, ...where),
+          'import { createRequire } from "node:module";\nexport default async () => new Response();\nexport const config = { path: "/api/anywhere" };\n',
+        ),
+      /reads as hosted code but is not in the hosted deploy set/,
+      what,
+    );
+  }
+});
+
+test("a JavaScript module in the edge directory is refused rather than skipped", () => {
+  /* The edge directory is excluded for `gate.ts`, which is Deno TypeScript this
+     process cannot import. Excluding it wholesale would leave a `.mjs` handler
+     there unscanned and unloaded - the "deployable code where nothing checks it"
+     hole the placement rule exists to close - so the exclusion is by extension. */
+  assertRejected(
+    (root, deploy) =>
+      write(
+        join(deploy, "edge-functions", "leak.mjs"),
+        `import { legacy } from "../../${OUTSIDE_DIR}/legacy.mjs";\nexport default async () => new Response(String(legacy));\n`,
+      ),
+    /leak\.mjs is \.mjs inside netlify\/edge-functions\/, which carries the Deno TypeScript edge function and nothing else/,
   );
 });
 
@@ -290,7 +382,7 @@ test("a package installed inside the deploy tree is refused", () => {
   assertRejected(
     (root, deploy) => {
       installPackage(join(deploy, "node_modules"), "inner-pkg");
-      writeManifest(root, { "allowed-pkg": "1.0.0", "inner-pkg": "1.0.0" });
+      writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0", "inner-pkg": "1.0.0" });
       write(
         join(deploy, "lib", "hosted", "inner.mjs"),
         'import { value } from "inner-pkg";\nexport const v = value;\n',
@@ -421,21 +513,33 @@ test("deployable code outside lib/ and functions/ is refused rather than unscann
   }
 });
 
-test("a functions directory that exists and is empty is a failure", () => {
+test("an empty functions directory is a failure, and so is a missing one", () => {
+  /* Both spellings, because gating the guard on the directory existing is the same
+     silent pass one step removed: a `functions/` renamed away leaves nothing to
+     check and nothing to say about it. */
   assertRejected((root, deploy) => {
     rmSync(join(deploy, "functions", "handler.mjs"));
     rmSync(join(deploy, "functions", "hosted-handler.mjs"));
-  }, /netlify\/functions\/ exists but contains no loadable module/);
+  }, /netlify\/functions\/ contains no loadable module/);
+  assertRejected(
+    (root, deploy) => rmSync(join(deploy, "functions"), { recursive: true, force: true }),
+    /netlify\/functions\/ contains no loadable module/,
+  );
 });
 
-test("a hosted lib directory that exists and is empty is a failure", () => {
+test("a hosted tree that has emptied out is a failure, per directory", () => {
   /* Scoping the hosted rules by path is what makes the merge honest, so a hosted
-     tree that has quietly emptied out - every rule above now judging nothing -
-     must not read as success. */
-  assertRejected((root, deploy) => {
-    rmSync(join(deploy, "lib", "hosted", "ok.mjs"));
-    rmSync(join(deploy, "functions", "hosted-handler.mjs"));
-  }, /netlify\/lib\/hosted\/ exists but contains no loadable module/);
+     tree that has quietly emptied out - every hosted rule now judging nothing -
+     must not read as success. Two counts, because the libraries and the functions
+     retire different rules and either can go alone. */
+  assertRejected(
+    (root, deploy) => rmSync(join(deploy, "lib", "hosted"), { recursive: true, force: true }),
+    /netlify\/lib\/hosted\/ contains no loadable module; the hosted rules would judge nothing/,
+  );
+  assertRejected(
+    (root, deploy) => rmSync(join(deploy, "functions", "hosted-handler.mjs")),
+    /netlify\/functions\/hosted-\*\.mjs matches no loadable module; the hosted route and entry-point rules would judge nothing/,
+  );
 });
 
 test("a tree with no deployable modules at all is a failure", () => {
@@ -476,7 +580,7 @@ test("a route outside its namespace is refused, arrays included", () => {
         join(deploy, "functions", "hosted-admin.mjs"),
         'export default async () => new Response();\nexport const config = { path: "/admin/secret" };\n',
       ),
-    /is routed at \/admin\/secret, outside the \/api\/hosted\/\* namespace/,
+    /is routed at \/admin\/secret, outside the \/api\/hosted\/\* hosted API namespace/,
   );
   assertRejected(
     (root, deploy) =>
@@ -484,7 +588,7 @@ test("a route outside its namespace is refused, arrays included", () => {
         join(deploy, "functions", "admin.mjs"),
         'export default async () => new Response();\nexport const config = { path: "/admin/secret" };\n',
       ),
-    /is routed at \/admin\/secret, outside the \/api\/\* namespace/,
+    /is routed at \/admin\/secret, outside the \/api\/\* edge-gate exclusion/,
   );
   /* An array of paths was flattened with `String()`, producing one comma-joined
      string that started with the allowed prefix - so the second route escaped
@@ -518,8 +622,22 @@ test("the page-route allowlist is a closed list, not a second prefix", () => {
           `export default async () => new Response();\nexport const config = { path: ${JSON.stringify(path)} };\n`,
         ),
       new RegExp(`is routed at ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, outside the`),
+      path,
     );
   }
+  /* And the allowlist is the hosted application's alone. The collaboration rule is
+     that *every* routed function sits under `/api/`, because `netlify.toml` excludes
+     exactly `/api/*` from the edge gate - so offering the exception to both halves
+     would publish a collaboration function from behind a gate the workflow's config
+     check still reports as fail-closed. */
+  assertRejected(
+    (root, deploy) =>
+      write(
+        join(deploy, "functions", "pages.mjs"),
+        'export default async () => new Response();\nexport const config = { path: "/docs/:documentId" };\n',
+      ),
+    /pages\.mjs is routed at \/docs\/:documentId, outside the \/api\/\* edge-gate exclusion/,
+  );
 });
 
 test("two functions cannot claim the same route", () => {
@@ -728,7 +846,7 @@ test("a dependency cannot launder a require to a handler nothing calls", () => {
         "loader-pkg",
         'import { createRequire } from "node:module";\nexport const makeLoader = createRequire;\n',
       );
-      writeManifest(root, { "allowed-pkg": "1.0.0", "loader-pkg": "1.0.0" });
+      writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0", "loader-pkg": "1.0.0" });
       write(
         join(deploy, "lib", "hosted", "launder.mjs"),
         'import { makeLoader as build } from "loader-pkg";\n' +
@@ -755,7 +873,7 @@ test("a dependency that fetches node:module off the global is caught by capabili
         "sneaky-pkg",
         'const name = "mod" + "ule";\nexport const mod = process.getBuiltinModule(name);\n',
       );
-      writeManifest(root, { "allowed-pkg": "1.0.0", "sneaky-pkg": "1.0.0" });
+      writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0", "sneaky-pkg": "1.0.0" });
       write(
         join(deploy, "lib", "hosted", "uses.mjs"),
         'import { mod } from "sneaky-pkg";\nexport const held = mod;\n',
@@ -773,14 +891,14 @@ test("a dependency cannot resolve out of the deploy tree either", () => {
         "climber-pkg",
         `export { legacy } from "../../${OUTSIDE_DIR}/legacy.mjs";\n`,
       );
-      writeManifest(root, { "allowed-pkg": "1.0.0", "climber-pkg": "1.0.0" });
+      writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0", "climber-pkg": "1.0.0" });
       write(
         join(deploy, "lib", "hosted", "climbs.mjs"),
         'import { legacy } from "climber-pkg";\nexport const held = legacy;\n',
       );
     },
     new RegExp(
-      `climber-pkg/index\\.mjs, loaded by the hosted tree, imports \\.\\./\\.\\./${OUTSIDE_DIR}/legacy\\.mjs, which resolves outside netlify/`,
+      `climber-pkg/index\\.mjs, loaded by the hosted tree, imports \\.\\./\\.\\./${OUTSIDE_DIR}/legacy\\.mjs, which resolves outside the hosted subtree`,
     ),
   );
 });
@@ -894,11 +1012,11 @@ test("the manifest may not permit a Node the gate cannot run on", () => {
      the deploy does not keep, and the symptom on such a Node would be this gate
      crashing rather than a readable answer. */
   assertRejected(
-    (root) => writeManifest(root, { "allowed-pkg": "1.0.0" }, { node: ">=22.12.0" }),
+    (root) => writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0" }, { node: ">=22.12.0" }),
     /permits Node 22\.12\.0, below the 22\.15\.0 that provides module\.registerHooks/,
   );
   assertRejected(
-    (root) => writeManifest(root, { "allowed-pkg": "1.0.0" }, { node: "^22" }),
+    (root) => writeManifest(root, { "allowed-pkg": "1.0.0", tldts: "1.0.0" }, { node: "^22" }),
     /declares engines\.node "\^22"; it must be a `>=` floor/,
   );
 });

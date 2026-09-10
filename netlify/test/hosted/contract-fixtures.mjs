@@ -24,7 +24,7 @@
  *
  * **These fixtures are test data and nothing else.** They must never reach a
  * deployed code path, and that is enforced mechanically rather than promised:
- * `scripts/check-hosted-modules.mjs` fails if any module in the hosted deploy
+ * `scripts/check-function-modules.mjs` fails if any module in the hosted deploy
  * tree resolves an import into `netlify/test/hosted/`. There is no "fixture mode" flag
  * for a handler to be switched into, because a flag that fakes success is the
  * failure this rule exists to prevent.

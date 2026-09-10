@@ -89,7 +89,7 @@ export function methodNotAllowed(allow) {
  * `build` receives `{config, store}` and returns the actual handler. It is a
  * factory rather than a module-level constant so that nothing is read from the
  * environment and no store is opened while the module is merely being *loaded* -
- * which is what `scripts/check-hosted-modules.mjs` does to every file in this
+ * which is what `scripts/check-function-modules.mjs` does to every file in this
  * tree, with no credential present and no store to reach.
  *
  * Configuration is read per request and a `HostedConfigError` becomes a 503

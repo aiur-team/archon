@@ -21,7 +21,7 @@
  *     mutation, no ambient configuration. `validateOrigin` is the only function
  *     that consults a data table (the public-suffix list, statically bundled by
  *     `tldts`), and it still reads nothing from the environment. This is what
- *     lets `scripts/check-hosted-modules.mjs` import the module at CI time
+ *     lets `scripts/check-function-modules.mjs` import the module at CI time
  *     without a credential, and what lets a handler validate before it decides
  *     whether it is allowed to do anything at all.
  *  3. **Unknown fields are rejected.** An accepted-but-ignored field is how an
@@ -37,7 +37,7 @@
  *     `validateWireError` would reject is a validator that can be turned into a
  *     reflection channel by an attacker-chosen field name.
  *
- * Static imports only. `scripts/check-hosted-modules.mjs` observes what Node
+ * Static imports only. `scripts/check-function-modules.mjs` observes what Node
  * actually resolves for every module in the hosted deploy tree, which is exact
  * for a static import and impossible for a dynamic one inside a function body -
  * so dynamic import is refused outright in this tree.

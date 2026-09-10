@@ -160,7 +160,7 @@ function isWellFormedWriteResult(result) {
  * A publication store bound to one provider store handle.
  *
  * `getStore` is injected rather than imported and called here so that loading
- * this module contacts nothing: `scripts/check-hosted-modules.mjs` imports every
+ * this module contacts nothing: `scripts/check-function-modules.mjs` imports every
  * hosted module at CI time with no credential, and a store opened at module
  * scope would turn that gate into a network call. Production passes
  * `@netlify/blobs`'s `getStore`; tests pass a deterministic double.

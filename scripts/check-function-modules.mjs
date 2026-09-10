@@ -37,14 +37,23 @@
  *
  * So the rules below come in two scopes, and the distinction is load-bearing
  * rather than tidy. Whole-tree rules hold for every deployed module. Hosted-scoped
- * rules are `scripts/check-hosted-modules.mjs` carried across intact: each one is
- * enforced over exactly the files it governed before the move, at exactly the
- * strength it had, and each is scoped rather than widened because widening it
- * would fail correct collaboration code that predates the hosted boundary and was
- * never asked to keep it. `netlify/lib/store.mjs` imports `node:fs`, which the
- * hosted builtin allowlist refuses; `netlify/lib/notify.test.mjs` sits beside its
- * source, which the hosted placement rule refuses. Neither is a defect, and a
- * merged gate that reported them as ones would be turned off within a week.
+ * rules are the retired hosted gate's, enforced over exactly the files they
+ * governed before the move and at the strength they had — scoped rather than
+ * widened, because widening one would fail correct collaboration code that predates
+ * the hosted boundary and was never asked to keep it. `netlify/lib/store.mjs`
+ * imports `node:fs`, which the hosted builtin allowlist refuses;
+ * `netlify/lib/notify.test.mjs` sits beside its source, which the hosted placement
+ * rule refuses. Neither is a defect, and a merged gate that reported them as ones
+ * would be turned off within a week.
+ *
+ * Two of those rules had to be *restated* rather than copied, because the move
+ * changed what their old wording meant rather than where it applied — H0 and H0b
+ * below. Both are the same barrier addressed to the same code; copying either one
+ * verbatim would have retired it silently, which is the precise failure this whole
+ * file exists to make impossible. Membership in the hosted set is therefore
+ * fail-closed too: `looksHosted` refuses a path that reads as hosted code and is
+ * not in the set, because a rule that only applies to files it recognises is a rule
+ * a rename turns off.
  *
  * ### Whole-tree rules
  *
@@ -75,6 +84,22 @@
  *
  * ### Hosted-scoped rules
  *
+ *  H0. **Nothing first-party under the hosted subtree resolves outside it.** This
+ *      is the rule the merge would have dissolved by itself, and it was the old
+ *      gate's "sole barrier". Under two trees it read "nothing under `hosted/`
+ *      resolves outside `hosted/`", and containment against the deploy root said
+ *      the same thing. It does not any more: `netlify/lib/access.mjs` and
+ *      `netlify/lib/identity.mjs` - Netlify Identity, `DOC_OWNERS`, the
+ *      organisation role defaults - are now *inside* the deploy tree and one
+ *      relative segment away, so `import { DOC_OWNERS } from "../access.mjs"` in a
+ *      hosted handler passes W1 and deploys. So the barrier is restated against the
+ *      hosted subtree: a hosted module's relative imports must land in
+ *      `netlify/lib/hosted/` or on another `netlify/functions/hosted-*.mjs`.
+ *      Membership is fail-closed - see `looksHosted` - because a rule that only
+ *      applies to files it recognises is a rule a rename turns off.
+ *  H0b. **A hosted bare import is one of `HOSTED_DEPENDENCIES`.** One manifest is
+ *      the union of two dependency sets, and the union contains
+ *      `@netlify/identity`. Root-declared is necessary and not sufficient.
  *  H1. **No dynamic `import(`.** The rules above are exact for a static import,
  *      because the resolver observes every one of them at link time. A dynamic
  *      import inside a function body is never evaluated by this gate and would
@@ -191,14 +216,38 @@ const ASSET_DIRECTORY = "public";
  */
 const EDGE_DIRECTORY = "edge-functions";
 
-/** Directories under the deploy tree that carry no loadable Node module. */
-const UNSCANNED_DIRECTORIES = Object.freeze([FIXTURE_DIRECTORY, ASSET_DIRECTORY, EDGE_DIRECTORY]);
+/**
+ * The one extension the edge directory may carry.
+ *
+ * The exclusion above is for `gate.ts` and nothing else. Skipping the directory
+ * wholesale would let a `.mjs` handler sit there unscanned and unloaded, which is
+ * the "deployable code where nothing checks it" hole the placement rule exists to
+ * close - so the exclusion is by extension, and anything else there is a fault.
+ */
+const EDGE_EXTENSION = ".ts";
+
+/** Directories under the deploy tree that carry no loadable Node module at all. */
+const UNSCANNED_DIRECTORIES = Object.freeze([FIXTURE_DIRECTORY, ASSET_DIRECTORY]);
 
 /** Where the hosted publishing application's libraries live, under the deploy tree. */
 const HOSTED_LIB = `lib/hosted`;
 
 /** What every hosted function file is named, so a basename cannot collide. */
 const HOSTED_FUNCTION_PREFIX = "hosted-";
+
+/**
+ * The packages a *hosted* deploy module may import.
+ *
+ * The old `hosted/package.json` declared exactly these two, and "every bare import
+ * is a declared hosted dependency" was rule 2. One merged manifest would have
+ * quietly widened that to the union: the root manifest also declares
+ * `@netlify/identity`, which is the legacy authority the hosted boundary exists to
+ * keep out, and `import { ... } from "@netlify/identity"` inside a hosted handler
+ * would have linked and deployed. So the hosted subset stays a list here, where
+ * adding to it is a deliberate edit a reviewer can see, on top of the whole-tree
+ * rule that every bare import be root-declared.
+ */
+const HOSTED_DEPENDENCIES = Object.freeze(["@netlify/blobs", "tldts"]);
 
 /** The path prefix `netlify.toml` excludes from the edge gate. */
 const ROUTED_PREFIX = "/api/";
@@ -337,9 +386,9 @@ const ALLOWED_LOAD_FAILURES = new Map([]);
  * is a hole left open in a gate, so this is checked on every run rather than left
  * to whoever lands the fix to remember.
  */
-function allowanceApplies(repoRoot, relative, allowance) {
+function allowanceApplies(repoRoot, modulePath, allowance) {
   try {
-    return allowance.whileSourceMatches.test(readFileSync(join(repoRoot, relative), "utf8"));
+    return allowance.whileSourceMatches.test(readFileSync(join(repoRoot, modulePath), "utf8"));
   } catch {
     /* The module named by an allowance is gone. The entry is stale either way. */
     return false;
@@ -389,6 +438,26 @@ function isHosted(deployRoot, path) {
   const rel = relative(deployRoot, path).split(sep).join("/");
   if (rel.startsWith(`${HOSTED_LIB}/`)) return true;
   return rel.startsWith(`functions/${HOSTED_FUNCTION_PREFIX}`);
+}
+
+/**
+ * Whether a deploy path *reads* as hosted code without being in the hosted set.
+ *
+ * `isHosted` is a membership test over two exact shapes, so anything that looks
+ * hosted and matches neither silently loses every hosted rule while still
+ * deploying as a hosted route. Two spellings do it without trying:
+ * `netlify/functions/hosted/publish.mjs` (a directory Netlify accepts, and
+ * `"functions/hosted/"` is not `"functions/hosted-"`) and
+ * `netlify/lib/hosted-helper.mjs` (beside the hosted tree rather than inside it).
+ * Neither is exotic - both are what a tidying refactor produces.
+ *
+ * So membership fails closed: a path that carries a `hosted` segment or a
+ * `hosted-` basename and is not in the set is a fault, and the only way to add
+ * hosted code is to put it where the rules reach it.
+ */
+function looksHosted(deployRoot, path) {
+  const parts = relative(deployRoot, path).split(sep);
+  return parts.some((part) => part === "hosted" || part.startsWith(HOSTED_FUNCTION_PREFIX));
 }
 
 /**
@@ -586,11 +655,20 @@ function readManifest(repoRoot, faults) {
  * function that cannot be invoked, which the deploy would accept silently.
  *
  * `hosted` picks the namespace the declared routes are held to: `/api/hosted/` for
- * the hosted application, `/api/` for the collaboration deployment, and the closed
- * page-route allowlist for either.
+ * the hosted application and `/api/` for the collaboration deployment.
+ *
+ * The page-route allowlist belongs to the hosted application alone. Offering it to
+ * both would have relaxed a rule nobody asked to relax: the collaboration rule is
+ * that *every* routed function sits under `/api/`, because `netlify.toml` excludes
+ * exactly `/api/*` from the edge gate, so a collaboration function at
+ * `/docs/:documentId` would be served from behind a gate the workflow's config
+ * check still reports as fail-closed.
  */
 function entryPointFaults(module, hosted) {
   const prefix = hosted ? HOSTED_ROUTED_PREFIX : ROUTED_PREFIX;
+  const outside = hosted
+    ? `outside the ${prefix}* hosted API namespace`
+    : `outside the ${prefix}* edge-gate exclusion`;
   const faults = [];
   if (typeof module.default !== "function") {
     faults.push("does not export a callable default handler");
@@ -611,8 +689,8 @@ function entryPointFaults(module, hosted) {
       faults.push(`declares a non-string route ${JSON.stringify(path)}`);
       continue;
     }
-    if (!path.startsWith(prefix) && !ALLOWED_PAGE_ROUTES.includes(path)) {
-      faults.push(`is routed at ${path}, outside the ${prefix}* namespace`);
+    if (!path.startsWith(prefix) && !(hosted && ALLOWED_PAGE_ROUTES.includes(path))) {
+      faults.push(`is routed at ${path}, ${outside}`);
     }
     paths.push(path);
   }
@@ -654,8 +732,8 @@ function reachableFrom(records, hostedModules) {
  *
  * A dependency is judged on the capability and on nothing else: it may not reach
  * `node:module`, whose export list is how an ESM module obtains a CommonJS
- * `require`, and it may not resolve a first-party file outside the deploy tree. Its
- * internals are its own business - refusing a dependency's `node:fs` would be a
+ * `require`, and it may not resolve a first-party file outside the hosted subtree.
+ * Its internals are its own business - refusing a dependency's `node:fs` would be a
  * boundary this gate has no standing to hold.
  */
 function dependencyFault(record, { deployRoot, installedRoot, repoRoot }) {
@@ -666,8 +744,8 @@ function dependencyFault(record, { deployRoot, installedRoot, repoRoot }) {
   }
   if (url.startsWith("file:")) {
     const target = fileURLToPath(url);
-    if (!isInside(deployRoot, target) && !isInside(installedRoot, target)) {
-      return `${from}, loaded by the hosted tree, imports ${specifier}, which resolves outside ${DEPLOY}/`;
+    if (!isInside(installedRoot, target) && !isHosted(deployRoot, target)) {
+      return `${from}, loaded by the hosted tree, imports ${specifier}, which resolves outside the hosted subtree`;
     }
   }
   return null;
@@ -717,7 +795,14 @@ function resolutionFault(record, context) {
       return `${from} imports ${specifier}, reaching node_modules by path instead of by package name`;
     }
     const name = packageOf(specifier);
-    return dependencies.has(name) ? null : `${from} imports ${name}, which is not a dependency in package.json`;
+    if (!dependencies.has(name)) return `${from} imports ${name}, which is not a dependency in package.json`;
+    /* And the hosted subset on top, because one merged manifest is the union of two
+       dependency sets. `@netlify/identity` is root-declared and is exactly the
+       legacy authority the hosted boundary exists to keep out. */
+    if (hosted && !HOSTED_DEPENDENCIES.includes(name)) {
+      return `${from} imports ${name}, which is not one of the packages the hosted deploy tree may import (${HOSTED_DEPENDENCIES.join(", ")})`;
+    }
+    return null;
   }
 
   if (!inDeploy) {
@@ -734,6 +819,19 @@ function resolutionFault(record, context) {
   }
   if (!isRelative(specifier)) {
     return `${from} imports ${specifier}, which resolves inside ${DEPLOY}/ but is not a relative path`;
+  }
+
+  /* The hosted boundary, at the strength it had before the merge. Under two deploy
+     trees this was "nothing under `hosted/` resolves outside `hosted/`", and the
+     move alone would have dissolved it: `netlify/lib/access.mjs` and
+     `netlify/lib/identity.mjs` - Netlify Identity, `DOC_OWNERS` and the
+     organisation role defaults - are now one relative segment from every hosted
+     module and are inside the deploy tree, so containment says nothing about them.
+     A hosted handler importing `../access.mjs` would have deployed green. The rule
+     is therefore restated against the hosted subtree rather than the deploy root,
+     which is the same barrier addressed to the same code. */
+  if (hosted && !isHosted(deployRoot, target)) {
+    return `${from} imports ${specifier}, which resolves to ${relative(repoRoot, target)}, outside the hosted subtree (${DEPLOY}/${HOSTED_LIB}/ and ${DEPLOY}/functions/${HOSTED_FUNCTION_PREFIX}*${LOADABLE})`;
   }
   return null;
 }
@@ -765,7 +863,7 @@ async function main(argv) {
   const dependencies = readManifest(repoRoot, faults);
   const installedRoot = join(repoRoot, "node_modules");
   const fixtureDir = join(deployRoot, FIXTURE_DIRECTORY);
-  const hostedLibDir = join(deployRoot, ...HOSTED_LIB.split("/"));
+  const edgeDir = join(deployRoot, EDGE_DIRECTORY);
   const unscanned = UNSCANNED_DIRECTORIES.map((name) => join(deployRoot, name));
 
   /* Staleness is decided up front and independently of what loads, so the report is
@@ -782,6 +880,8 @@ async function main(argv) {
   const deployModules = [];
   const functionModules = [];
   const hostedModulePaths = [];
+  const hostedLibModules = [];
+  const hostedFunctionModules = [];
   for (const path of filesUnder(deployRoot, faults, repoRoot)) {
     if (unscanned.some((directory) => isInside(directory, path))) continue;
 
@@ -791,7 +891,23 @@ async function main(argv) {
     if (!SCANNED.includes(extension)) continue;
 
     const shown = relative(repoRoot, path);
+    if (isInside(edgeDir, path)) {
+      /* The edge directory is excluded by extension rather than wholesale, so a
+         `.mjs` handler cannot sit there unscanned and unloaded. */
+      if (extension === EDGE_EXTENSION) continue;
+      faults.push(
+        `${shown} is ${extension} inside ${DEPLOY}/${EDGE_DIRECTORY}/, which carries the Deno TypeScript edge function and nothing else`,
+      );
+      continue;
+    }
+
     const hosted = isHosted(deployRoot, path);
+    if (!hosted && looksHosted(deployRoot, path)) {
+      faults.push(
+        `${shown} reads as hosted code but is not in the hosted deploy set (${DEPLOY}/${HOSTED_LIB}/ and ${DEPLOY}/functions/${HOSTED_FUNCTION_PREFIX}*${LOADABLE}), so no hosted rule would reach it`,
+      );
+      continue;
+    }
     const directory = relative(deployRoot, path).split(sep)[0];
     if (!DEPLOY_DIRECTORIES.includes(directory)) {
       faults.push(
@@ -834,24 +950,37 @@ async function main(argv) {
         faults.push(`${shown} names ${spelled}; the hosted deploy tree may not acquire a CommonJS require`);
       }
       hostedModulePaths.push(path);
+      if (directory === "lib") hostedLibModules.push(path);
     }
 
     deployModules.push(path);
-    if (directory === "functions") functionModules.push(path);
+    if (directory === "functions") {
+      functionModules.push(path);
+      if (hosted) hostedFunctionModules.push(path);
+    }
   }
 
   /* A gate that finds nothing to check reports success, which is the one result it
-     must never invent. Each guard is scoped to a directory rather than to the tree,
-     because scoping them to the tree once let a module moved out of `functions/`
-     lose every entry-point and route check while the gate kept printing PASS. */
+     must never invent, and every guard here is unconditional rather than gated on
+     the directory existing. Gating on existence is the same silent pass one step
+     removed: a `functions/` that is renamed away leaves nothing to check and, under
+     an `existsSync` guard, nothing to say about it either. Four counts, because
+     four different things can empty out - the tree, the functions, the hosted
+     libraries and the hosted functions - and each one silently retires a different
+     set of rules. */
   if (deployModules.length === 0) {
     faults.push(`no modules found under ${DEPLOY}/{${DEPLOY_DIRECTORIES.join(",")}}/`);
   }
-  if (existsSync(join(deployRoot, "functions")) && functionModules.length === 0) {
-    faults.push(`${DEPLOY}/functions/ exists but contains no loadable module`);
+  if (functionModules.length === 0) {
+    faults.push(`${DEPLOY}/functions/ contains no loadable module`);
   }
-  if (existsSync(hostedLibDir) && hostedModulePaths.length === 0) {
-    faults.push(`${DEPLOY}/${HOSTED_LIB}/ exists but contains no loadable module`);
+  if (hostedLibModules.length === 0) {
+    faults.push(`${DEPLOY}/${HOSTED_LIB}/ contains no loadable module; the hosted rules would judge nothing`);
+  }
+  if (hostedFunctionModules.length === 0) {
+    faults.push(
+      `${DEPLOY}/functions/${HOSTED_FUNCTION_PREFIX}*${LOADABLE} matches no loadable module; the hosted route and entry-point rules would judge nothing`,
+    );
   }
 
   /* Record what Node resolves, then reason about resolved URLs rather than about

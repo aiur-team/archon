@@ -1536,12 +1536,12 @@ test("the restated wire constants still agree with the server's own contract", a
 
      So the copy is checked against the original wherever both exist: in the
      repository, and therefore in CI, that is every run. From an installed
-     package `hosted/` is not there, and the test reports itself skipped rather
+     package `netlify/` is not there, and the test reports itself skipped rather
      than failing on a machine that was never meant to have it.
 
      The server's constants are read out of the source text rather than
-     imported. `contracts.mjs` pulls in dependencies installed under `hosted/`,
-     which this package does not have and must not acquire; importing it would
+     imported. `contracts.mjs` pulls in dependencies installed at the repository
+     root, which this package does not have and must not acquire; importing it would
      throw for a reason that has nothing to do with drift, and a guard that
      turns "could not load" into "skipped" is a guard that silently stops
      running. Reading the text has no such failure mode, and every shared name

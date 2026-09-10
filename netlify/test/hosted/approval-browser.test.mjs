@@ -19,7 +19,7 @@
  * Real: every hosted handler in the flow - session, bind, review, decision, and
  * both halves of the GitHub sign-in - running the same exported implementations
  * the deploy runs, over the real `AuthStore` and the real publication adapter.
- * Real: `public/publish/authorize.html` and `authorize.js`, served byte for
+ * Real: `netlify/public/publish/authorize.html` and `authorize.js`, served byte for
  * byte, under the same Content-Security-Policy `netlify.toml` puts on them.
  *
  * Fixtures: the blob provider is the in-memory double with real conditional

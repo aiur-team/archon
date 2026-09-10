@@ -139,7 +139,7 @@ file nobody reads again.
 | `HOSTED_APP_ORIGIN` | yes | The one origin allowed to frame this renderer and send it a document |
 | `HOSTED_RENDER_ORIGIN` | yes | This deployment's own origin. Must differ from the application origin |
 
-Both are the same keys `hosted/` reads, deliberately: the application and the
+Both are the same keys `netlify/lib/hosted/` reads, deliberately: the application and the
 renderer have to agree on the pair, and two names for one value is how they stop
 agreeing. No secret is read here, because there is none this deployment could
 need.

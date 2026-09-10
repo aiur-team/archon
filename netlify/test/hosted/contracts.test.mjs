@@ -1,8 +1,8 @@
 /**
  * Regressions for the hosted contracts and their configuration reader.
  *
- * Every test below names one guarded condition in `../lib/contracts.mjs` or
- * `../lib/config.mjs`. That correspondence is the point rather than a
+ * Every test below names one guarded condition in `../../lib/hosted/contracts.mjs` or
+ * `../../lib/hosted/config.mjs`. That correspondence is the point rather than a
  * convenience: AHU-001's acceptance requires that removing any one of those
  * conditions makes a test here fail, so a test that would still pass with its
  * guard deleted is a test that is not doing anything.

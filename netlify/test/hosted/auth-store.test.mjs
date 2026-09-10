@@ -1,5 +1,5 @@
 /**
- * Regressions for `../lib/auth-store.mjs`.
+ * Regressions for `../../lib/hosted/auth-store.mjs`.
  *
  * Every test below names one guarded condition in that module, and the suite is
  * written so that removing the condition makes the test fail rather than merely

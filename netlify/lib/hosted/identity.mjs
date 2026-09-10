@@ -218,7 +218,7 @@ export async function identifyHosted(request, { store }) {
  * `Origin: null` - the sign-in form and the different-account form both. An
  * exact-origin check with no exemption does not merely reject an attacker here;
  * it rejects the only sign-in path the product has, in every browser. This was
- * observed rather than reasoned about: `test/approval-browser.test.mjs` drives
+ * observed rather than reasoned about: `netlify/test/hosted/approval-browser.test.mjs` drives
  * Chromium against these handlers and the start route answered
  * `/login/?status=expired` on every attempt.
  *

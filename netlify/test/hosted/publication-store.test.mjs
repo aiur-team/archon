@@ -1,5 +1,5 @@
 /**
- * Regressions for the provider adapter in `../lib/publication-store.mjs`.
+ * Regressions for the provider adapter in `../../lib/hosted/publication-store.mjs`.
  *
  * Each test below names one guarded condition in that module, and is written so
  * that removing the guard makes it fail: the assertions are about *effects* -
