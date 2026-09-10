@@ -16,13 +16,21 @@
  * opens a store or contacts a provider.
  *
  * On top of linking, seven rules hold the boundary. Each exists because a
- * plausible mistake would otherwise deploy:
+ * plausible mistake would otherwise deploy - and that, precisely, is the threat
+ * model. These rules catch mistakes, straightforward spellings, and everything
+ * that executes while the tree loads. They do not stop a determined author
+ * inside `hosted/`, who has `eval`, `new Function` and any number of computed
+ * names, nor a hostile declared dependency; those are stopped by review of the
+ * diff and of the lockfile. Read every rule below as "this cannot happen by
+ * accident or in passing", never as "this cannot happen":
  *
- *  1. **Nothing resolves outside `hosted/`.** A hosted module that reached into
- *     `netlify/lib/` would link here and 404 in production, because the hosted
- *     deploy carries only this directory - and it would undo the boundary this
- *     build exists to draw, since the legacy tree is where Netlify Identity,
- *     `DOC_OWNERS` and the organisation role defaults live.
+ *  1. **Nothing resolves outside `hosted/`.** This rule is the sole barrier,
+ *     not a second opinion: Netlify's esbuild bundler follows a relative import
+ *     anywhere in the checked-out repository, so a hosted module that reached
+ *     into `netlify/lib/` would be bundled and would *deploy*, working exactly
+ *     as written. That would undo the boundary this build exists to draw, since
+ *     the legacy tree is where Netlify Identity, `DOC_OWNERS` and the
+ *     organisation role defaults live.
  *  2. **Every bare import is a declared runtime dependency, installed under
  *     `hosted/node_modules`.** Node's resolution walks up, so with the root
  *     `npm ci` already run a hosted module can import a root-only package and
@@ -59,15 +67,16 @@
  *     `.cjs` file; it does not stop an allowed `.mjs` one from importing
  *     `createRequire` out of `node:module` and requiring
  *     `../../netlify/lib/legacy.cjs` through it. That is the same escape by a
- *     different door, so this rule shuts all three of them. Builtin imports are
- *     an allowlist, which refuses `node:module` and fails closed for every
- *     builtin nobody has argued for yet. The two names that hand out a builtin
- *     namespace without going through the resolver at all - `createRequire`
- *     itself and `process.getBuiltinModule` - are refused lexically, like rule
- *     4 and for the same reason: an acquisition inside a function body the gate
- *     never calls is invisible to any hook. The lexical half reads the source
- *     twice, once as written and once with `\uXXXX` and `\u{...}` escapes
- *     decoded, because JavaScript lets an identifier be spelled in escapes:
+ *     different door, so this rule closes the three doors it can see. Builtin
+ *     imports are an allowlist, which refuses `node:module` and fails closed
+ *     for every builtin nobody has argued for yet. The two names that hand out
+ *     a builtin namespace without going through the resolver at all -
+ *     `createRequire` itself and `process.getBuiltinModule` - are refused
+ *     lexically, like rule 4 and for the same reason: an acquisition inside a
+ *     function body the gate never calls is invisible to any hook. The lexical
+ *     half reads the source twice, once as written and once with `\uXXXX` and
+ *     `\u{...}` escapes decoded, because JavaScript lets an identifier be
+ *     spelled in escapes:
  *     `create\u0052equire` and `process.getBuiltin\u004dodule` are the same two
  *     names to the parser and were different text to a raw scan. And the hook
  *     is synchronous, so a `require()` that does execute is journaled and
@@ -152,7 +161,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The repository root, derived from this file's own location. */
@@ -638,12 +647,19 @@ async function main(argv) {
     process.stderr.write(`FAIL hosted modules: --root ${given ?? ""} does not exist\n`);
     return 1;
   }
-  /* Absolute, always. Every scanned path is derived from this root, while the
-     resolution records come back from Node as absolute file URLs, so a relative
-     `--root` made the two vocabularies disagree: no scanned module matched its
-     own resolution record, every boundary rule quietly judged nothing, and the
-     gate reported PASS on a tree it had already read the escape out of. */
-  const repoRoot = resolve(given);
+  /* Absolute *and* canonical. Every scanned path is derived from this root,
+     while the resolution records come back from Node as absolute, realpath'd
+     file URLs, so any root that is spelled differently from what Node reports
+     made the two vocabularies disagree: no scanned module matched its own
+     resolution record, every boundary rule quietly judged nothing, and the gate
+     reported PASS on a tree it had already read the escape out of. A relative
+     root did it, and so did an absolute one reached through a symlink - which
+     is not exotic, since `os.tmpdir()` is a symlink on macOS. Normalising here
+     is the fix - `realpathSync` returns an absolute canonical path, so it
+     covers the relative case too - and the check after the load is the
+     backstop, because the next spelling that disagrees will not be one anybody
+     predicted. */
+  const repoRoot = realpathSync(given);
 
   const hostedRoot = join(repoRoot, HOSTED);
   if (!existsSync(hostedRoot)) {
@@ -685,9 +701,12 @@ async function main(argv) {
       continue;
     }
 
-    /* Rules 4 and 6, on raw source including comments. See the header: this is
-       the only spelling of either rule that a template literal cannot slip
-       past, and the only one that reaches a function body nothing calls. */
+    /* Rules 4 and 6, on raw source including comments, and on the source with
+       identifier escapes decoded. Scanning raw text rather than string-aware
+       text is what stops a template literal carrying the construct past in
+       passing, and it is the only form of either rule that reaches a function
+       body nothing calls. It is not a barrier against a computed name - see the
+       threat model in the header; nothing lexical is. */
     const source = readFileSync(path, "utf8");
     const written = spellings(source);
     if (written.some(usesDynamicImport)) {
@@ -726,7 +745,7 @@ async function main(argv) {
 
   const hostedModules = new Set(deployModules);
   const routes = new Map();
-  let loaded = 0;
+  const linked = [];
 
   /* Rule 7's second door. `process.getBuiltinModule` reaches `node:module` off
      a global, so no resolver is consulted and no import is written down; the
@@ -761,7 +780,7 @@ async function main(argv) {
       faults.push(`${shown} ${error.message.split("\n")[0].split(`${repoRoot}${sep}`).join("")}`);
       continue;
     }
-    loaded += 1;
+    linked.push(path);
 
     if (!functionModules.includes(path)) continue;
     const { faults: shapeFaults, paths } = entryPointFaults(module);
@@ -775,6 +794,22 @@ async function main(argv) {
 
   if (typeof original === "function") process.getBuiltinModule = original;
   for (const fault of capabilityFaults) faults.push(fault);
+
+  /* Fail closed if this gate and Node disagree about how to spell a path.
+     Every module above was imported by absolute URL, so each one must appear as
+     the target of a resolution record; if it does not, the records are in a
+     vocabulary the boundary rules below cannot match and they will judge
+     nothing while every module loads and links. That combination reports PASS
+     and means nothing, which is the one answer this gate must never give. */
+  const resolvedTargets = new Set(
+    records.filter((record) => record.url.startsWith("file:")).map((record) => fileURLToPath(record.url)),
+  );
+  for (const path of linked) {
+    if (resolvedTargets.has(path)) continue;
+    faults.push(
+      `${relative(repoRoot, path)} loaded but names no resolution record; this gate and Node disagree about how to spell it, so no boundary rule can judge it`,
+    );
+  }
 
   const reached = reachableFrom(records, hostedModules);
   const seen = new Set();
@@ -801,7 +836,7 @@ async function main(argv) {
   }
 
   process.stdout.write(
-    `PASS hosted modules: ${loaded} modules load and link (${functionModules.length} routed functions)\n`,
+    `PASS hosted modules: ${linked.length} modules load and link (${functionModules.length} routed functions)\n`,
   );
   return 0;
 }

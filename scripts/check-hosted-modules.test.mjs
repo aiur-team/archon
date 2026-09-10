@@ -624,12 +624,72 @@ test("an identifier spelled in escapes is the same identifier", () => {
         '  return m.mk(here)("../../netlify/lib/legacy.cjs");\n' +
         "}\n",
     ],
+    /* The braced form is a separate branch of the decoding pattern, and a
+       separate spelling of the same identifier: `\u{52}` needs no leading
+       zeros, so a four-hex-digit pattern alone reads it as prose. */
+    [
+      "createRequire",
+      "export async function onRequest(here, mod) {\n" +
+        '  const { c\\u{72}eateRequire: build } = mod;\n' +
+        '  return build(here)("../../netlify/lib/legacy.cjs");\n' +
+        "}\n",
+    ],
   ]) {
     assertRejected(
       (root, hosted) => write(join(hosted, "lib", "escaped.mjs"), source),
       new RegExp(`escaped\\.mjs names ${name}; the hosted deploy tree may not acquire a CommonJS require`),
     );
   }
+});
+
+test("a --root reached through a symlink is judged, not silently skipped", () => {
+  /* `path.resolve` makes a root absolute; it does not canonicalise it. Node
+     reports realpath'd URLs, so an absolute-but-symlinked root disagreed with
+     every scanned path exactly as a relative one did, and the gate printed PASS
+     over a planted escape. This is not exotic: `os.tmpdir()` is a symlink on
+     macOS, so the whole suite would have run against a gate judging nothing. */
+  const root = cleanTree();
+  write(
+    join(root, HOSTED_DIR, "lib", "leak.mjs"),
+    'import { legacy } from "../../netlify/lib/identity.mjs";\nexport const leak = legacy;\n',
+  );
+  const link = mkdtempSync(join(tmpdir(), "hosted-gate-link-"));
+  roots.push(link);
+  const alias = join(link, "checkout");
+  symlinkSync(root, alias);
+
+  const { status, stdout, stderr } = runGate(alias);
+  assert.equal(status, 1, `expected the gate to fail; it printed:\n${stdout}${stderr}`);
+  assert.match(stderr, /resolves outside hosted\//);
+});
+
+test("a module that loads while naming no resolution record fails closed", () => {
+  /* The backstop behind every root-spelling bug, provoked here by a `hosted`
+     directory that is itself a symlink. Placement passes, because containment
+     resolves both sides; the module links, because its escape resolves at the
+     real location. But the scan walked `<root>/hosted/...` while Node reports
+     the link target, so no record names any scanned module, every boundary rule
+     judges an empty set - and the escape out of `hosted/` goes unreported while
+     the gate prints PASS. Asserting the invariant directly means the next
+     spelling that disagrees does not have to be predicted first. */
+  const root = mkdtempSync(join(tmpdir(), "hosted-gate-alias-"));
+  const away = mkdtempSync(join(tmpdir(), "hosted-gate-away-"));
+  roots.push(root, away);
+
+  write(
+    join(away, HOSTED_DIR, "package.json"),
+    JSON.stringify({ name: "hosted", private: true, type: "module", engines: FIXTURE_ENGINES }),
+  );
+  write(join(away, "netlify", "lib", "identity.mjs"), "export const legacy = true;\n");
+  write(
+    join(away, HOSTED_DIR, "lib", "leak.mjs"),
+    'import { legacy } from "../../netlify/lib/identity.mjs";\nexport const leak = legacy;\n',
+  );
+  symlinkSync(join(away, HOSTED_DIR), join(root, HOSTED_DIR));
+
+  const { status, stdout, stderr } = runGate(root);
+  assert.equal(status, 1, `expected the gate to fail; it printed:\n${stdout}${stderr}`);
+  assert.match(stderr, /loaded but names no resolution record/);
 });
 
 test("a relative --root is judged, not silently skipped", () => {

@@ -40,11 +40,21 @@ the build if it ever does. Nothing about the root deployment or
 `scripts/check-hosted-modules.mjs` enforces these on every build, and
 `scripts/check-hosted-modules.test.mjs` proves it fails when they are broken.
 
+Read them as "this cannot happen by accident or in passing", not as "this cannot
+happen". The gate catches mistakes, straightforward spellings, and everything
+that executes while the tree loads. A determined author inside `hosted/` has
+`eval`, `new Function` and computed names, and a hostile declared dependency has
+its own cold start; both are stopped by review of the diff and of the lockfile,
+which is where each becomes visible.
+
 - **Deployable code lives in `lib/` or `functions/`.** A module anywhere else
   under `hosted/` is refused rather than left unscanned.
 - **Nothing resolves outside `hosted/`**, and every bare import must be a
   declared dependency that resolves inside `hosted/node_modules` — not a package
-  that happens to be installed at the repository root.
+  that happens to be installed at the repository root. This rule is the sole
+  barrier rather than a second opinion: Netlify's esbuild bundler follows a
+  relative import anywhere in the checked-out repository, so a module reaching
+  into `netlify/lib/` would bundle and deploy, working as written.
 - **Nothing deployed may import `hosted/test/`.**
 - **Static imports only.** Dynamic `import(` is refused anywhere in the tree,
   including inside a comment. The resolver observes every static import exactly;
@@ -56,7 +66,8 @@ the build if it ever does. Nothing about the root deployment or
   rules above are read off an ESM resolution hook, which Node never consults for
   a CommonJS `require()`, and a `.js` file's module system is decided by the
   nearest `package.json` rather than by the file itself.
-- **No CommonJS `require`, however it is obtained.** `.mjs` alone does not stop
+- **No CommonJS `require` acquired in any of the ways a hosted module would
+  plausibly acquire one.** `.mjs` alone does not stop
   `createRequire`, so builtin imports are an allowlist (`node:buffer`,
   `node:crypto`, `node:url`, `node:util`) that `node:module` can never join, and
   the names `createRequire` and `getBuiltinModule` are refused anywhere in the
