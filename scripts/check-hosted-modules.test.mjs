@@ -231,6 +231,32 @@ test("dynamic import is refused when a comment separates the two tokens", () => 
   }
 });
 
+test("a line comment between the tokens ends at every line terminator", () => {
+  /* JavaScript ends a line comment at any of four LineTerminators, not at LF
+     alone. Each spelling below is a dynamic import the engine accepts - proven
+     here rather than asserted - so a filler run that stops only at LF would
+     swallow the rest of the file, end at end of source and find no `(`,
+     reopening the same escape out of `hosted/` that the comment forms above
+     close. The terminators are written as escapes because the character they
+     produce is invisible in a source listing. */
+  for (const [what, terminator] of [
+    ["a carriage return", "\r"],
+    ["U+2028", "\u2028"],
+    ["U+2029", "\u2029"],
+  ]) {
+    const expression = `import // ${what}${terminator}("../../netlify/lib/identity.mjs")`;
+    assert.doesNotThrow(
+      () => new Function(`return async function () { return ${expression}; };`),
+      `${what} should spell a legal dynamic import`,
+    );
+    assertRejected(
+      (root, hosted) =>
+        write(join(hosted, "lib", "terminated.mjs"), `export async function load() { return ${expression}; }\n`),
+      /uses dynamic import/,
+    );
+  }
+});
+
 test("a name merely ending in import is not a dynamic import", () => {
   /* The clean tree must stay clean: a rule that fires on `reimport(` would make
      the gate fail on ordinary code, and a gate that fails on everything teaches

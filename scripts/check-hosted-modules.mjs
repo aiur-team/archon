@@ -147,9 +147,17 @@ function isRelative(specifier) {
  * the next character is already real code. An unterminated comment matches no
  * alternative and simply ends the run at its opening slash, which is not a `(`
  * either way, so there is no separate case for it.
+ *
+ * A line comment ends at any of the four ECMAScript LineTerminators - LF, CR,
+ * U+2028 and U+2029 - not at LF alone. Stopping only at LF is a bypass rather
+ * than a rounding error: `import//x\r("../../netlify/lib/identity.mjs")` is a
+ * dynamic import that JavaScript accepts and a LF-only run would swallow whole,
+ * ending the filler at end of source and finding no `(`. The terminator is left
+ * unconsumed here; the `\s+` alternative takes it on the next pass, since all
+ * four are whitespace to `\s`.
  */
 function afterTrivia(source, index) {
-  const filler = /(?:\s+|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*/y;
+  const filler = /(?:\s+|\/\*[\s\S]*?\*\/|\/\/[^\n\r\u2028\u2029]*)*/y;
   filler.lastIndex = index;
   filler.exec(source);
   return filler.lastIndex;
