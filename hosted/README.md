@@ -32,8 +32,9 @@ the build if it ever does. Nothing about the root deployment or
 | `netlify.toml` | Deployment configuration. No edge function, no build command, no environment values. |
 | `public/` | Static app shell, served as committed. |
 | `lib/` | Server modules. Deployed. |
-| `functions/` | Routed Netlify functions under `/api/hosted/*`. Does not exist yet. |
+| `functions/` | Routed Netlify functions under `/api/hosted/*`. |
 | `test/` | Tests and fixtures. Never reachable from a deployed module. |
+| `docs/` | Consumer documentation for the modules in `lib/`. |
 
 ## Rules for code in this tree
 
@@ -132,7 +133,7 @@ Two things are worth knowing before you consume these:
   raises a `TypeError`, so the unsafe call cannot be written by accident.
 - **`HOSTED_LIMITS.RECOMMENDED_USER_CODE_PATTERN` is advice, not a rule.** C2
   says `userCode: string`, so that is all `validatePublication` enforces.
-  AHU-004 is welcome to mint codes in the recommended alphabet; a shared
+  `lib/publications.mjs` does mint codes in the recommended alphabet; a shared
   validator that demanded it would silently amend the contract for every sibling.
 
 ### `lib/config.mjs`
@@ -147,6 +148,69 @@ Two things are worth knowing before you consume these:
 `readHostedConfig` takes the environment as an argument, which is what lets a
 test inject a complete fixture and lets CI import the module with no credential
 present.
+
+### `lib/publication-store.mjs`
+
+The only code that talks to the blob provider. One site-wide, strongly consistent
+store named `archon-hosted-v1`, one key per publication at `publications/<id>`,
+every write conditional, and no `delete` — Netlify offers no verified conditional
+delete here, so v1 never removes a publication record.
+
+| Export | Purpose |
+| --- | --- |
+| `createPublicationStore({getStore, name?})` | `{read, create, update}` over one store handle. `getStore` is injected, and the handle is opened lazily. |
+| `publicationKey(id)` | `publications/<id>`, re-validating the id. A six-hex self-hosted document id fails it. |
+| `PUBLICATION_STORE_NAME`, `PUBLICATION_KEY_PREFIX`, `MAX_WRITE_ATTEMPTS` | The store name, the namespace, and the bound of 6 attempts. |
+
+A write result is `committed`, `refused`, or ambiguous. Only a resolved
+`modified: false` is `refused`, which is positive proof that no write occurred
+and the only outcome a caller may retry on. Everything else — a throw, a result
+that is not the documented shape, a `modified: true` with no ETag — is read back
+with strong consistency and compared to the exact record that was written, and a
+readback that also fails surfaces as retryable `unavailable` with the uncertainty
+intact.
+
+### `lib/publications.mjs`
+
+The one authority for publication state. Nine operations, one compare-and-set
+loop, no second opinion about who owns a document. Full signatures, transition
+table, typed failures and consumer examples are in
+[`docs/publication-adapter.md`](docs/publication-adapter.md).
+
+| Export | Purpose |
+| --- | --- |
+| `createPublications(dependencies)` | The frozen nine-method adapter, each method with its exact C3 signature. |
+| `createPublication`, `readPublication`, `bindPublication`, `reviewPublication`, `decidePublication`, `statusPublication`, `cancelPublication`, `completePublication`, `readOwnedPublication` | The same operations, taking the dependency set as a second argument. |
+| `publicationDependencies({env, getStore, mode?})` | Operator configuration plus a site-wide strong store. Opens nothing. |
+
+Two rules a consumer has to know. **Expiry is logical**: a `pending` record past
+its approval deadline and an `approved` record past its upload deadline are
+`expired` to every caller with nothing written, so a deployment whose cleanup
+never runs — which is this one — behaves identically to one whose cleanup runs
+constantly. And **terminal is terminal**: a completed record's owner, descriptor
+and bytes never change, a cancel that arrives after a completion returns the
+completion, and only `readOwnedPublication` ever returns bytes.
+
+### `lib/publications-http.mjs`
+
+The transport shell the three agent endpoints share: method and browser-header
+rejection, the bearer grammar, JSON body reading, and the C3 error envelope.
+Every response it builds carries `Cache-Control: private, no-store`,
+`Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`, because
+Netlify does not apply `netlify.toml` headers to function output.
+
+## Routes
+
+| Route | Method | Authentication |
+| --- | --- | --- |
+| `/api/hosted/publications` | `POST` | none — it mints the operation secret |
+| `/api/hosted/publications/:publicationId/status` | `POST` | `Authorization: Bearer <agentSecret>` |
+| `/api/hosted/publications/:publicationId/cancel` | `POST` | `Authorization: Bearer <agentSecret>` |
+
+All three refuse a request carrying `Cookie` or `Origin`: they authenticate a
+capability the CLI holds, and ambient browser credentials alongside a capability
+is the confused-deputy shape the two-origin split exists to prevent. There is no
+CORS grant anywhere in the hosted API.
 
 ## Operator configuration
 
@@ -193,6 +257,9 @@ npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
 node scripts/check-hosted-modules.mjs
 node --test scripts/check-hosted-modules.test.mjs
 node --test hosted/test/contracts.test.mjs
+node --test hosted/test/publication-store.test.mjs \
+  hosted/test/publications.test.mjs \
+  hosted/test/publications-agent.test.mjs
 ```
 
-All four run in `.github/workflows/check.yml`.
+All of these run in `.github/workflows/check.yml`.
