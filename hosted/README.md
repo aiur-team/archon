@@ -583,6 +583,81 @@ still renders whatever it likes inside its own frame and can still spend the
 reader's CPU. Nothing here makes hostile HTML safe, and nothing here is
 end-to-end encryption: the service holds the bytes.
 
+## The browser approval routes
+
+`/publish/authorize` is the trusted page a human answers. `docs/approval.md` is
+the user-facing explanation of what it asks; these are the three routes behind
+it, and their entry rules are the exact inverse of the agent routes above —
+every one of them is meaningless without the browser credentials those refuse.
+
+| Route | Method | Authentication |
+| --- | --- | --- |
+| `/api/hosted/publications/bind` | `POST` | exact `Origin` + the single-use pre-login `__Host-archon_login` binding |
+| `/api/hosted/publications/:publicationId/review` | `GET` | the `__Host-archon_publish` binding + a live session |
+| `/api/hosted/publications/:publicationId/decision` | `POST` | the binding + `requireBrowserMutation` (exact `Origin`, session, session-bound CSRF) |
+
+**The link.** `verificationUriComplete` is
+`<app origin>/publish/authorize#<publicationId>.<browserSecret>`. The fragment
+carries both halves because the page has no other input: the path is fixed, C3
+permits no query string, and there is no lookup by short code or by browser
+secret. A fragment never reaches a server, and the page removes it with
+`history.replaceState` before it makes any request, so the token is absent from
+the address bar, from history and from every access log.
+
+**The binding.** `bind` verifies the browser secret and stores the resulting
+`{publicationId, browserSecretHash}` server-side under a fresh random
+`__Host-archon_publish` cookie. Neither half is a capability — the id is public
+and the digest is already on the record — so what the cookie proves is *how the
+browser got them*. It survives an account switch and is revoked, server-side and
+in the browser, only when the operation gets an answer.
+
+**The decision.** `displayedAccountId` is the account the page told the human
+they were acting as, and the decision is refused unless it equals the session's
+account. It never selects an owner; it confirms that what was shown is what is
+true, which is what a tab left open across an account switch gets wrong.
+
+**Nothing before the click.** Nothing reaches the decision route until a button
+is pressed, and `GET` cannot approve. `test/approval-browser.test.mjs` asserts
+that against a real Chromium rather than against the handlers alone.
+
+## Why `requireExactOrigin` has one Fetch Metadata exemption
+
+A real `<form method="post">` submission is a navigation, and Fetch appends the
+literal string `null` as the `Origin` of a non-CORS request whose document
+carries `Referrer-Policy: no-referrer` — which C3 requires on every hosted
+response. So every form POST in this deployment arrives as `Origin: null`, and
+an exact-origin check with no exemption refuses the product's only sign-in path
+in every browser rather than refusing an attacker.
+
+`requireExactOrigin` therefore also accepts `Origin: null` when the request
+carries `Sec-Fetch-Site: same-origin` **and** `Sec-Fetch-Mode: navigate`.
+`Sec-Fetch-Site` is a forbidden header name, so page script cannot set it, and a
+cross-site form POST arrives as `cross-site` — exactly the class the check
+exists to refuse; a sandboxed frame's opaque origin and a cross-origin redirect
+both report `cross-site` too. The `navigate` mode is not a restatement of that
+argument: `fetch` with `mode: "no-cors"` is the *other* request class that gets
+`Origin: null` under `no-referrer`, and the mode requirement is the only thing
+that excludes it.
+
+The exemption is **off unless a route asks for it**, via
+`requireExactOrigin(request, config, {formNavigation: true})` — which only
+`auth-github-start` does, on both its paths. `publications-bind`,
+`publications-decision` and `auth-logout` are `fetch` callers whose requests
+always carry a real `Origin`, so they are held to exact equality with no escape.
+A browser too old to send Fetch Metadata sends neither header and is refused.
+
+## Why `/publish/authorize` has a rewrite in `netlify.toml`
+
+The approval page is committed at `public/publish/authorize.html`, and C3 freezes
+its URL at the extensionless `/publish/authorize` — `validateStartResponse`
+refuses a start response whose URL is anything else. Serving a flat `.html` asset
+at its extensionless path is Netlify *post-processing*, and this deployment sets
+`[build.processing] skip_processing = true`. Leaving the contract path to that
+setting would mean the one URL every agent prints 404s, on a flag whose stated
+purpose is unrelated. The `[[redirects]]` block states it instead, as a `200`
+rewrite so the visitor stays on the contract path and no fragment is carried
+through a `Location`.
+
 ## Operator configuration
 
 Every key below is set in the Netlify site environment. None is set in

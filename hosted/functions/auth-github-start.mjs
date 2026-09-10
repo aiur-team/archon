@@ -139,7 +139,12 @@ export function createStartRoute({ store, config: hostedConfig }) {
   };
 
   async function run(request, cookies) {
-    requireExactOrigin(request, hostedConfig);
+    /* `formNavigation`: the sign-in page submits a real `<form method="post">`,
+       and C3's mandatory `Referrer-Policy: no-referrer` makes Fetch send
+       `Origin: null` on a navigation. `requireExactOrigin` accepts that only
+       alongside `Sec-Fetch-Site: same-origin` and `Sec-Fetch-Mode: navigate`,
+       and only where a caller asks for it - which is here and nowhere else. */
+    requireExactOrigin(request, hostedConfig, { formNavigation: true });
     const field = await readFields(request);
 
     const switching = field("switchAccount") === "true";
@@ -155,6 +160,9 @@ export function createStartRoute({ store, config: hostedConfig }) {
         store,
         config: hostedConfig,
         presentedCsrf: field("csrfToken"),
+        /* The different-account control is a form too, so it arrives with the
+           same `Origin: null` a navigation always carries here. */
+        formNavigation: true,
       });
       await store.revokeSession(sessionToken);
       cookies.push(clearCookie(SESSION_COOKIE));

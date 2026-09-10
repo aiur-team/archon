@@ -965,6 +965,41 @@ test("a start response may never carry the agent secret in its browser URL", () 
   );
 });
 
+test("a start response's fragment names this publication and its browser secret", () => {
+  /* The fragment is the approval page's only input. `/publish/authorize` is one
+     fixed path, no query string is permitted, there is no short-code lookup and
+     no lookup by browser secret - so a fragment that does not carry the id is a
+     link the page cannot bind, and one that carries somebody else's id would
+     walk the visitor into approving an operation their agent is not waiting on. */
+  const good = validateStartResponse(START_RESPONSE, APP);
+  assert.equal(
+    good.verificationUriComplete,
+    `${FIXTURE_APP_ORIGIN}/publish/authorize#${FIXTURE_PUBLICATION_ID}.${FIXTURE_BROWSER_SECRET}`,
+  );
+
+  for (const fragment of [
+    FIXTURE_BROWSER_SECRET,
+    `${FIXTURE_PUBLICATION_ID}.`,
+    `.${FIXTURE_BROWSER_SECRET}`,
+    `${FIXTURE_PUBLICATION_ID}${FIXTURE_BROWSER_SECRET}`,
+    `0f1e2d3c4b5a69788796a5b4c3d2e1f1.${FIXTURE_BROWSER_SECRET}`,
+    `${FIXTURE_PUBLICATION_ID.toUpperCase()}.${FIXTURE_BROWSER_SECRET}`,
+    `${FIXTURE_PUBLICATION_ID}.short`,
+    `${FIXTURE_PUBLICATION_ID}.has space in it and is long enough!!!`,
+  ]) {
+    rejects(
+      () =>
+        validateStartResponse(
+          replacing(START_RESPONSE, {
+            verificationUriComplete: `${FIXTURE_APP_ORIGIN}/publish/authorize#${fragment}`,
+          }),
+          APP,
+        ),
+      { field: "start.verificationUriComplete" },
+    );
+  }
+});
+
 test("a start response must carry a well-shaped bearer and the advertised interval", () => {
   for (const agentSecret of ["short", "has space in it and is long enough!!", "", 42]) {
     rejects(() => validateStartResponse(replacing(START_RESPONSE, { agentSecret }), APP), {

@@ -206,6 +206,90 @@ test("the origin must be the configured one, exactly", async () => {
   }
 });
 
+test("a same-origin form navigation is accepted on its Fetch Metadata", () => {
+  const config = hostedConfig();
+
+  /* Every `<form method="post">` in this deployment arrives exactly like this.
+     `Referrer-Policy: no-referrer` - which C3 requires on every response - makes
+     Fetch append the literal string `null` as the Origin of a non-CORS request,
+     so an exact-origin check with no exemption refuses the product's only
+     sign-in path in every browser. Observed in Chromium by
+     `test/approval-browser.mjs`, not reasoned about. */
+  const navigation = browserRequest("/x", {
+    method: "POST",
+    origin: "null",
+    headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+  });
+  assert.equal(requireExactOrigin(navigation, config, { formNavigation: true }), APP_ORIGIN);
+
+  /* And it is off unless the route asks. Only the two sign-in forms submit by
+     navigation; bind, decision and logout are `fetch` callers that always
+     present a real Origin, and handing them the exemption would widen it past
+     the case that needs it. */
+  assert.throws(() => requireExactOrigin(navigation, config), ForbiddenOriginError);
+});
+
+test("the Fetch Metadata exemption is exactly one case, and fails closed", () => {
+  const config = hostedConfig();
+  const nulled = (headers) =>
+    browserRequest("/x", { method: "POST", origin: "null", headers });
+  const check = (request) =>
+    requireExactOrigin(request, config, { formNavigation: true });
+
+  for (const [why, headers] of [
+    ["no Fetch Metadata at all, as an old browser sends", {}],
+    ["a cross-site form post", { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }],
+    ["a same-site but not same-origin post", { "sec-fetch-site": "same-site", "sec-fetch-mode": "navigate" }],
+    ["a user-typed URL", { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" }],
+    ["a fetch, which must present a real Origin", { "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors" }],
+    ["a no-cors subresource", { "sec-fetch-site": "same-origin", "sec-fetch-mode": "no-cors" }],
+    ["only the site half", { "sec-fetch-site": "same-origin" }],
+    ["only the mode half", { "sec-fetch-mode": "navigate" }],
+  ]) {
+    assert.throws(() => check(nulled(headers)), ForbiddenOriginError, why);
+  }
+
+  /* And the exemption is for the literal `null` only: an absent Origin carrying
+     the same metadata is still a refusal, so nothing that simply drops the
+     header inherits it. */
+  assert.throws(
+    () =>
+      check(
+        browserRequest("/x", {
+          method: "POST",
+          origin: null,
+          headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+        }),
+      ),
+    ForbiddenOriginError,
+  );
+});
+
+test("requireBrowserMutation only forwards the exemption when its caller asks", async () => {
+  const config = hostedConfig();
+  const { store, token, csrf } = await signedIn();
+  const navigation = () =>
+    browserRequest("/x", {
+      method: "POST",
+      origin: "null",
+      cookies: { [SESSION_COOKIE]: token },
+      csrf,
+      headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+    });
+
+  const allowed = await requireBrowserMutation(navigation(), {
+    store,
+    config,
+    formNavigation: true,
+  });
+  assert.deepEqual(allowed.principal, PRINCIPAL_ALPHA);
+
+  await assert.rejects(
+    () => requireBrowserMutation(navigation(), { store, config }),
+    ForbiddenOriginError,
+  );
+});
+
 test("a browser mutation needs origin, session and the session-bound token", async () => {
   const config = hostedConfig();
   const { store, token, csrf } = await signedIn();
