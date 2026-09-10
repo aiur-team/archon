@@ -1059,7 +1059,7 @@ async function groupTwo() {
   eq(defaultStore.peek(accessDocumentKey(DOC)).allowedDomains, ["listed.example"], "the normalized list is what is stored");
   eq(defaultKit.events, [{
     docId: DOC, actor: ACTOR, kind: "access.change", target: { sub: OWNER.sub },
-    docVersion: null, summary: "set the document's domain list to 1 domain(s)",
+    docVersion: null, summary: "set the document's domain list to listed.example",
   }], "one exact domain-list event");
   await expectDomainList(await defaultKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), ["listed.example"], "same domain list");
   eq(defaultKit.events.length, 1, "an unchanged domain list emits no event");

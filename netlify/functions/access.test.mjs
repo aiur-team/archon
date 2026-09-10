@@ -219,7 +219,13 @@ test("the shared ACN-007 fixture table is the source of the write rows", () => {
  */
 for (const row of WRITE_CASES) {
   test(`write table: ${row.name}`, async () => {
-    const store = seededStore();
+    /* Every row starts from a document that already lists a domain, refusals
+       included. Seeding the empty list would make "a refused list changes
+       nothing" hold for a handler that wiped the list *before* validating it —
+       a row refused for the wrong reason, which is the failure this table
+       exists to catch. */
+    const seeded = [SECOND_LISTED_DOMAIN];
+    const store = seededStore(documentRecord({ allowedDomains: seeded }));
     const kit = kitFor(store);
     const response = await kit.handler(patch({ doc: DOC, allowedDomains: row.input }));
     const body = await response.json();
@@ -237,8 +243,9 @@ for (const row of WRITE_CASES) {
     if (Object.hasOwn(row, "domain")) {
       assert.equal(body.domain ?? null, row.domain, "the offending entry is named back");
     }
-    assert.deepEqual(store.peek(accessDocumentKey(DOC)).allowedDomains, [],
-      "a refused list changes nothing");
+    assert.deepEqual(store.peek(accessDocumentKey(DOC)).allowedDomains, seeded,
+      "a refused list leaves the policy the document already had");
+    assert.equal(kit.events.length, 0, "and audits nothing");
   });
 }
 
@@ -389,4 +396,61 @@ test("a v:1 record's roster reports an empty list rather than failing to read", 
   const store = seededStore(legacyDocumentRecord({ orgDefault: "commenter" }));
   const body = await (await kitFor(store).handler(getRoster())).json();
   assert.deepEqual(body.allowedDomains, []);
+});
+
+test("the audit event names the domains, not a count", async () => {
+  // A count is not answerable. This is the record of the one operation that
+  // grants read access to a class of people nobody named, and "2 domains"
+  // cannot tell a reviewer who could read the document last Tuesday.
+  const store = seededStore();
+  const kit = kitFor(store);
+  await kit.handler(patch({ doc: DOC, allowedDomains: [LISTED_DOMAIN, SECOND_LISTED_DOMAIN] }));
+  assert.equal(kit.events.length, 1);
+  assert.equal(kit.events[0].summary,
+    `set the document's domain list to ${LISTED_DOMAIN}, ${SECOND_LISTED_DOMAIN}`);
+});
+
+test("an over-long list is truncated in the summary, and says so", async () => {
+  // An event summary is capped at 160 UTF-8 bytes and a list may hold twenty
+  // names of up to 253 characters. Truncation has to be announced: a summary
+  // that stopped mid-list silently would read as the complete policy.
+  const many = Array.from({ length: 20 }, (_, index) => `d${index}.a-fairly-long-domain.example`);
+  const store = seededStore();
+  const kit = kitFor(store);
+  const response = await kit.handler(patch({ doc: DOC, allowedDomains: many }));
+  assert.equal(response.status, 200);
+  const { summary } = kit.events[0];
+  assert.ok(new TextEncoder().encode(summary).length <= 160, `summary is ${summary.length} chars`);
+  assert.match(summary, / and \d+ more$/);
+  assert.ok(summary.includes(many.slice().sort()[0]), "and names the domains that did fit");
+});
+
+test("a migration-only write stores v:2 and audits nothing", async () => {
+  // Clearing an already-empty list on a v:1 record moves nobody's access, so an
+  // `access.change` event would be a false entry in the log. The write still
+  // has to happen, because that write is the migration.
+  const store = seededStore(legacyDocumentRecord({ orgDefault: "viewer" }));
+  const kit = kitFor(store);
+  const response = await kit.handler(patch({ doc: DOC, allowedDomains: [] }));
+  assert.equal(response.status, 200);
+  assert.equal(store.peek(accessDocumentKey(DOC)).v, 2, "the record is migrated");
+  assert.equal(kit.events.length, 0, "and no access change is claimed");
+});
+
+test("an ordinary owner mutation leaves a v:1 record at v:1", async () => {
+  // The write fences rewrite the stored bytes unchanged rather than rebuilding
+  // from the migrated view, so inviting somebody does not spread the new stored
+  // version to a deployment that never used the domain list -- which is what
+  // keeps a rollback safe for those documents.
+  const store = seededStore(legacyDocumentRecord());
+  const kit = kitFor(store);
+  const response = await kit.handler(new Request("https://docs.example.invalid/api/access", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ doc: DOC, email: "invitee@partner.example.org", role: "viewer" }),
+  }));
+  assert.equal(response.status, 204, await response.text());
+  assert.equal(store.peek(accessDocumentKey(DOC)).v, 1, "the fence is a no-op, not a migration");
+  assert.equal(store.peek(accessDocumentKey(DOC)).orgDefault, "commenter",
+    "and the stored bytes are untouched");
 });

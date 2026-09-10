@@ -830,17 +830,17 @@ async function gateMatrix(ts, gateRoot, accessLib) {
      is `fetch`. The body is the frozen C1 signed-in shape; the gate projects it
      onto the identity `resolveRole` is handed, and that projection is what the
      access-row assertions below sit on top of. */
-  const sessionBody = () => JSON.stringify({
+  const sessionBody = (session = SESSION) => JSON.stringify({
     v: 1,
     authenticated: true,
-    accountId: SESSION.sub,
-    login: SESSION.name,
-    email: SESSION.email,
-    emailVerified: SESSION.emailVerified,
+    accountId: session.sub,
+    login: session.name,
+    email: session.email,
+    emailVerified: session.emailVerified,
     csrfToken: "aW52ZW50ZWQtY3NyZi10b2tlbi1mb3ItdGhlLWdhdGUtbWF0cml4",
   });
 
-  const run = async (overrides) => {
+  const run = async (overrides, session = SESSION) => {
     Object.assign(control, {
       capabilitiesFor: (role) => accessLib.capabilitiesFor(role),
       resolveRole: () => row(accessLib.capabilitiesFor, "editor"),
@@ -850,7 +850,7 @@ async function gateMatrix(ts, gateRoot, accessLib) {
     globalThis.fetch = async (input) => {
       const url = new URL(typeof input === "string" ? input : input.url);
       ok(url.pathname === "/api/hosted/session", `the gate fetched ${url.pathname}`);
-      return new Response(sessionBody(), {
+      return new Response(sessionBody(session), {
         status: 200,
         headers: { "content-type": "application/json; charset=utf-8" },
       });
@@ -908,6 +908,79 @@ async function gateMatrix(ts, gateRoot, accessLib) {
     const frozen = Object.freeze(row(accessLib.capabilitiesFor, "editor", true));
     const response = await run({ resolveRole: () => frozen });
     eq(response.status, 200, "the edge gate accepts a frozen well-formed row");
+  }
+
+  /* ---- ACN-008: the gate's own domain decision, end to end ----
+     Everything above hands `resolveRole` a stub, which proves the gate handles
+     the row it gets back but says nothing about the identity it hands *in*. That
+     projection -- `normalizeEmailOrNull(record.email) ?? ""`, and
+     `emailVerified === true && email !== ""` -- is now the sole input to the
+     domain decision on the edge path, and the acceptance criterion ("the gate
+     admits the domain reader and `/api/session` reports `viewer` for the same
+     session") is otherwise met only by the composition argument that both call
+     the same function. These rows run the real `resolveRole` over an injected
+     store instead, so the projection is observed rather than assumed. */
+  {
+    const domainReader = Object.freeze({
+      sub: `a0_${"7".repeat(32)}`,
+      email: `Ann@${LISTED_DOMAIN.toUpperCase()}`,
+      emailVerified: true,
+      name: "Ann Example",
+    });
+    const gateDocument = (allowedDomains) => ({
+      v: 2,
+      docId: DOC_ID,
+      ownerSub: `a0_${"8".repeat(32)}`,
+      ownerEmail: "owner@example.invalid",
+      allowedDomains: [...allowedDomains],
+      boundAt: "2026-09-05T12:00:00.000Z",
+      boundFrom: "env:DOC_OWNERS",
+    });
+    const withList = (allowedDomains) => {
+      const store = fakeStore(
+        new Map([[accessLib.accessDocumentKey(DOC_ID), gateDocument(allowedDomains)]]),
+      );
+      return (docId, user, options) =>
+        accessLib.resolveRole(docId, user, { ...options, store, docOwners: "" });
+    };
+
+    let handed = null;
+    const capture = (inner) => (docId, user, options) => {
+      handed = user;
+      return inner(docId, user, options);
+    };
+
+    const admitted = await run(
+      { resolveRole: capture(withList([LISTED_DOMAIN])) },
+      domainReader,
+    );
+    eq(admitted.status, 200, "the edge gate admits a verified reader at a listed domain");
+    eq(await admitted.text(), PAGE, "and replays the whole document");
+    deepEq(
+      handed,
+      {
+        sub: domainReader.sub,
+        email: `ann@${LISTED_DOMAIN}`,
+        emailVerified: true,
+        name: domainReader.name,
+      },
+      "the gate normalizes the session address before the domain compare",
+    );
+
+    const cleared = await run({ resolveRole: withList([]) }, domainReader);
+    eq(cleared.status, 403, "and denies the same session once the list is cleared");
+
+    const unverified = await run(
+      { resolveRole: withList([LISTED_DOMAIN]) },
+      { ...domainReader, emailVerified: false },
+    );
+    eq(unverified.status, 403, "an unverified address at a listed domain is refused");
+
+    const stranger = await run(
+      { resolveRole: withList([LISTED_DOMAIN]) },
+      { ...domainReader, email: `ann@mail.${LISTED_DOMAIN}` },
+    );
+    eq(stranger.status, 403, "and a subdomain of a listed domain is not listed");
   }
 
   section(before, "gate.ts validates the resolved row through the shared validator");

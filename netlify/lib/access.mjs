@@ -184,7 +184,22 @@ export const GRANTABLE_ROLES = Object.freeze(["editor", "commenter", "viewer"]);
  */
 const DOMAIN_ROLE = "viewer";
 
-/** The stored version of the document access record after ACN-008. */
+/**
+ * The stored version of the document access record after ACN-008.
+ *
+ * **The bump is one-way.** The release before this one accepts version 1 alone,
+ * so a record that has moved to version 2 reads as `unsupported-version` — a
+ * 500, not a denial — on an instance running that release. Nothing rewrites a
+ * record back down.
+ *
+ * The exposure is bounded on purpose. Reading migrates nothing, and the write
+ * fences in `netlify/functions/access.mjs` deliberately rewrite the stored bytes
+ * unchanged, so an ordinary invitation or role change leaves an old record at
+ * version 1. Only an owner who actually writes a domain list, or an ownership
+ * transfer, moves a document forward — which means a deployment that never
+ * touches the new feature can still be rolled back, and one that does has
+ * bounded, per-document exposure for as long as an old instance is still warm.
+ */
 const DOCUMENT_VERSION = 2;
 
 /**

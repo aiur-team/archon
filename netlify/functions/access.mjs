@@ -1163,6 +1163,17 @@ export function createAccessHandler(dependencies = {}) {
   /**
    * Revalidate the actor's ownership through a conditional rewrite of the
    * byte-equivalent access document immediately before a state commit.
+   *
+   * "Byte-equivalent" is why this returns the validated *draft* rather than
+   * `freshDocument(document)`. Since ACN-008 `assertAccessDocument` answers a
+   * version-1 record as its migrated version-2 view, so rebuilding from the view
+   * would make this fence rewrite the record's shape — and a fence that changes
+   * bytes is no longer the no-op CAS it is documented as. It would also mean an
+   * ordinary invitation migrated the document as a side effect, spreading the
+   * new stored version to deployments that never used the new feature and
+   * widening the window in which rolling back to a release that cannot read
+   * version 2 would lock a document's owner out. Migration now happens only when
+   * an owner actually writes a domain list, or when ownership transfers.
    */
   async function ownerFence(ctx) {
     requireLeaseToken(ctx);
@@ -1171,7 +1182,7 @@ export function createAccessHandler(dependencies = {}) {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== ctx.actor.sub) throw forbidden();
-      return freshDocument(document);
+      return draft;
     }, ACCESS_DOCUMENT_STORE_OPTIONS);
   }
 
@@ -1183,7 +1194,7 @@ export function createAccessHandler(dependencies = {}) {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== toOwnerSub) throw conflict();
-      return freshDocument(document);
+      return draft;
     }, ACCESS_DOCUMENT_STORE_OPTIONS);
   }
 
@@ -1490,30 +1501,73 @@ export function createAccessHandler(dependencies = {}) {
     }
 
     const key = accessDocumentKey(ctx.doc);
+    let policyChanged = false;
     const result = await mutate(ctx.store, key, null, (draft) => {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== ctx.actor.sub) throw forbidden();
       const next = { ...freshDocument(document), allowedDomains };
-      /* Compared against the *stored* draft rather than against the validated
-         view of it. A version-1 record reads as `allowedDomains: []`, so an
-         owner clearing an already-empty list on an old record would look like a
-         no-op against the view — and that write is also the migration, which
-         must happen. Against the draft it is the change it is. */
+      /* Two different questions, and they have different answers on an old
+         record. `policyChanged` asks whether anybody's access moved, and is
+         asked of the validated *view* — a version-1 record reads as
+         `allowedDomains: []`, so clearing an already-empty list changes nothing
+         about who may read. The write itself is decided against the stored
+         *draft*, because that same request is also the migration and the
+         migration must happen. Only the first drives the audit event: an event
+         saying access changed when it did not is a false entry in the one log a
+         reviewer would use to reconstruct who could read this document. */
+      policyChanged = canonical(document.allowedDomains) !== canonical(allowedDomains);
       if (canonical(next) === canonical(draft)) return null;
       return next;
     }, ACCESS_DOCUMENT_STORE_OPTIONS);
-    if (result.changed === true) {
-      await ownerFence(ctx);
+    /* No fence between the commit and the event. Every sibling handler fences
+       here because it committed to a *different* key and still owes a proof that
+       the document names the actor as owner; this one committed to the document
+       record itself, under the lease, with that check inside the compare-and-set.
+       A second fence could only fail after the list was already stored — leaving
+       the caller a 403 over a document that had in fact been widened, with no
+       audit event to show for it. */
+    if (result.changed === true && policyChanged) {
       await attemptEvent(ctx, "access.change", { sub: ctx.actor.sub },
-        allowedDomains.length === 0
-          ? "cleared the document's domain list"
-          : `set the document's domain list to ${allowedDomains.length} domain(s)`);
+        domainChangeSummary(allowedDomains));
     }
     return new Response(
       JSON.stringify({ ok: true, doc: ctx.doc, allowedDomains }),
       { status: 200, headers: { ...JSON_HEADERS } },
     );
+  }
+
+  /**
+   * The audit summary for a domain-list change, naming the domains.
+   *
+   * A count would not be answerable: this is the record of the one operation
+   * that grants read access to a class of people nobody named, and "3 domains"
+   * cannot tell a reviewer who could read the document last Tuesday. So the
+   * entries themselves go in, and the retired organisation-default event named
+   * its value for exactly the same reason.
+   *
+   * They have to fit, though. An event summary is capped at 160 UTF-8 bytes and
+   * a list may hold twenty names of up to 253 characters each, so this takes
+   * whole entries while they fit and says how many it left. Truncation is
+   * announced rather than silent: a summary that stopped mid-list without saying
+   * so would read as the complete policy.
+   */
+  function domainChangeSummary(allowedDomains) {
+    if (allowedDomains.length === 0) return "cleared the document's domain list";
+    const prefix = "set the document's domain list to ";
+    const named = [];
+    let budget = 160 - prefix.length - " and 20 more".length;
+    for (const domain of allowedDomains) {
+      const cost = domain.length + (named.length === 0 ? 0 : 2);
+      if (cost > budget) break;
+      budget -= cost;
+      named.push(domain);
+    }
+    const remaining = allowedDomains.length - named.length;
+    if (named.length === 0) return `set the document's domain list to ${remaining} domains`;
+    return remaining === 0
+      ? `${prefix}${named.join(", ")}`
+      : `${prefix}${named.join(", ")} and ${remaining} more`;
   }
 
   /**
