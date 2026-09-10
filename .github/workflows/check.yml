@@ -456,6 +456,27 @@ jobs:
             assert.doesNotMatch(live, new RegExp(header, "i"), `${header} belongs to the gate, not to TOML`);
           }
 
+          /* Every environment block, inventoried. This rule came from the
+             deleted hosted configuration, where it kept a C6 key out of git;
+             merging the deployments would otherwise have dropped it, and a
+             GITHUB_CLIENT_SECRET committed here would pass every other gate.
+             Values set in netlify.toml are also build-scoped rather than
+             available to a function at runtime, so a secret here would be a
+             secret in git that did not even work. */
+          /* `gm` for the leading `^`, and `(?![\s\S])` rather than `$` for the
+             end: under `m` a `$` would close the block at the end of its own
+             header line, every body would be empty, and this inventory would
+             read nothing while looking exactly like it read something. The
+             non-empty assertions on both sides are what turn that mistake into
+             a failure instead of the silent pass this step exists to be. */
+          const environments = [...live.matchAll(/^\[(build\.environment|context\.[^\]]+\.environment)\]([\s\S]*?)(?=\n\[|(?![\s\S]))/gm)];
+          assert.ok(environments.length > 0, "missing [build.environment]");
+          for (const [, name, body] of environments) {
+            const keys = [...body.matchAll(/^\s*([A-Za-z_][\w]*)\s*=/gm)].map((match) => match[1]);
+            const allowed = name === "build.environment" ? ["NODE_VERSION"] : ["DOC_ENV"];
+            assert.deepEqual(keys, allowed, `[${name}] may declare only ${allowed.join(", ")}`);
+          }
+
           const tomls = execFileSync("git", ["ls-files", "*netlify.toml"], { encoding: "utf8" })
             .split("\n")
             .filter((path) => path !== "");

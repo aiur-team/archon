@@ -3279,16 +3279,24 @@ async function deploymentConnection(world, owned) {
   const context = owned.ownerContext;
   const cookie = owned.ownerCookie;
 
-  /* 8.1 The header block `hosted/netlify.toml` declares reaches every static
-         surface, and the document routes carry their own policy on top of the
-         private header set. Both are read off the deployment rather than
-         restated here. */
+  /* 8.1 The header set the hosted static surfaces are served under, and the
+         document routes' own policy on top of the private header set.
+
+     Read this one honestly. It used to be a *reading*: `readDeploymentHeaders`
+     parsed `hosted/netlify.toml`, so asserting the directives here constrained
+     the artifact Netlify served from. That deployment is gone and its
+     replacement authority -- the host-aware edge gate -- is ACN-002, which has
+     not landed. `STATIC_HEADER_SET` is therefore a declaration in this file, and
+     these assertions currently constrain that declaration and the harness that
+     serves it, not anything deployed. They are kept, and kept explicit, because
+     they are what the browser cases below run against and what ACN-002 has to
+     make the gate emit; the half that is still a reading about the deployment is
+     `readDeploymentHeaders`' check that `netlify.toml` declares no policy of its
+     own, so a second authority cannot come back while this one is pending.
+
+     The document routes' half below is unaffected: those headers come from the
+     real handlers, not from a deployment file. */
   const declared = Object.fromEntries(world.deployment.values.map(([name, value]) => [name.toLowerCase(), value]));
-  /* The directives are asserted on what the deployment *declares*, because that
-     is the artifact Netlify serves from. Comparing the served response to the
-     same block would only prove this runner echoes its own input. The served
-     check below is kept for the one thing it does prove: that the block is
-     applied to the contract's approval path at all. */
   assert.equal(declared["x-content-type-options"], "nosniff");
   assert.equal(declared["referrer-policy"], "no-referrer");
   assert.equal(declared["cache-control"], "private, no-store");

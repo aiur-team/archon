@@ -20,6 +20,11 @@
  * header correct, and nothing in the repository changed. It is a platform
  * setting, so no test of this code can hold it. What a build can do is look.
  *
+ * The one thing it must not do is cry wolf. This site redirects for its own
+ * reasons -- the edge gate sends an unauthenticated visitor to `/login/`, and a
+ * build-time probe carries no session -- so the check is written against the
+ * redirect *target's host*, not against the status. See `probeHostname`.
+ *
  * The check therefore runs where the answer is knowable and is a plain skip
  * everywhere else. On Netlify, `SITE_NAME` names the site and the hostname is
  * derived from it. Off Netlify -- a laptop, a CI runner, an installed consumer
@@ -32,13 +37,32 @@
  * `FAIL site hostname:` line on stderr and exit 1.
  */
 
-/** Netlify's own build environment names the site; nothing else does. */
+import { fileURLToPath } from "node:url";
+
+/**
+ * The hostname to ask about, `null` when there is no site to ask, or an `Error`
+ * when there is one and it cannot be named.
+ *
+ * The three cases are deliberately distinct. Off Netlify there is no site and
+ * skipping is correct. On Netlify there is always a site, so a missing
+ * `SITE_NAME` is not "nothing to check" -- it is this gate losing its subject,
+ * and returning `null` there would turn every deploy into a silent skip on one
+ * unset variable. That is the failure this whole file exists to prevent, so it
+ * is an error rather than a shrug.
+ */
 export function siteHostname(env) {
   const explicit = (env.ARCHON_SITE_HOSTNAME ?? "").trim();
-  if (explicit !== "") return explicit;
-  if (env.NETLIFY !== "true") return null;
+  /* Off a Netlify build only. On a deploy the site names itself, and an
+     override there would be a way to point this gate at a hostname that is not
+     the one the renderer is served from: an operator who set it to the primary
+     domain would get a permanent PASS while the default hostname was redirected
+     and the renderer origin had collapsed. That is the failure being checked
+     for, spelled as a configuration. */
+  if (env.NETLIFY !== "true") return explicit === "" ? null : explicit;
   const name = (env.SITE_NAME ?? "").trim();
-  if (name === "") return null;
+  if (name === "") {
+    return new Error("SITE_NAME is unset on a Netlify build; set ARCHON_SITE_HOSTNAME to name the site");
+  }
   return `${name}.netlify.app`;
 }
 
@@ -46,13 +70,26 @@ export function siteHostname(env) {
 export const PROBE_TIMEOUT_MS = 15_000;
 
 /**
- * Ask one hostname whether it answers for itself.
+ * Ask one hostname whether it still answers for itself.
  *
  * `redirect: "manual"` is the point: the default would follow the redirect and
  * report the custom domain's 200, which is precisely the failure being looked
- * for. A non-3xx status is not inspected any further -- a 404 is a site that has
- * not deployed this path yet, and a 5xx is an outage, and neither of them moves
- * the renderer origin anywhere.
+ * for.
+ *
+ * What makes this delicate is that the site redirects on its own account all the
+ * time. The edge gate sends an unauthenticated visitor to `/login/`, and this
+ * probe carries no session, so a 3xx is the *ordinary* answer here. Failing on
+ * the status alone would fail every correct deploy, and a check that fails
+ * correct deploys gets switched off — after which the setting it existed for is
+ * unguarded again.
+ *
+ * So the question is not "did it redirect" but "did it redirect *off this
+ * hostname*". A platform-level default-domain redirect points at the primary
+ * domain, a different host; the gate's own redirect is a path on this one. Only
+ * the first moves the renderer origin, and only the first fails.
+ *
+ * A non-3xx status is not inspected any further -- a 404 is a path that has not
+ * deployed yet and a 5xx is an outage, and neither of them moves the origin.
  *
  * @param {string} hostname
  * @param {typeof fetch} fetchFn
@@ -74,16 +111,29 @@ export async function probeHostname(hostname, fetchFn) {
     return { ok: false, reason: `${url} could not be reached: ${error.message}` };
   }
   const status = response.status;
-  if (status >= 300 && status < 400) {
-    /* The Location value is not reported. It is operator-configured and lands
-       in a deploy log that gets pasted into an issue; the hostname and the
-       status are enough to act on. */
-    return {
-      ok: false,
-      reason: `${url} answered ${status}: the site's default hostname is redirected, which moves the renderer origin`,
-    };
+  if (status < 300 || status >= 400) return { ok: true, status };
+
+  const location = response.headers?.get?.("location") ?? null;
+  if (location === null || location === "") {
+    return { ok: false, reason: `${url} answered ${status} with no Location, which is not an answer to publish on` };
   }
-  return { ok: true, status };
+  let target;
+  try {
+    target = new URL(location, url);
+  } catch {
+    return { ok: false, reason: `${url} answered ${status} with a Location that is not a URL` };
+  }
+  if (target.hostname === hostname) return { ok: true, status };
+  /* The target host is named because it *is* the finding -- an operator reading
+     this has to know which domain the hostname was folded into. The path and
+     query are dropped: a redirect on this site can carry a `next` parameter
+     naming a private document path, and a deploy log gets pasted into issues. */
+  return {
+    ok: false,
+    reason:
+      `${url} answered ${status} to another host (${target.hostname}): the site's default hostname is ` +
+      "redirected, which moves the renderer origin onto the application's site",
+  };
 }
 
 /**
@@ -93,15 +143,20 @@ export async function probeHostname(hostname, fetchFn) {
  */
 export async function checkSiteHostname(env, fetchFn) {
   const hostname = siteHostname(env);
+  if (hostname instanceof Error) return { code: 1, line: `FAIL site hostname: ${hostname.message}` };
   if (hostname === null) {
-    return { code: 0, line: "SKIP site hostname: no Netlify site to ask (SITE_NAME unset)" };
+    return { code: 0, line: "SKIP site hostname: not a Netlify build, so there is no site to ask" };
   }
   const result = await probeHostname(hostname, fetchFn);
   if (!result.ok) return { code: 1, line: `FAIL site hostname: ${result.reason}` };
   return { code: 0, line: `PASS site hostname: ${hostname} answered ${result.status} with no redirect` };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/* Compared as paths rather than as a URL string. `file://${process.argv[1]}`
+   is not the URL of a path containing a space or a non-ASCII character, so a
+   checkout under one would leave this script a silent no-op: run as a build
+   step, it would exit 0 having asked nothing. */
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, line } = await checkSiteHostname(process.env, fetch);
   (code === 0 ? process.stdout : process.stderr).write(`${line}\n`);
   process.exitCode = code;

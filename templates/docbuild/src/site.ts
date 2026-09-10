@@ -372,6 +372,39 @@ function copyStaticTree(root: string, outDir: string, rel: string, destRel: stri
 // ----------------------------------------------------------- served content
 
 /**
+ * Hold `RESERVED_ROUTES` equal to what the hosted tree actually publishes.
+ *
+ * The hosted tree is copied over the same root the documents were written into,
+ * and a copy overwrites without asking. So a hosted page whose top-level name no
+ * document may claim, but which nobody added to `RESERVED_ROUTES`, is a document
+ * that disappears from the site on a green build with no diagnostic -- exactly
+ * the class of silent loss a rebuilt-from-scratch publish tree is prone to.
+ *
+ * Reading the directory rather than trusting the list is what makes adding
+ * `netlify/public/status/` a build failure until the route is declared. It is
+ * the same shape as the renderer build holding `STATIC_FILES` equal to
+ * `renderer/public/`, and for the same reason: a list that is both the input and
+ * the check drifts in silence.
+ */
+function preflightHostedRoutes(root: string): void {
+  const stat = lstat(root, HOSTED_TREE);
+  if (stat === null) return;
+  let names: string[];
+  try {
+    names = readdirSync(join(root, HOSTED_TREE));
+  } catch (e) {
+    return fail(`${HOSTED_TREE}: ${osError(e)}`);
+  }
+  const undeclared = names.filter((name) => !RESERVED_ROUTES.has(name)).sort();
+  if (undeclared.length > 0) {
+    fail(
+      `${HOSTED_TREE} publishes ${undeclared.join(", ")} at the site root, ` +
+        "which RESERVED_ROUTES does not reserve: a document slug could claim it and be overwritten",
+    );
+  }
+}
+
+/**
  * Preflight everything the repository serves as committed content, before the
  * previous `_site/` is deleted: the homepage tree, the skill tree, and each
  * served root file. Every one of them is optional, so a repository that carries
@@ -468,12 +501,23 @@ async function preflightRenderShell(root: string, production: boolean): Promise<
   if (typeof module.buildRenderer !== "function" || typeof module.readOrigin !== "function") {
     return fail(`${RENDERER_BUILD}: expected buildRenderer and readOrigin exports`);
   }
+  const origins: string[] = [];
   for (const key of RENDERER_KEYS) {
     try {
-      module.readOrigin(process.env, key, production);
+      origins.push(module.readOrigin(process.env, key, production));
     } catch (e) {
       return fail(`${RENDERER_BUILD}: ${(e as Error).message}`);
     }
+  }
+  /* `buildRenderer` refuses two equal origins itself, and that refusal is the
+     authority -- it is what a `--out` invocation from a shell hits, and its
+     message is the one quoted everywhere. It just refuses too late for this
+     builder: by the time it runs, `_site/` has been deleted and every document
+     rebuilt, so a typo in one operator variable costs the previous publish tree.
+     Asking the same question here is a duplicated *check*, not a duplicated
+     rule; the message defers to the one that owns it. */
+  if (origins[0] === origins[1]) {
+    fail(`${RENDERER_BUILD}: HOSTED_RENDER_ORIGIN must not be the same origin as HOSTED_APP_ORIGIN`);
   }
   return module;
 }
@@ -568,12 +612,18 @@ ${rows}
  * two files is a rule nobody reads in one place. Netlify applies `_redirects`
  * after the TOML rules, and the document routes below cannot match this path:
  * `/publish` is a reserved route.
+ *
+ * It is emitted only when the hosted tree was actually copied. A repository
+ * without one -- an installed consumer building their own documents -- would
+ * otherwise get a rewrite pointing at a file that is not in its publish tree,
+ * which turns a page that simply does not exist into a page that exists and
+ * 404s through a rule.
  */
 export const HOSTED_REWRITES = ["/publish/authorize /publish/authorize.html 200"];
 
 /** Permanent-ID and alias redirects, grouped in ascending slug order. */
-function renderRedirects(docs: SiteMetadata[]): string {
-  const lines: string[] = [...HOSTED_REWRITES];
+function renderRedirects(docs: SiteMetadata[], hosted: boolean): string {
+  const lines: string[] = hosted ? [...HOSTED_REWRITES] : [];
   for (const doc of docs) {
     lines.push(`/d/${doc.id} /${doc.slug}/ 301`);
     lines.push(`/d/${doc.id}/* /${doc.slug}/ 301`);
@@ -631,6 +681,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
 
   for (const page of STATIC_PAGES) validateStaticTree(root, page);
   validateStaticTree(root, HOSTED_TREE);
+  preflightHostedRoutes(root);
   preflightServedContent(root);
 
   const outDir = resolve(root, "_site");
@@ -672,6 +723,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
   // The tree's *contents* land at the root: `netlify/public/viewer.js` is
   // `/viewer.js`, `netlify/public/publish/authorize.html` is
   // `/publish/authorize.html`, which is the path the rewrite above names.
+  const hosted = lstat(root, HOSTED_TREE) !== null;
   copyStaticTree(root, outDir, HOSTED_TREE, "");
 
   if (renderer !== null) await buildRenderShell(renderer, outDir, production);
@@ -688,7 +740,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
 
   try {
     writeFileSync(join(outDir, "index.html"), renderIndex(root, docs));
-    writeFileSync(join(outDir, "_redirects"), renderRedirects(docs));
+    writeFileSync(join(outDir, "_redirects"), renderRedirects(docs, hosted));
   } catch (e) {
     return fail(`_site: ${osError(e)}`);
   }

@@ -18,11 +18,16 @@ import assert from "node:assert/strict";
 
 import { checkSiteHostname, probeHostname, siteHostname } from "./check-site-hostname.mjs";
 
-/** A fetch that records what it was asked and answers one canned status. */
-const stubFetch = (status, calls = []) => {
+/**
+ * A fetch that records what it was asked and answers one canned response.
+ *
+ * `location` is `undefined` for a response that carries no `Location` header,
+ * which is what a 2xx looks like and what a malformed 3xx looks like too.
+ */
+const stubFetch = (status, location, calls = []) => {
   const fetchFn = async (url, options) => {
     calls.push({ url, options });
-    return { status };
+    return { status, headers: { get: (name) => (name === "location" ? location ?? null : null) } };
   };
   fetchFn.calls = calls;
   return fetchFn;
@@ -36,16 +41,38 @@ test("the hostname comes from the Netlify site name", () => {
 
 test("off Netlify there is no site to ask", () => {
   assert.equal(siteHostname({ SITE_NAME: "archon-fixture" }), null);
-  assert.equal(siteHostname({ NETLIFY: "true" }), null);
-  assert.equal(siteHostname({ NETLIFY: "true", SITE_NAME: "   " }), null);
   assert.equal(siteHostname({}), null);
 });
 
-test("an explicit hostname overrides the derivation", () => {
+test("on Netlify an unnamed site is an error, not a skip", () => {
+  // The distinction this gate lives or dies on. Netlify always names the site,
+  // so an unset SITE_NAME there is the gate losing its subject -- and a skip
+  // would turn every deploy green on one unset variable, which is the exact
+  // silent pass this file exists to prevent.
+  for (const env of [{ NETLIFY: "true" }, { NETLIFY: "true", SITE_NAME: "   " }]) {
+    const result = siteHostname(env);
+    assert.ok(result instanceof Error, `an unnamed Netlify site produced ${result}`);
+    assert.match(result.message, /SITE_NAME is unset/);
+  }
+});
+
+test("an unnamed Netlify site fails the build without asking anything", async () => {
+  const fetchFn = stubFetch(200);
+  const { code, line } = await checkSiteHostname({ NETLIFY: "true" }, fetchFn);
+
+  assert.equal(code, 1);
+  assert.match(line, /^FAIL site hostname: /);
+  assert.equal(fetchFn.calls.length, 0);
+});
+
+test("an explicit hostname is a local override and cannot redirect a deploy's aim", () => {
   assert.equal(siteHostname({ ARCHON_SITE_HOSTNAME: "other.netlify.app" }), "other.netlify.app");
+  // On a Netlify build the site names itself. Honouring the override there
+  // would let an operator aim this gate at the primary domain -- which answers
+  // 200 for itself forever -- while the default hostname was folded into it.
   assert.equal(
-    siteHostname({ ...NETLIFY, ARCHON_SITE_HOSTNAME: "other.netlify.app" }),
-    "other.netlify.app",
+    siteHostname({ ...NETLIFY, ARCHON_SITE_HOSTNAME: "somewhere-else.example.com" }),
+    "archon-fixture.netlify.app",
   );
 });
 
@@ -61,14 +88,53 @@ test("the probe asks over https and does not follow a redirect", async () => {
   assert.equal(fetchFn.calls[0].options.redirect, "manual");
 });
 
-test("every redirect status fails the build", async () => {
+test("every redirect status to another host fails the build", async () => {
   for (const status of [301, 302, 303, 307, 308]) {
-    const { code, line } = await checkSiteHostname(NETLIFY, stubFetch(status));
-    assert.equal(code, 1, `${status} was not treated as a redirect`);
+    const fetchFn = stubFetch(status, "https://archon.example.com/");
+    const { code, line } = await checkSiteHostname(NETLIFY, fetchFn);
+    assert.equal(code, 1, `${status} was not treated as a hostname redirect`);
     assert.match(line, /^FAIL site hostname: /);
     assert.match(line, new RegExp(`answered ${status}`));
     assert.match(line, /archon-fixture\.netlify\.app/);
+    assert.match(line, /archon\.example\.com/, "the operator is not told which domain it was folded into");
   }
+});
+
+test("the site's own redirect is not the platform's, and passes", async () => {
+  // The edge gate sends an unauthenticated visitor to `/login/`, and this probe
+  // carries no session, so a same-host 3xx is the *ordinary* answer here.
+  // Failing on it would fail every correct deploy -- and a check that fails
+  // correct deploys gets switched off, which is how the real setting stops
+  // being guarded at all.
+  for (const location of [
+    "/login/?next=%2F",
+    "https://archon-fixture.netlify.app/login/",
+    "/how-archon-works/",
+  ]) {
+    const { code, line } = await checkSiteHostname(NETLIFY, stubFetch(302, location));
+    assert.equal(code, 0, `a same-host redirect to ${location} failed the build`);
+    assert.match(line, /^PASS site hostname: /);
+  }
+});
+
+test("a redirect with no target is not an answer to publish on", async () => {
+  // A relative Location is not in this list: resolved against the probe URL it
+  // stays on this hostname, which is the site routing itself and is fine.
+  for (const location of [undefined, ""]) {
+    const { code, line } = await checkSiteHostname(NETLIFY, stubFetch(302, location));
+    assert.equal(code, 1, `a 302 with Location ${JSON.stringify(location)} passed`);
+    assert.match(line, /^FAIL site hostname: /);
+  }
+});
+
+test("the failure line carries no redirect path or query", async () => {
+  // A redirect on this site can carry a `next` parameter naming a private
+  // document path, and a deploy log is what gets pasted into an issue.
+  const fetchFn = stubFetch(302, "https://archon.example.com/d/3c7f1a?next=%2Fprivate-doc%2F");
+  const { line } = await checkSiteHostname(NETLIFY, fetchFn);
+
+  assert.ok(!line.includes("private-doc"), `the failure line carried the redirect query: ${line}`);
+  assert.ok(!line.includes("3c7f1a"), `the failure line carried the redirect path: ${line}`);
 });
 
 test("a non-redirect answer passes, including a 404 and a 500", async () => {
@@ -102,12 +168,3 @@ test("with no site configured the check skips without asking anything", async ()
   assert.equal(fetchFn.calls.length, 0, "a build with no site made a network request");
 });
 
-test("the failure line names no redirect target", async () => {
-  // A deploy log gets pasted into an issue. The hostname and the status are
-  // enough to act on; the operator-configured destination is not this gate's to
-  // republish.
-  const fetchFn = async () => ({ status: 301, headers: { get: () => "https://private.example.com/" } });
-  const { line } = await checkSiteHostname(NETLIFY, fetchFn);
-
-  assert.ok(!line.includes("private.example.com"), `the failure line carried the target: ${line}`);
-});

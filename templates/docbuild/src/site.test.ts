@@ -324,6 +324,41 @@ test("the /publish/authorize rewrite is generated into _redirects", async (t) =>
   assert.ok(existsSync(join(outDir, "publish", "authorize.html")));
 });
 
+test("a hosted page at an unreserved top-level name fails the build", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, hosted: true });
+  mkdirSync(join(dir, "netlify", "public", "status"), { recursive: true });
+  writeFileSync(join(dir, "netlify", "public", "status", "index.html"), "<!doctype html>\n");
+
+  // The hosted tree is copied over the same root the documents were written
+  // into, and a copy overwrites without asking. Left unreserved, a document
+  // with the slug `status` would be silently replaced by this page on a green
+  // build, so the list is held equal to the directory instead.
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /netlify\/public publishes status at the site root, which RESERVED_ROUTES does not reserve/.test(
+        error.message,
+      ),
+  );
+});
+
+test("with no hosted tree the site publishes no rewrite to a page it lacks", async (t) => {
+  isolate(t);
+  origins(t);
+  // An installed consumer building their own documents has no netlify/public.
+  const dir = root(t, { served: true });
+
+  const { outDir } = await buildSite(dir);
+
+  const redirects = readFileSync(join(outDir, "_redirects"), "utf8");
+  assert.ok(!redirects.includes("/publish/authorize"), `a rewrite named a page that was never copied: ${redirects}`);
+  assert.equal(existsSync(join(outDir, "publish")), false);
+  assert.ok(existsSync(join(outDir, "sample", "index.html")));
+});
+
 test("a document that claims a hosted top-level route fails as a reserved route", async (t) => {
   isolate(t);
   origins(t);
@@ -412,20 +447,27 @@ test("one configured origin without the other fails the build", async (t) => {
   );
 });
 
-test("two equal origins fail the build", async (t) => {
+test("two equal origins fail before the previous _site is touched", async (t) => {
   isolate(t);
-  origins(t, { app: APP_ORIGIN, render: APP_ORIGIN });
+  origins(t, { app: APP_ORIGIN, render: RENDER_ORIGIN });
   const dir = root(t, { served: true, hosted: true, renderer: true });
 
-  // The renderer's own refusal, and it survives the change of output directory.
-  // A site that framed its renderer from the same origin would have given the
-  // artifact the application's cookies to reach.
+  // A first, good build, so the failure below has a previous publish tree to
+  // cost. A site that framed its renderer from the same origin would have given
+  // the artifact the application's cookies to reach, so this is refused -- and
+  // refused in the preflight pass, because `buildRenderer`'s own refusal lands
+  // after `_site/` is gone and every document has been rebuilt.
+  const { outDir } = await buildSite(dir);
+  origins(t, { app: APP_ORIGIN, render: APP_ORIGIN });
+
   await assert.rejects(
     buildSite(dir),
     (error: unknown) =>
       error instanceof BuildError &&
       /HOSTED_RENDER_ORIGIN must not be the same origin as HOSTED_APP_ORIGIN/.test(error.message),
   );
+  assert.ok(existsSync(join(outDir, "_render", "index.html")));
+  assert.ok(existsSync(join(outDir, "sample", "index.html")));
 });
 
 test("a malformed origin fails before the previous _site is touched", async (t) => {
