@@ -11,7 +11,9 @@
       There is no script here and no upload route behind it. This page exists so
       the hosted deployment has a real, honest root while its producers land:
       identity is AHU-003, publication state is AHU-004, the approval screen is
-      AHU-007 and the owner viewer is AHU-009. A placeholder that said "signed
+      AHU-007 and the owner viewer is AHU-009. Sign-in itself now exists and
+      lives at `/login/`; this page links to it and does nothing else. A
+      placeholder that said "signed
       in" or accepted a document would be a production surface making a claim
       nothing behind it can keep, which is precisely what this ticket is not
       allowed to ship.
@@ -56,13 +58,15 @@
       <section aria-labelledby="status-heading">
         <h2 id="status-heading">Publishing is not available yet</h2>
         <p>
-          This deployment is a service shell. Publishing, sign-in and document
+          This deployment is a service shell. Publishing and document
           reading are not enabled here, so nothing you send to it will be stored
           and no document can be opened from it.
         </p>
         <p>
-          You are not signed in, and this page cannot sign you in. Nothing on
-          this page has read, verified or recorded any identity.
+          This page itself reads, verifies and records nothing about you: it has
+          no script and asks the service no question. Signing in happens on
+          <a href="/login/">the sign-in page</a>, which identifies you by your
+          GitHub account and asks GitHub for no permissions at all.
         </p>
       </section>
 
