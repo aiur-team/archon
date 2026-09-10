@@ -1,4 +1,5 @@
-import { normalizeEmailOrNull } from "./hosted/email.mjs";
+import { DOMAIN_LIST_LIMITS, evaluateAccess } from "./hosted/domain-access.mjs";
+import { normalizeDomainOrNull, normalizeEmailOrNull } from "./hosted/email.mjs";
 import {
   StoreError,
   assertDocId,
@@ -21,10 +22,28 @@ import {
  * create-only write, into the site-wide `doc-state` store. Later grants and
  * transfers live only in that store. No owner, role, email, or capability
  * claim from a built document, a request, or a client global is authoritative.
- * The site-level `PUBLIC_DEFAULT_ROLE` variable is the one other runtime input
- * to authority: it names the read-only-or-comment role an authenticated visitor
- * receives when no owner, grant, invitation, or organization rule speaks for
- * them. It is unset by default and denies on anything it does not recognise.
+ *
+ * ## There is no default tier left, and that is the point (ACN-008)
+ *
+ * Two rules used to admit somebody nobody had named. A site-wide
+ * `ORG_EMAIL_DOMAIN` suffix test handed the document's `orgDefault` to any
+ * address ending in the configured string, and a site-wide
+ * `PUBLIC_DEFAULT_ROLE` handed a read-only role to "any other authenticated
+ * caller". Both are gone, and neither was removed for tidiness.
+ *
+ * Sign-in is Auth0 now, open to anyone holding a Google or GitHub account. Under
+ * an invite-only identity provider "any authenticated caller" was a bounded set
+ * an operator had assembled by hand; under an open one it is the internet, so a
+ * variable that used to widen a document to colleagues would now publish it.
+ * R14 forbids exactly that. `endsWith` was the second defect on top of the
+ * first: it calls `member@example.com.evil.example` an organisation mailbox.
+ *
+ * What replaces them is the per-document `allowedDomains` list, matched by exact
+ * full-domain equality against a *verified* address, and evaluated by the one
+ * evaluator in `netlify/lib/hosted/domain-access.mjs`, which the hosted document
+ * tree also uses. A document that lists no domains admits its owner and the
+ * people the owner named, and nobody else — however the deployment's environment
+ * is set.
  *
  * Storage goes through the P2-B helpers imported above: every record read is a
  * strongly consistent `read()`, every stored record passes `upgrade()` before
@@ -44,11 +63,11 @@ import {
 /** @typedef {{ sub: string, name: string, email: string }} AccessActor */
 /**
  * @typedef {{
- *   v: 1,
+ *   v: 2,
  *   docId: string,
  *   ownerSub: string,
  *   ownerEmail: string,
- *   orgDefault: "commenter" | "viewer" | "none",
+ *   allowedDomains: string[],
  *   boundAt: string,
  *   boundFrom: "env:DOC_OWNERS"
  * }} AccessDocument
@@ -142,26 +161,83 @@ const ISO_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /**
- * The roles an owner may grant, and the organization-wide defaults a document
- * may carry. Exported because `netlify/functions/access.mjs` validates request
- * bodies against exactly these lists, and a second copy declared there would be
- * free to drift away from the record validators below — the defect #125 fixed
- * elsewhere in the deploy tree.
+ * The roles an owner may grant. Exported because
+ * `netlify/functions/access.mjs` validates request bodies against exactly this
+ * list, and a second copy declared there would be free to drift away from the
+ * record validators below — the defect #125 fixed elsewhere in the deploy tree.
+ *
+ * The organisation-default list that used to sit beside it is gone with the tier
+ * it described; a document carries a domain list now, and the only role a domain
+ * yields is `viewer`.
  */
 export const GRANTABLE_ROLES = Object.freeze(["editor", "commenter", "viewer"]);
-export const ORG_DEFAULTS = Object.freeze(["commenter", "viewer", "none"]);
 
 /**
- * The only two roles the site-level `PUBLIC_DEFAULT_ROLE` may name. Both are
- * read-only-or-comment roles: neither can edit, accept, share, or see members.
- * `editor` and `owner` are deliberately absent and are not downgraded to a
- * nearby role — a value naming one is invalid configuration and denies.
+ * The role a listed domain yields, and the only one it ever yields.
+ *
+ * A domain names a class of people rather than a person, so it may not confer a
+ * capability that changes the document or its membership. `commenter` writes
+ * threads, `editor` writes the document, and both would let anybody who can
+ * obtain an address at a listed domain act in the owner's document without the
+ * owner having decided anything about them. An owner who wants more for a
+ * particular person grants it to that person by name, which outranks this.
  */
-export const PUBLIC_DEFAULT_ROLES = Object.freeze(["viewer", "commenter"]);
+const DOMAIN_ROLE = "viewer";
+
+/**
+ * The stored version of the document access record after ACN-008.
+ *
+ * **The bump is one-way.** The release before this one accepts version 1 alone,
+ * so a record that has moved to version 2 reads as `unsupported-version` — a
+ * 500, not a denial — on an instance running that release. Nothing rewrites a
+ * record back down.
+ *
+ * The exposure is bounded on purpose. Reading migrates nothing, and the write
+ * fences in `netlify/functions/access.mjs` deliberately rewrite the stored bytes
+ * unchanged, so an ordinary invitation or role change leaves an old record at
+ * version 1. Only an owner who actually writes a domain list, or an ownership
+ * transfer, moves a document forward — which means a deployment that never
+ * touches the new feature can still be rolled back, and one that does has
+ * bounded, per-document exposure for as long as an old instance is still warm.
+ */
+const DOCUMENT_VERSION = 2;
+
+/**
+ * The document-record versions this module can read.
+ *
+ * Exported because `netlify/functions/access.mjs` reads and rewrites the same
+ * record through the same store helpers, and a copy of this list declared there
+ * would be free to forget a version — leaving the write surface unable to open a
+ * document the resolver can read perfectly well.
+ */
+export const ACCESS_DOCUMENT_STORE_OPTIONS = Object.freeze({
+  versions: Object.freeze([1, DOCUMENT_VERSION]),
+});
 
 const USER_KEYS = Object.freeze(["email", "emailVerified", "name", "sub"]);
 const ACTOR_KEYS = Object.freeze(["email", "name", "sub"]);
 const DOCUMENT_KEYS = Object.freeze([
+  "allowedDomains",
+  "boundAt",
+  "boundFrom",
+  "docId",
+  "ownerEmail",
+  "ownerSub",
+  "v",
+]);
+
+/**
+ * The version-1 document shape, kept for the migration read alone.
+ *
+ * A record written before ACN-008 carries `orgDefault` and no `allowedDomains`.
+ * It is still read — a deployment does not rewrite its documents on the way to a
+ * new release — and it is read as "no domains are listed", which is the
+ * fail-closed reading of a field that was not there. The stored `orgDefault`
+ * value is not consulted on the way past, in either direction: the tier it fed
+ * no longer exists, and a `viewer` left on an old record must not quietly become
+ * a domain-shaped admission.
+ */
+const LEGACY_DOCUMENT_KEYS = Object.freeze([
   "boundAt",
   "boundFrom",
   "docId",
@@ -532,29 +608,84 @@ function isExpectedDocId(docId, expectedDocId) {
 }
 
 /**
- * Validate a stored document access record.
+ * @param {unknown} value
+ * @returns {boolean} True for an array of already-normalized, unique domains in
+ *   the canonical order `normalizeDomainList()` produces. Read rather than
+ *   repaired: a stored list this does not recognise is a corrupt record, not a
+ *   list to guess at.
  *
- * Calls P2-B `upgrade()` first and preserves its `StoreError`; then requires
- * exactly the version-1 keys, a matching document ID, a valid `ownerSub`, a
- * non-empty normalized `ownerEmail`, an `orgDefault` of `commenter`, `viewer`,
- * or `none`, an exact `boundAt` timestamp, and `boundFrom` equal to
- * `env:DOC_OWNERS`. Returns the same reference; never repairs or defaults.
+ * The public-mailbox denylist is deliberately *not* applied here. It is a
+ * write-time rule about what an owner may newly list, and re-applying it on read
+ * would mean that turning `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` back off made every
+ * record written while it was on unreadable — an operator toggling a flag would
+ * lock owners out of their own documents rather than merely stop new lists.
+ */
+function isStoredDomainList(value) {
+  if (!Array.isArray(value) || value.length > DOMAIN_LIST_LIMITS.MAX_DOMAINS) {
+    return false;
+  }
+  let previous = null;
+  for (const entry of value) {
+    if (normalizeDomainOrNull(entry) !== entry) return false;
+    if (previous !== null && entry <= previous) return false;
+    previous = entry;
+  }
+  return true;
+}
+
+/**
+ * Validate a stored document access record, in either stored version.
+ *
+ * Calls P2-B `upgrade()` first — naming both document versions, so a version-2
+ * grant or invitation is still refused everywhere else — and preserves its
+ * `StoreError`. It then requires a matching document ID, a valid `ownerSub`, a
+ * non-empty normalized `ownerEmail`, an exact `boundAt` timestamp, `boundFrom`
+ * equal to `env:DOC_OWNERS`, and exactly one of the two key sets.
+ *
+ * Unlike the grant and invitation validators, this one does not always return
+ * the reference it was given: a version-1 record is answered as the version-2
+ * view of itself, with `allowedDomains: []` and no `orgDefault`. Every caller
+ * then reads one shape, and the alternative — a defaulting accessor each caller
+ * remembers to use — is one call site away from reading `undefined` as a list
+ * and admitting nobody, or, far worse, from reading the old `orgDefault` as
+ * though the tier that consumed it were still there. Nothing is written by this
+ * function; the migrated shape becomes durable at the document's next write.
  *
  * @param {unknown} value
  * @param {string} expectedDocId
  * @returns {AccessDocument}
  */
 export function assertAccessDocument(value, expectedDocId) {
-  upgrade(value);
+  upgrade(value, ACCESS_DOCUMENT_STORE_OPTIONS);
+  const legacy = hasExactShape(value, LEGACY_DOCUMENT_KEYS);
   if (
-    !hasExactShape(value, DOCUMENT_KEYS) ||
+    !(legacy || hasExactShape(value, DOCUMENT_KEYS)) ||
     !isExpectedDocId(value.docId, expectedDocId) ||
     !isIdentitySub(value.ownerSub) ||
     !isNormalizedEmail(value.ownerEmail) ||
-    !ORG_DEFAULTS.includes(value.orgDefault) ||
     !isTimestamp(value.boundAt) ||
     value.boundFrom !== BOUND_FROM
   ) {
+    throw invalidRecord();
+  }
+  /* The two key sets are the two versions, so a record whose keys and whose `v`
+     disagree is refused rather than reconciled: a version-2 body carrying a
+     version-1 stamp is a partial write, not a record. */
+  if (legacy !== (value.v === 1)) {
+    throw invalidRecord();
+  }
+  if (legacy) {
+    return {
+      v: DOCUMENT_VERSION,
+      docId: value.docId,
+      ownerSub: value.ownerSub,
+      ownerEmail: value.ownerEmail,
+      allowedDomains: [],
+      boundAt: value.boundAt,
+      boundFrom: value.boundFrom,
+    };
+  }
+  if (!isStoredDomainList(value.allowedDomains)) {
     throw invalidRecord();
   }
   return value;
@@ -938,56 +1069,6 @@ function validateUser(user) {
 }
 
 /**
- * Parse the site-level `PUBLIC_DEFAULT_ROLE` value into the role a signed-in
- * visitor who matches nothing else receives.
- *
- * This is the one setting in the platform that widens access to people the
- * owner has never named, so it fails closed in every direction. `undefined`,
- * `null`, a non-string, the empty string, an ASCII-whitespace-only string, and
- * every spelling that is not exactly `"viewer"` or `"commenter"` after edge
- * trimming all return `"none"` — the role whose capability row is entirely
- * false. Matching is exact and case-sensitive: `"Viewer"` is not a viewer.
- *
- * A value naming a writing role — `"editor"`, `"owner"` — is invalid
- * configuration, not a request that gets clamped: it returns `"none"` rather
- * than the nearest safe role, so a typo cannot quietly publish a document at
- * some lower privilege the operator never asked for.
- *
- * Unlike `parseDocOwners()`, a malformed value denies rather than throwing
- * `invalid-config`. A throw here would turn one bad site variable into a 500 on
- * every request including the owner's own, and the safe answer to "who is this
- * stranger?" is already available: nobody. The rejected value is never
- * returned, embedded in a message, or logged.
- *
- * @param {unknown} value
- * @returns {"viewer" | "commenter" | "none"}
- */
-export function parsePublicDefaultRole(value) {
-  if (typeof value !== "string") {
-    return "none";
-  }
-  const trimmed = value.replace(ASCII_WHITESPACE, "");
-  return PUBLIC_DEFAULT_ROLES.includes(trimmed) ? trimmed : "none";
-}
-
-/**
- * Read the public-default value for this invocation, by the same
- * invocation-local rule as `runtimeDocOwners()`. There is deliberately no
- * `resolveRole()` option counterpart: the only thing that may widen access to
- * an unnamed visitor is site configuration, and an option would let any caller
- * in the deploy tree pass a role of its own choosing.
- *
- * @returns {unknown}
- */
-function runtimePublicDefaultRole() {
-  const env = globalThis.Netlify?.env;
-  if (env !== undefined && env !== null && typeof env.get === "function") {
-    return globalThis.Netlify.env.get("PUBLIC_DEFAULT_ROLE");
-  }
-  return globalThis.process?.env?.PUBLIC_DEFAULT_ROLE;
-}
-
-/**
  * Read the seed-owner value for this invocation. An Edge Function exposes the
  * Functions-scoped site variable through `Netlify.env`; a Node Function
  * exposes it through `process.env`. Nothing is cached across invocations.
@@ -1087,15 +1168,29 @@ async function liveInvitation(store, docId, key, email, now) {
  * bound ownerSub
  *   > explicit grant by sub
  *   > live invitation by normalized proven email
- *   > PUBLIC_DEFAULT_ROLE for any other authenticated caller
+ *   > allowedDomains match on a verified address, yielding viewer
  *   > none
  * ```
  *
- * The `PUBLIC_DEFAULT_ROLE` tier is off unless the site variable holds exactly
- * `viewer` or `commenter`; every other value, and no value at all, is `none`.
- * It is reached only by an authenticated caller — a null user has already
- * returned `none` — it cannot lower a role any earlier rule granted, and it is
- * skipped entirely when the document's `orgDefault` is the explicit `"none"`.
+ * The domain tier is last because it is the only one that decides about a class
+ * of people rather than about a person: an owner who grants `editor` to somebody
+ * whose address is also at a listed domain gets `editor`, and an owner who
+ * invited somebody gets the invited role, because both of those are statements
+ * about that individual. It admits nobody at all on a document listing no
+ * domains, which is every document until an owner lists one.
+ *
+ * The decision itself is not made here. It is `evaluateAccess()` in
+ * `netlify/lib/hosted/domain-access.mjs`, the same function the hosted document
+ * tree calls, so "is `ann@partner.example.org` allowed" has one answer on this
+ * deployment rather than one per document kind. Matching is exact, case-
+ * insensitive full-domain equality on the normalized name, never a suffix; and
+ * `emailVerified` must be the boolean `true`, because an unverified address is a
+ * string the reader typed.
+ *
+ * Nothing is written when a domain admits somebody. The decision is recomputed
+ * from the session's current verified address on every request, so an owner who
+ * removes a domain — or a person who loses the address — loses access on the
+ * next request rather than at the end of a session (R21).
  *
  * A null user, an absent document record, an unset seed, a missing grant, a
  * missing invitation, and an expired invitation all resolve to a result.
@@ -1128,12 +1223,11 @@ export async function resolveRole(docId, user, options = {}) {
   const store = Object.hasOwn(options, "store") ? options.store : docState();
   const documentKey = accessDocumentKey(docId);
 
-  const foundDocument = await read(store, documentKey);
+  const foundDocument = await read(store, documentKey, null, ACCESS_DOCUMENT_STORE_OPTIONS);
   let document =
     foundDocument.value === null ? null : assertAccessDocument(foundDocument.value, docId);
 
   let shared = document !== null;
-  let orgDefault = document === null ? "commenter" : document.orgDefault;
 
   if (document === null) {
     const owners = parseDocOwners(
@@ -1143,13 +1237,16 @@ export async function resolveRole(docId, user, options = {}) {
     if (seedEmail !== undefined) {
       shared = true;
       if (email !== "" && email === seedEmail) {
+        /* The seed create writes the current shape directly. A document bound
+           today has never had an organisation default, so there is nothing to
+           migrate and no reason to write a version somebody would have to. */
         const candidate = assertAccessDocument(
           {
-            v: 1,
+            v: DOCUMENT_VERSION,
             docId,
             ownerSub: user.sub,
             ownerEmail: email,
-            orgDefault: "commenter",
+            allowedDomains: [],
             boundAt: now,
             boundFrom: BOUND_FROM,
           },
@@ -1158,13 +1255,12 @@ export async function resolveRole(docId, user, options = {}) {
         if (await createOnly(store, documentKey, candidate)) {
           document = candidate;
         } else {
-          const winner = await read(store, documentKey);
+          const winner = await read(store, documentKey, null, ACCESS_DOCUMENT_STORE_OPTIONS);
           if (winner.value === null) {
             throw invalidRecord();
           }
           document = assertAccessDocument(winner.value, docId);
         }
-        orgDefault = document.orgDefault;
       }
     }
   }
@@ -1230,28 +1326,45 @@ export async function resolveRole(docId, user, options = {}) {
         return resolved(grant.role, true);
       }
     }
+
+    /* The domain tier. It sits here, after the two per-person rules and inside
+       the branch that has a record, because it needs `document.allowedDomains`
+       and because a decision about this individual outranks one about the class
+       of people holding an address at a domain.
+
+       The evaluator is handed the record and the principal and performs no I/O,
+       so this adds no store read. It is given the *normalized* address whatever
+       the provider claimed about it, rather than the `email` computed above,
+       which is `""` for an unverified identity: passing the empty string would
+       make an unverified caller fail the domain comparison instead of the
+       verification check, and this ticket's whole point is that
+       `emailVerified === true` is the thing standing between a listed domain and
+       whoever typed an address at it. The evaluator owns that test; letting it
+       be reached is this call site's part of it.
+
+       `state` and `ownerAccountId` are the hosted publication fields the shared
+       evaluator reads before it gets to the list. A collaboration document that
+       has been read from the store exists, so it is `complete`; ownership was
+       already decided above by `ownerSub`, so no account id is offered here and
+       the evaluator cannot reach a second owner verdict. `explicitRole` is null
+       for the same reason: a grant or an invitation has already returned. */
+    const decision = evaluateAccess({
+      record: {
+        state: "complete",
+        ownerAccountId: null,
+        allowedDomains: document.allowedDomains,
+      },
+      principal: {
+        accountId: user.sub,
+        email: normalizeEmailOrNull(user.email),
+        emailVerified: user.emailVerified,
+      },
+      explicitRole: null,
+    });
+    if (decision.allowed === true) {
+      return resolved(DOMAIN_ROLE, shared);
+    }
   }
 
-  /* The organisation tier that used to sit here is gone with `ORG_EMAIL_DOMAIN`
-     (ACN-006). It read a site-wide email suffix and handed `orgDefault` to
-     anybody whose address ended with it, which is both the wrong granularity —
-     one setting for every document on the deployment — and the wrong test, since
-     `endsWith` calls `member@example.com.evil.com` a member. Per-document domain
-     lists replace it in ACN-008, evaluated label by label.
-
-     `orgDefault` itself stays on the stored record and stays validated until
-     ACN-008 removes it. A field left on a record but no longer checked is how a
-     malformed value survives a migration and means something again later; and it
-     is still read below, where an explicit `"none"` suppresses the public
-     default. */
-
-  /* The public default is the last thing consulted before denial, and only for
-     a signed-in visitor who matched nothing above. An explicit document-level
-     `orgDefault: "none"` is a deliberate denial of the default tier, so it
-     suppresses the public default too: this rule may only widen access that
-     nobody has decided, never resurrect access somebody removed. */
-  if (orgDefault === "none") {
-    return resolved("none", shared);
-  }
-  return resolved(parsePublicDefaultRole(runtimePublicDefaultRole()), shared);
+  return resolved("none", shared);
 }

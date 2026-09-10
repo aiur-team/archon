@@ -56,7 +56,7 @@ import { StoreError } from "./store.mjs";
  *
  * @returns {Record<string, string | undefined>}
  */
-function readEnv() {
+function readHostedEnv() {
   const env = {};
   let runtime;
   try {
@@ -156,11 +156,35 @@ export async function identify(req, { store } = {}) {
  */
 export function requireOrigin(req) {
   try {
-    requireExactOrigin(req, readHostedConfig(readEnv()));
+    requireExactOrigin(req, readHostedConfig(readHostedEnv()));
   } catch {
     throw new Response("Bad origin", {
       status: 403,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   }
+}
+
+/**
+ * Whether this deployment lets a document list a public mailbox provider.
+ *
+ * ACN-007's one escape hatch, `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS`, read through
+ * the same validated hosted configuration everything else on this boundary uses.
+ * It lives here rather than in `netlify/functions/access.mjs` for the reason the
+ * rest of this module exists: the collaboration tree asks hosted configuration
+ * questions through exactly one seam, so there is one place that knows how a
+ * hosted key is spelled and one place a test has to stub.
+ *
+ * The strictness is the point. `readHostedConfig` refuses a value that is
+ * neither `"true"` nor `"false"`, so a deployment that set it to `"yes"` fails
+ * loudly instead of quietly letting an owner list `gmail.com` — which would
+ * publish a document its owner believes is private.
+ *
+ * @returns {boolean}
+ * @throws {HostedConfigError} when the deployment's hosted configuration is
+ *   unreadable. The caller has already passed `requireOrigin()`, which reads the
+ *   same configuration, so this is a server fault rather than a bad request.
+ */
+export function allowPublicMailDomains() {
+  return readHostedConfig(readHostedEnv()).allowPublicMailboxes;
 }

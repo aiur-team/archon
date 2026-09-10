@@ -62,6 +62,9 @@ const ERROR_MESSAGES = Object.freeze({
  * in a deterministic fake store. */
 const READ_OPTIONS = Object.freeze({ type: "json", consistency: "strong" });
 
+/** The record versions `upgrade()` accepts when the caller names none. */
+const DEFAULT_VERSIONS = Object.freeze([1]);
+
 const MAX_KEY_BYTES = 600;
 const FORBIDDEN_PREFIX = "%2F";
 
@@ -284,18 +287,33 @@ function hasOnlyDataProperties(object, seen) {
  *
  * Rejects `null`, arrays, primitives, objects without their own `v`,
  * non-integer versions, or any value that fails the complete recursive
- * JSON-safe contract with code `invalid-record`; rejects every other integer
- * version with code `unsupported-version`; and returns a valid version-1
- * object unchanged (preserving an accepted null prototype).
+ * JSON-safe contract with code `invalid-record`; rejects every integer version
+ * the caller did not name with code `unsupported-version`; and returns an
+ * accepted record unchanged (preserving an accepted null prototype).
  *
  * No version is inferred for an unversioned object: no legacy production state
- * exists, so a silent default would hide corruption. Future schema work adds a
- * branch here and nowhere else.
+ * exists, so a silent default would hide corruption.
+ *
+ * ## Why the accepted set is a parameter
+ *
+ * Every record in this store used to be version 1, so one hard-coded `=== 1`
+ * was the whole gate. ACN-008 gives the collaboration *document* record a
+ * version 2 — `allowedDomains` in place of `orgDefault` — and nothing else on
+ * the deployment moves with it. Had this function simply started accepting `2`
+ * for everybody, a version-2 grant or invitation would have passed the gate and
+ * then reached a validator that checks key names rather than versions: a stored
+ * shape nobody wrote, read as one somebody did.
+ *
+ * So the caller names the versions it can actually read, and the default stays
+ * the strict one. A record type that has never been versioned twice calls this
+ * exactly as it always did.
  *
  * @param {unknown} value
- * @returns {object} The validated version-1 record (the same reference).
+ * @param {{versions?: readonly number[]}} [options] The record versions this
+ *   caller can read. Defaults to version 1 alone.
+ * @returns {object} The validated record (the same reference).
  */
-export function upgrade(value) {
+export function upgrade(value, { versions = DEFAULT_VERSIONS } = {}) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw invalidRecordError();
   }
@@ -314,7 +332,7 @@ export function upgrade(value) {
   ) {
     throw invalidRecordError();
   }
-  if (versionDescriptor.value === 1) {
+  if (versions.includes(versionDescriptor.value)) {
     return value;
   }
   throw storeError("unsupported-version");
@@ -382,12 +400,14 @@ export function assertDocId(docId) {
  * @param {{ getWithMetadata(key: string, options: object): Promise<unknown> }} store
  * @param {string} key
  * @param {unknown} [initial]
+ * @param {{versions?: readonly number[]}} [options] Forwarded to `upgrade()`;
+ *   see there for why the accepted version set is the caller's to name.
  * @returns {Promise<{ value: object | null, etag: string | null }>}
  */
-export async function read(store, key, initial = null) {
+export async function read(store, key, initial = null, options = undefined) {
   assertKey(key);
   if (initial !== null) {
-    upgrade(initial);
+    upgrade(initial, options);
   }
   let found;
   try {
@@ -411,7 +431,7 @@ export async function read(store, key, initial = null) {
   ) {
     throw invalidRecordError();
   }
-  const value = upgrade(found.data);
+  const value = upgrade(found.data, options);
   const { etag } = found;
   if (typeof etag !== "string" || etag.length === 0) {
     throw invalidRecordError();
@@ -521,19 +541,21 @@ function sleep(milliseconds) {
  * @param {string} key
  * @param {object | null} initial Non-null default record used when the key is absent.
  * @param {(draft: object | null) => object | null} apply Synchronous pure transformation.
+ * @param {{versions?: readonly number[]}} [options] Forwarded to `upgrade()` for
+ *   both the read and the written record; see there.
  * @returns {Promise<{ value: object | null, etag: string | null, changed: boolean }>}
  */
-export async function mutate(store, key, initial, apply) {
+export async function mutate(store, key, initial, apply, options = undefined) {
   assertKey(key);
   if (typeof apply !== "function") {
     throw invalidRecordError();
   }
   if (initial !== null) {
-    upgrade(initial);
+    upgrade(initial, options);
   }
 
   for (let attempt = 0; attempt < MAX_MUTATE_ATTEMPTS; attempt += 1) {
-    const current = await read(store, key, initial);
+    const current = await read(store, key, initial, options);
     const draft = structuredClone(current.value);
     const next = apply(draft);
 
@@ -547,7 +569,7 @@ export async function mutate(store, key, initial, apply) {
     ) {
       throw invalidRecordError();
     }
-    const record = upgrade(next);
+    const record = upgrade(next, options);
 
     let result;
     const writeOptions =

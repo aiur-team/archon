@@ -208,7 +208,7 @@ export async function mintToken(session, docId) {
        address, so keying on it would make the anonymous branch nearly unreachable
        and quietly invert the default this line exists to hold. The document role
        is not available here either, and would not separate an invited viewer from
-       one arriving by `PUBLIC_DEFAULT_ROLE` if it were.
+       one arriving by the document's domain list (ACN-008) if it were.
        So every session gets a fresh per-connection identifier. That is what an
        outsider always got; it is now what everybody gets, because there is no
        longer any notion of insider for this decision to read. The cost is that a

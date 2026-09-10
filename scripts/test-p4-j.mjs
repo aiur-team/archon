@@ -523,13 +523,14 @@ const IDENTITY_FAKE_SOURCE = `function poison(name) {
 }
 export const identify = poison("identify");
 export const requireOrigin = poison("requireOrigin");
+export const allowPublicMailDomains = poison("allowPublicMailDomains");
 `;
 
 function suiteSource(accessPath) {
   const libAccess = resolve(ROOT, "netlify/lib/access.mjs");
   return [
     `import { createAccessHandler, withAccessWriteLease } from ${JSON.stringify(accessPath)};`,
-    `import { accessDocumentKey, accessGrantKey, accessInvitationKey, capabilitiesFor, GRANTABLE_ROLES, ORG_DEFAULTS, resolveRole } from ${JSON.stringify(libAccess)};`,
+    `import { accessDocumentKey, accessGrantKey, accessInvitationKey, capabilitiesFor, GRANTABLE_ROLES, resolveRole } from ${JSON.stringify(libAccess)};`,
     SUITE_BODY,
   ].join("\n");
 }
@@ -571,8 +572,8 @@ function accessRow(role, shared) {
 }
 function docRecord(overrides) {
   return Object.assign({
-    v: 1, docId: DOC, ownerSub: OWNER.sub, ownerEmail: OWNER.email,
-    orgDefault: "commenter", boundAt: "2026-08-01T12:00:00.000Z",
+    v: 2, docId: DOC, ownerSub: OWNER.sub, ownerEmail: OWNER.email,
+    allowedDomains: [], boundAt: "2026-08-01T12:00:00.000Z",
     boundFrom: "env:DOC_OWNERS",
   }, overrides || {});
 }
@@ -758,6 +759,7 @@ function kitFor(store, overrides) {
       return bytes;
     },
     nowFn() { counters.now += 1; return NOW_MS; },
+    allowPublicMailboxesFn() { return false; },
   };
   const merged = Object.assign({}, base, overrides || {});
   return { handler: createAccessHandler(merged), counters: counters, events: events, deps: merged };
@@ -772,6 +774,15 @@ async function codeOf(response) {
 async function expectError(response, status, code, label) {
   eq(response.status, status, label + " status");
   if (code !== null) eq(await codeOf(response), code, label + " code");
+  eq(response.headers.get("Cache-Control"), "private, no-store", label + " cache header");
+}
+
+/* The domain-list write answers 200 with the normalized list rather than 204,
+   because normalisation is visible and an owner told only "no content" would
+   have to re-read the roster to learn what their document now says. */
+async function expectDomainList(response, expected, label) {
+  eq(response.status, 200, label + " status");
+  eq(JSON.parse(await response.text()), { ok: true, doc: DOC, allowedDomains: expected }, label + " body");
   eq(response.headers.get("Cache-Control"), "private, no-store", label + " cache header");
 }
 
@@ -809,7 +820,7 @@ async function groupOne() {
   const body = JSON.parse(await response.text());
   eq(body, {
     doc: DOC,
-    orgDefault: "commenter",
+    allowedDomains: [],
     members: [
       { sub: OWNER.sub, email: OWNER.email, name: "", role: "owner" },
       { sub: EDITOR.sub, email: EDITOR.email, name: EDITOR.name, role: "editor" },
@@ -931,12 +942,13 @@ async function groupTwo() {
   for (const entry of badBodies) {
     await expectError(await kit.handler(makeReq("POST", "/api/access", entry[0])), 400, "invalid-request", entry[1]);
   }
-  await expectError(await kit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "owner" })), 400, "invalid-request", "invalid org default");
+  await expectError(await kit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "owner" })), 400, "invalid-request", "the retired orgDefault variant is not a body");
+  await expectError(await kit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: "example.invalid" })), 400, "invalid-request", "allowedDomains must be an array");
 
   const nonOwner = kitFor(store, { resolveRoleFn() { return accessRow("editor", true); } });
-  await expectError(await nonOwner.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 403, "forbidden", "editor cannot write");
+  await expectError(await nonOwner.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 403, "forbidden", "editor cannot write");
   const unshared = kitFor(store, { resolveRoleFn() { return accessRow("none", false); } });
-  await expectError(await unshared.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 403, "forbidden", "unshared document");
+  await expectError(await unshared.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 403, "forbidden", "unshared document");
 
   // Lease behaviour.
   const busy = seededStore();
@@ -949,7 +961,7 @@ async function groupTwo() {
     },
   }));
   const busyKit = kitFor(busy);
-  const busyResponse = await busyKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" }));
+  const busyResponse = await busyKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] }));
   await expectError(busyResponse, 409, "access-busy", "live lease");
   eq(busyResponse.headers.get("Retry-After"), "2", "busy response advises a bounded retry");
 
@@ -964,14 +976,14 @@ async function groupTwo() {
     },
   }));
   const expiredKit = kitFor(expired);
-  await expectNoContent(await expiredKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), "expired lease is reclaimed");
+  await expectDomainList(await expiredKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), ["listed.example"], "expired lease is reclaimed");
   eq(coordinatorOf(expired).lease, null, "the lease is released after a successful mutation");
   eq(coordinatorOf(expired).epoch, 10, "the epoch advances exactly once per acquisition");
 
   const overflow = seededStore();
   overflow.put(WRITE_KEY, writeRecord({ epoch: Number.MAX_SAFE_INTEGER }));
   const overflowKit = kitFor(overflow);
-  await expectError(await overflowKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 500, "internal-error", "epoch overflow");
+  await expectError(await overflowKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 500, "internal-error", "epoch overflow");
 
   const releaseFail = seededStore();
   let releaseAttempts = 0;
@@ -983,9 +995,9 @@ async function groupTwo() {
     return null;
   };
   const releaseKit = kitFor(releaseFail);
-  await expectError(await releaseKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 503, "unavailable", "release failure downgrades a successful mutation");
+  await expectError(await releaseKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 503, "unavailable", "release failure downgrades a successful mutation");
   eq(releaseAttempts, 1, "release is attempted exactly once");
-  eq(releaseFail.peek(accessDocumentKey(DOC)).orgDefault, "viewer", "the authoritative state survives a release failure");
+  eq(releaseFail.peek(accessDocumentKey(DOC)).allowedDomains, ["listed.example"], "the authoritative state survives a release failure");
 
   const primaryFail = seededStore();
   primaryFail.failSet = function (key, value) {
@@ -1040,17 +1052,17 @@ async function groupTwo() {
   await expectError(await staleKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, email: INVITEE, role: "commenter" })), 404, "not-found", "an expired invitation is not a live target");
   await expectError(await staleKit.handler(makeReq("DELETE", "/api/access", { doc: DOC, email: INVITEE })), 404, "not-found", "an expired invitation cannot be cancelled");
 
-  // Org default.
+  // The document's domain list (ACN-008), which replaced the organization default.
   const defaultStore = seededStore();
   const defaultKit = kitFor(defaultStore);
-  await expectNoContent(await defaultKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "none" })), "org default change");
-  eq(defaultStore.peek(accessDocumentKey(DOC)).orgDefault, "none", "the org default changed");
+  await expectDomainList(await defaultKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: [" Listed.Example "] })), ["listed.example"], "domain list write");
+  eq(defaultStore.peek(accessDocumentKey(DOC)).allowedDomains, ["listed.example"], "the normalized list is what is stored");
   eq(defaultKit.events, [{
     docId: DOC, actor: ACTOR, kind: "access.change", target: { sub: OWNER.sub },
-    docVersion: null, summary: "changed organization default to none",
-  }], "one exact org-default event");
-  await expectNoContent(await defaultKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "none" })), "same org default");
-  eq(defaultKit.events.length, 1, "an unchanged org default emits no event");
+    docVersion: null, summary: "set the document's domain list to listed.example",
+  }], "one exact domain-list event");
+  await expectDomainList(await defaultKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), ["listed.example"], "same domain list");
+  eq(defaultKit.events.length, 1, "an unchanged domain list emits no event");
 
   // Revocation.
   const revokeStore = seededStore();
@@ -1350,7 +1362,7 @@ async function groupFour() {
   const absentKit = kitFor(absent);
   await expectError(await absentKit.handler(makeReq("POST", "/api/access/transfer", { doc: DOC, sub: OWNER.sub })), 409, "conflict", "self transfer is refused");
   await expectError(await absentKit.handler(makeReq("POST", "/api/access/transfer", { doc: DOC, sub: VIEWER.sub })), 404, "not-found", "the transfer target must be a grantee");
-  await expectError(await kit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 403, "forbidden", "the former owner loses authority immediately");
+  await expectError(await kit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 403, "forbidden", "the former owner loses authority immediately");
 
   // A full document never materializes a fifty-first child.
   const capped = seededStore();
@@ -1392,11 +1404,11 @@ async function groupFour() {
   const repairKit = kitFor(interrupted, {
     identifyFn() { return { sub: EDITOR.sub, email: EDITOR.email, emailVerified: true, name: EDITOR.name }; },
   });
-  await expectNoContent(await repairKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), "the new owner repairs then applies its own change");
+  await expectDomainList(await repairKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), ["listed.example"], "the new owner repairs then applies its own change");
   eq(interrupted.has(accessGrantKey(DOC, EDITOR.sub)), false, "repair removes the redundant grant");
   eq(interrupted.peek(accessGrantKey(DOC, OWNER.sub)).role, "editor", "repair restores the former owner as an editor");
   eq(coordinatorOf(interrupted).transfer, null, "repair clears the marker");
-  eq(interrupted.peek(accessDocumentKey(DOC)).orgDefault, "viewer", "the requested change runs after repair");
+  eq(interrupted.peek(accessDocumentKey(DOC)).allowedDomains, ["listed.example"], "the requested change runs after repair");
   eq(repairKit.events.length, 2, "repair emits the transfer event and then the requested change");
   eq(repairKit.events[0].kind, "access.transfer", "the repaired transfer event comes first");
 
@@ -1412,7 +1424,7 @@ async function groupFour() {
     },
   }));
   const pendingKit = kitFor(pending);
-  await expectError(await pendingKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 409, "conflict", "a pending transfer blocks unrelated work");
+  await expectError(await pendingKit.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 409, "conflict", "a pending transfer blocks unrelated work");
   await expectNoContent(await pendingKit.handler(makeReq("POST", "/api/access/transfer", { doc: DOC, sub: EDITOR.sub })), "the old owner resumes its exact transfer");
   eq(pending.peek(accessDocumentKey(DOC)).ownerSub, EDITOR.sub, "the resumed transfer commits authority");
 
@@ -1609,7 +1621,6 @@ async function groupFive() {
 
   // 7. The request validator and the record validators read one list, not two.
   eq(GRANTABLE_ROLES, ["editor", "commenter", "viewer"], "the library owns the grantable role list");
-  eq(ORG_DEFAULTS, ["commenter", "viewer", "none"], "the library owns the organization default list");
   const roleGate = kitFor(granted());
   await expectError(await roleGate.handler(makeReq("PATCH", "/api/access", { doc: DOC, sub: EDITOR.sub, role: "owner" })), 400, "invalid-request", "owner is not a grantable role");
 
@@ -1620,7 +1631,7 @@ async function groupFive() {
   const forged = kitFor(granted(), {
     resolveRoleFn() { return Object.assign(accessRow("editor", true), { canShare: true }); },
   });
-  await expectError(await forged.handler(makeReq("PATCH", "/api/access", { doc: DOC, orgDefault: "viewer" })), 500, "internal-error", "a role whose capability row was forged is refused before authorization");
+  await expectError(await forged.handler(makeReq("PATCH", "/api/access", { doc: DOC, allowedDomains: ["listed.example"] })), 500, "internal-error", "a role whose capability row was forged is refused before authorization");
 }
 
 export default async function run() {

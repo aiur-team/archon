@@ -38,7 +38,7 @@ decides who may see HTML, and it never decides who may write.</p>
     <tr><td><code>/api/suggestions</code></td><td class="n">GET, POST</td><td>body <code>{docId, aid, text, note, baseHash, baseText}</code></td><td>Array with <code>state: open|superseded</code>; <code>201</code> the record</td><td><span class="pill ok">canRead</span> / <span class="pill warn">canSuggest</span></td></tr>
     <tr><td><code>/api/suggestion</code></td><td class="n">POST</td><td><code>{docId, aid, sugId, action, reason}</code></td><td><code>{receipt, pr}</code> or <code>{ok:true}</code></td><td><span class="pill risk">canAccept</span>, or be the author to withdraw</td></tr>
     <tr><td><code>/api/edit</code></td><td class="n">POST</td><td><code>{docId, aid, text, baseHash?}</code></td><td><code>{receipt:{aid, text, by, at, pr, via:"edit"}}</code></td><td><span class="pill risk">canSuggest and canEdit</span></td></tr>
-    <tr><td><code>/api/access</code></td><td class="n">GET, POST, PATCH, DELETE</td><td><code>{doc, email|sub, role}</code> or <code>{doc, orgDefault}</code></td><td><code>{doc, orgDefault, members, invitations}</code>; <code>204</code> on write</td><td><span class="pill risk">canSeeMembers</span> / owner and <code>canShare</code></td></tr>
+    <tr><td><code>/api/access</code></td><td class="n">GET, POST, PATCH, DELETE</td><td><code>{doc, email|sub, role}</code> or <code>{doc, allowedDomains}</code></td><td><code>{doc, allowedDomains, members, invitations}</code>; <code>204</code> on write, or <code>200 {ok, doc, allowedDomains}</code> for the domain list</td><td><span class="pill risk">canSeeMembers</span> / owner and <code>canShare</code></td></tr>
     <tr><td><code>/api/access/transfer</code></td><td class="n">POST</td><td><code>{doc, sub}</code></td><td><code>204</code></td><td><span class="pill risk">Owner only</span></td></tr>
     <tr><td><code>/api/realtime-token</code></td><td class="n">GET</td><td><code>?doc=</code></td><td><code>{token, issued, expires, capability, clientId}</code>, or <b>204</b></td><td><span class="pill ok">canRead</span></td></tr>
     <tr><td><code>/api/hosted/session</code></td><td class="n">GET</td><td>&mdash;</td><td><code>{v, authenticated}</code>, or that plus <code>accountId, login, email, emailVerified, csrfToken</code></td><td><span class="pill n">Nothing</span></td></tr>
@@ -88,8 +88,11 @@ otherwise.</p>
 </table></div>
 
 <p>Resolution has a fixed precedence: the bound owner subject, then an explicit grant by subject, then an
-unexpired invitation matched on the caller's <b>verified</b> email, then <code>PUBLIC_DEFAULT_ROLE</code>
-for any other signed-in caller, then <code>none</code>. "Verified" is load-bearing: sign-in is open to
+unexpired invitation matched on the caller's <b>verified</b> email, then the document's own
+<code>allowedDomains</code> list &mdash; exact, case-insensitive, full-domain equality against a verified
+address, yielding <code>viewer</code> and never more &mdash; then <code>none</code>. A site-wide
+<code>PUBLIC_DEFAULT_ROLE</code> tier used to sit at the end and is gone: with open sign-in, "any other
+authenticated caller" is the internet. "Verified" is load-bearing: sign-in is open to
 anyone with a Google or GitHub account, so anyone can present any address to an identity provider, and the
 provider's verification claim is the only thing standing between an invitation and whoever guessed the
 invited address. An unverified match resolves <code>none</code> and consumes nothing, and an identity

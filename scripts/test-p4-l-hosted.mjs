@@ -422,9 +422,6 @@ async function drivePanel(root, siteUrl, docInfo, accounts, token, siteId) {
     await page.click(`${invitationRow} .share-cancel-invitation`);
     await waitSettled();
 
-    await page.selectOption("#doc-share-panel .share-default-control", "viewer");
-    await page.click("#doc-share-panel .share-default-save");
-    await waitSettled();
 
     /* Promote the editor account into a grant, then change and revoke it. */
     await page.fill("#doc-share-panel .share-invite-email", accounts.editor.email);
@@ -490,8 +487,11 @@ async function drivePanel(root, siteUrl, docInfo, accounts, token, siteId) {
     await successorPage.waitForSelector("#doc-share-button", { timeout: BROWSER_DEADLINE_MS });
     await successorPage.click("#doc-share-button");
     await successorPage.waitForSelector("#doc-share-panel .share-invite", { timeout: BROWSER_DEADLINE_MS });
-    await successorPage.selectOption("#doc-share-panel .share-default-control", "commenter");
-    await successorPage.click("#doc-share-panel .share-default-save");
+    /* The organisation-default select the successor used to press here is gone
+       with the tier it wrote (ACN-008). An ordinary mutation is still what
+       repairs the marker; the invitation below is one. */
+    await successorPage.fill("#doc-share-panel .share-invite-email", accounts.viewer.email);
+    await successorPage.click("#doc-share-panel .share-invite-submit");
     await successorPage.waitForFunction(() =>
       document.querySelector("#doc-share-panel").getAttribute("aria-busy") === null,
     undefined, { timeout: BROWSER_DEADLINE_MS });

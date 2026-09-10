@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { AuthUnavailableError } from "./hosted/auth-errors.mjs";
 import { SESSION_COOKIE } from "./hosted/identity.mjs";
-import { identify, requireOrigin } from "./identity.mjs";
+import { allowPublicMailDomains, identify, requireOrigin } from "./identity.mjs";
 import { StoreError } from "./store.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -70,6 +70,7 @@ function withHostedConfig(env, run) {
   const keys = [
     "HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN",
     "AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET",
+    "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
   ];
   const saved = {};
   for (const key of keys) {
@@ -268,7 +269,53 @@ test("the module names no organisation setting and no legacy provider", async ()
   }
 });
 
-test("the module exports exactly identify and requireOrigin", async () => {
+test("the module exports exactly the three collaboration identity seams", async () => {
+  // `allowPublicMailDomains` joined the two in ACN-008. It is here rather than in
+  // the access route for the reason the rest of this module exists: one seam
+  // between the collaboration tree and hosted configuration, so there is one
+  // place that knows how a hosted key is spelled.
   const module = await import("./identity.mjs");
-  assert.deepEqual(Object.keys(module).sort(), ["identify", "requireOrigin"]);
+  assert.deepEqual(Object.keys(module).sort(), [
+    "allowPublicMailDomains",
+    "identify",
+    "requireOrigin",
+  ]);
+});
+
+/* -------------------------------------------------------------------------- */
+/* allowPublicMailDomains                                                      */
+/* -------------------------------------------------------------------------- */
+
+test("the public-mailbox escape hatch is off unless it is spelled exactly true", () => {
+  // ACN-007's flag, read through the validated hosted configuration. It decides
+  // whether a collaboration document may list `gmail.com`, so a value that is
+  // neither "true" nor "false" has to be a refusal rather than a truthy string
+  // somebody's deployment reads as "on".
+  assert.equal(withHostedConfig(CONFIGURED, allowPublicMailDomains), false,
+    "absent is off");
+  assert.equal(
+    withHostedConfig({ ...CONFIGURED, ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS: "false" },
+      allowPublicMailDomains),
+    false,
+  );
+  assert.equal(
+    withHostedConfig({ ...CONFIGURED, ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS: "true" },
+      allowPublicMailDomains),
+    true,
+  );
+  for (const spelling of ["yes", "1", "TRUE", "True", " true "]) {
+    assert.throws(
+      () => withHostedConfig(
+        { ...CONFIGURED, ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS: spelling },
+        allowPublicMailDomains,
+      ),
+      (error) => {
+        assert.equal(error.name, "HostedConfigError");
+        assert.ok(!`${error.message}`.includes(spelling),
+          "and the refusal names the key rather than the value");
+        return true;
+      },
+      `${spelling} is not a boolean`,
+    );
+  }
 });

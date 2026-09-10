@@ -108,7 +108,7 @@ which stays exactly one. In addition:
 `netlify/.env.example`, beside the reader that consumes it, is the redacted
 template. The keys below are read by `netlify/lib/hosted/config.mjs` and by
 nothing else; the collaboration layer's own keys — `ABLY_API_KEY`, `DOC_OWNERS`,
-`PUBLIC_DEFAULT_ROLE`, `SLACK_WEBHOOK_URL` and the four `DOCS_*` names — are in
+`SLACK_WEBHOOK_URL` and the four `DOCS_*` names — are in
 the "Configuration" table of the repository `README.md`.
 
 Set them in the Netlify **site environment** (Site configuration → Environment

@@ -41,8 +41,10 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { identify, requireOrigin } from "../lib/identity.mjs";
+import { allowPublicMailDomains, identify, requireOrigin } from "../lib/identity.mjs";
+import { DomainAccessError, normalizeDomainList } from "../lib/hosted/domain-access.mjs";
 import {
+  ACCESS_DOCUMENT_STORE_OPTIONS,
   AccessError,
   accessDocumentKey,
   accessGrantKey,
@@ -56,7 +58,6 @@ import {
   capabilitiesFor,
   GRANTABLE_ROLES,
   normalizeEmail,
-  ORG_DEFAULTS,
   resolveRole,
   validateAccessRow,
 } from "../lib/access.mjs";
@@ -116,16 +117,25 @@ const LEASE_OPTION_KEYS = Object.freeze(["store", "doc", "nowMs", "run"]);
 
 const DEPENDENCY_KEYS = Object.freeze([
   "requireOriginFn", "identifyFn", "resolveRoleFn", "storeFn", "appendEventFn",
-  "randomBytesFn", "nowFn",
+  "randomBytesFn", "nowFn", "allowPublicMailboxesFn",
 ]);
 
-/** The closed request-body variants, keyed by `<METHOD> <pathname>`. */
+
+/**
+ * The closed request-body variants, keyed by `<METHOD> <pathname>`.
+ *
+ * A variant is a permitted *field set*, matched exactly: this surface has no
+ * `op` discriminator and does not want one, because the set of fields present
+ * already names the operation and cannot disagree with it. ACN-008's domain-list
+ * write is therefore `["doc", "allowedDomains"]` on `PATCH /api/access`, in the
+ * slot the retired `["doc", "orgDefault"]` variant held.
+ */
 const BODY_VARIANTS = Object.freeze({
   "POST /api/access": Object.freeze([Object.freeze(["doc", "email", "role"])]),
   "PATCH /api/access": Object.freeze([
     Object.freeze(["doc", "sub", "role"]),
     Object.freeze(["doc", "email", "role"]),
-    Object.freeze(["doc", "orgDefault"]),
+    Object.freeze(["doc", "allowedDomains"]),
   ]),
   "DELETE /api/access": Object.freeze([
     Object.freeze(["doc", "sub"]),
@@ -265,17 +275,24 @@ function hexOf(bytes, size) {
  * payload, or a cause that could be serialized into a response.
  */
 class AccessHttpError extends Error {
-  constructor(status, code, headers = undefined) {
+  constructor(status, code, headers = undefined, details = undefined) {
     super("Access request failed");
     this.name = "AccessHttpError";
     this.status = status;
     this.code = code;
     this.extraHeaders = headers;
+    /* The one channel by which a failure may say more than its code, and the
+       only thing that currently travels it is the domain entry an owner typed
+       and got wrong. It is their own input, bounded and stripped by the
+       evaluator before it reaches here, and naming it is the difference between
+       a usable message and "one of your domains is wrong". Nothing derived from
+       stored state, a provider payload, or a key may be put here. */
+    this.details = details;
   }
 }
 
-function httpError(status, code, headers) {
-  return new AccessHttpError(status, code, headers);
+function httpError(status, code, headers, details) {
+  return new AccessHttpError(status, code, headers, details);
 }
 
 const invalidRequest = () => httpError(400, "invalid-request");
@@ -334,7 +351,10 @@ function errorResponse(error) {
   const headers = mapped.extraHeaders === undefined
     ? { ...JSON_HEADERS }
     : { ...JSON_HEADERS, ...mapped.extraHeaders };
-  return new Response(JSON.stringify({ error: mapped.code }), {
+  const payload = mapped.details === undefined
+    ? { error: mapped.code }
+    : { error: mapped.code, ...mapped.details };
+  return new Response(JSON.stringify(payload), {
     status: mapped.status,
     headers,
   });
@@ -474,10 +494,20 @@ function readValue(result) {
  * and counted but is never an actionable target.
  */
 async function loadRoster(store, docId) {
-  const documentValue = readValue(await read(store, accessDocumentKey(docId)));
+  const documentValue = readValue(
+    await read(store, accessDocumentKey(docId), null, ACCESS_DOCUMENT_STORE_OPTIONS),
+  );
   if (documentValue === null) throw new TypeError("Missing access document");
   const document = assertAccessDocument(documentValue, docId);
-  if (document !== documentValue) throw new TypeError("Invalid document validation result");
+  /* The identity check this used to make — validator returned exactly what it
+     was given — is now version-conditional, because ACN-008 made
+     `assertAccessDocument` answer a version-1 record as its migrated version-2
+     view. The check is worth keeping in the shape it can still take: a record
+     already at the current version must come back untouched, so a validator that
+     started quietly repairing a current record is still caught here. */
+  if (documentValue.v !== 1 && document !== documentValue) {
+    throw new TypeError("Invalid document validation result");
+  }
 
   const grantPrefix = accessGrantPrefix(docId);
   const invitationPrefix = accessInvitationPrefix(docId);
@@ -880,9 +910,16 @@ function parseVariant(routeKey, text) {
     if (!GRANTABLE_ROLES.includes(parsed.role)) throw invalidRequest();
     body.role = parsed.role;
   }
-  if (matched.includes("orgDefault")) {
-    if (!ORG_DEFAULTS.includes(parsed.orgDefault)) throw invalidRequest();
-    body.orgDefault = parsed.orgDefault;
+  if (matched.includes("allowedDomains")) {
+    /* Only the shape is checked here. Normalisation, the public-mailbox
+       denylist and the twenty-domain bound all run in the handler, *after*
+       `authorize` has established that the caller owns this document — so a
+       stranger probing the route learns `forbidden` rather than which of their
+       guessed domains this deployment considers a mailbox provider. The list is
+       carried through unnormalized on purpose; it is the raw value the owner
+       typed until the one normalizer has seen it. */
+    if (!Array.isArray(parsed.allowedDomains)) throw invalidRequest();
+    body.allowedDomains = parsed.allowedDomains;
   }
   return body;
 }
@@ -932,6 +969,7 @@ export function createAccessHandler(dependencies = {}) {
   const appendEventFn = pick("appendEventFn", (options) => appendEvent(options));
   const randomBytesFn = pick("randomBytesFn", (size) => randomBytes(size));
   const nowFn = pick("nowFn", () => Date.now());
+  const allowPublicMailboxesFn = pick("allowPublicMailboxesFn", allowPublicMailDomains);
 
   function openStore() {
     let store;
@@ -967,7 +1005,7 @@ export function createAccessHandler(dependencies = {}) {
       pending.sort((left, right) => left.email < right.email ? -1 : left.email > right.email ? 1 : 0);
       const body = {
         doc: docId,
-        orgDefault: document.orgDefault,
+        allowedDomains: document.allowedDomains,
         members: [
           { sub: document.ownerSub, email: document.ownerEmail, name: "", role: "owner" },
           ...roster.map(({ sub, email, name, role }) => ({ sub, email, name, role })),
@@ -1100,13 +1138,23 @@ export function createAccessHandler(dependencies = {}) {
     }
   }
 
+  /**
+   * The record as it should now be stored.
+   *
+   * `assertAccessDocument` answers a version-1 record as its migrated version-2
+   * view, so this is byte-identical for a record already at the current version
+   * and is the migration itself for one that is not. That is deliberate: the
+   * owner fence rewrites this value under the lease before every state commit,
+   * so an old record moves to the new shape the first time its owner touches
+   * the document, rather than needing a migration pass of its own.
+   */
   function freshDocument(document) {
     return {
       v: document.v,
       docId: document.docId,
       ownerSub: document.ownerSub,
       ownerEmail: document.ownerEmail,
-      orgDefault: document.orgDefault,
+      allowedDomains: [...document.allowedDomains],
       boundAt: document.boundAt,
       boundFrom: document.boundFrom,
     };
@@ -1115,6 +1163,17 @@ export function createAccessHandler(dependencies = {}) {
   /**
    * Revalidate the actor's ownership through a conditional rewrite of the
    * byte-equivalent access document immediately before a state commit.
+   *
+   * "Byte-equivalent" is why this returns the validated *draft* rather than
+   * `freshDocument(document)`. Since ACN-008 `assertAccessDocument` answers a
+   * version-1 record as its migrated version-2 view, so rebuilding from the view
+   * would make this fence rewrite the record's shape — and a fence that changes
+   * bytes is no longer the no-op CAS it is documented as. It would also mean an
+   * ordinary invitation migrated the document as a side effect, spreading the
+   * new stored version to deployments that never used the new feature and
+   * widening the window in which rolling back to a release that cannot read
+   * version 2 would lock a document's owner out. Migration now happens only when
+   * an owner actually writes a domain list, or when ownership transfers.
    */
   async function ownerFence(ctx) {
     requireLeaseToken(ctx);
@@ -1123,8 +1182,8 @@ export function createAccessHandler(dependencies = {}) {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== ctx.actor.sub) throw forbidden();
-      return freshDocument(document);
-    });
+      return draft;
+    }, ACCESS_DOCUMENT_STORE_OPTIONS);
   }
 
   /** The post-transfer fence: the document must already name the new owner. */
@@ -1135,8 +1194,8 @@ export function createAccessHandler(dependencies = {}) {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== toOwnerSub) throw conflict();
-      return freshDocument(document);
-    });
+      return draft;
+    }, ACCESS_DOCUMENT_STORE_OPTIONS);
   }
 
   /* ---------------- events ---------------- */
@@ -1416,20 +1475,115 @@ export function createAccessHandler(dependencies = {}) {
     return noContentResponse();
   }
 
-  async function changeOrgDefault(ctx, body) {
+  /**
+   * Replace a document's domain list (ACN-008).
+   *
+   * The whole list is replaced rather than added to or removed from. An owner
+   * looking at a list of domains and pressing save is stating what the list is;
+   * a per-entry surface would need its own idea of what happens when two owners
+   * edit at once, and this one already has a lease and an answer — last writer
+   * under the lease wins, and the response says what got stored.
+   *
+   * Unlike its neighbours this answers `200` with the normalized list rather
+   * than `204`. Normalisation is visible — `"Example.COM "` becomes
+   * `example.com`, duplicates collapse, order becomes canonical — so an owner
+   * who was told only "no content" would have to re-read the roster to find out
+   * what their document now says.
+   */
+  async function changeAllowedDomains(ctx, body) {
+    let allowedDomains;
+    try {
+      allowedDomains = normalizeDomainList(body.allowedDomains, {
+        allowPublicMailboxes: allowPublicMailboxesFn(),
+      });
+    } catch (error) {
+      throw domainFailure(error);
+    }
+
     const key = accessDocumentKey(ctx.doc);
+    let policyChanged = false;
     const result = await mutate(ctx.store, key, null, (draft) => {
       if (draft === null) throw internalError();
       const document = assertAccessDocument(draft, ctx.doc);
       if (document.ownerSub !== ctx.actor.sub) throw forbidden();
-      if (document.orgDefault === body.orgDefault) return null;
-      return { ...freshDocument(document), orgDefault: body.orgDefault };
-    });
-    if (result.changed !== true) return noContentResponse();
-    await ownerFence(ctx);
-    await attemptEvent(ctx, "access.change", { sub: ctx.actor.sub },
-      `changed organization default to ${body.orgDefault}`);
-    return noContentResponse();
+      const next = { ...freshDocument(document), allowedDomains };
+      /* Two different questions, and they have different answers on an old
+         record. `policyChanged` asks whether anybody's access moved, and is
+         asked of the validated *view* — a version-1 record reads as
+         `allowedDomains: []`, so clearing an already-empty list changes nothing
+         about who may read. The write itself is decided against the stored
+         *draft*, because that same request is also the migration and the
+         migration must happen. Only the first drives the audit event: an event
+         saying access changed when it did not is a false entry in the one log a
+         reviewer would use to reconstruct who could read this document. */
+      policyChanged = canonical(document.allowedDomains) !== canonical(allowedDomains);
+      if (canonical(next) === canonical(draft)) return null;
+      return next;
+    }, ACCESS_DOCUMENT_STORE_OPTIONS);
+    /* No fence between the commit and the event. Every sibling handler fences
+       here because it committed to a *different* key and still owes a proof that
+       the document names the actor as owner; this one committed to the document
+       record itself, under the lease, with that check inside the compare-and-set.
+       A second fence could only fail after the list was already stored — leaving
+       the caller a 403 over a document that had in fact been widened, with no
+       audit event to show for it. */
+    if (result.changed === true && policyChanged) {
+      await attemptEvent(ctx, "access.change", { sub: ctx.actor.sub },
+        domainChangeSummary(allowedDomains));
+    }
+    return new Response(
+      JSON.stringify({ ok: true, doc: ctx.doc, allowedDomains }),
+      { status: 200, headers: { ...JSON_HEADERS } },
+    );
+  }
+
+  /**
+   * The audit summary for a domain-list change, naming the domains.
+   *
+   * A count would not be answerable: this is the record of the one operation
+   * that grants read access to a class of people nobody named, and "3 domains"
+   * cannot tell a reviewer who could read the document last Tuesday. So the
+   * entries themselves go in, and the retired organisation-default event named
+   * its value for exactly the same reason.
+   *
+   * They have to fit, though. An event summary is capped at 160 UTF-8 bytes and
+   * a list may hold twenty names of up to 253 characters each, so this takes
+   * whole entries while they fit and says how many it left. Truncation is
+   * announced rather than silent: a summary that stopped mid-list without saying
+   * so would read as the complete policy.
+   */
+  function domainChangeSummary(allowedDomains) {
+    if (allowedDomains.length === 0) return "cleared the document's domain list";
+    const prefix = "set the document's domain list to ";
+    const named = [];
+    let budget = 160 - prefix.length - " and 20 more".length;
+    for (const domain of allowedDomains) {
+      const cost = domain.length + (named.length === 0 ? 0 : 2);
+      if (cost > budget) break;
+      budget -= cost;
+      named.push(domain);
+    }
+    const remaining = allowedDomains.length - named.length;
+    if (named.length === 0) return `set the document's domain list to ${remaining} domains`;
+    return remaining === 0
+      ? `${prefix}${named.join(", ")}`
+      : `${prefix}${named.join(", ")} and ${remaining} more`;
+  }
+
+  /**
+   * Translate a rejected domain list into this surface's error vocabulary.
+   *
+   * `DomainAccessError.reason` is already the wire code the contract names, and
+   * `domain` is the owner's own entry, bounded and stripped by the evaluator
+   * before it left. Anything that is not a `DomainAccessError` is a bug here
+   * rather than a bad request, and answers 500 like every other one.
+   */
+  function domainFailure(error) {
+    if (!(error instanceof DomainAccessError)) return internalError();
+    return httpError(400, error.reason, undefined,
+      error.domain === null || error.domain === undefined
+        ? undefined
+        : { domain: error.domain });
   }
 
   async function revokeGrant(ctx, body, roster) {
@@ -1538,7 +1692,7 @@ export function createAccessHandler(dependencies = {}) {
           return freshDocument(document);
         }
         throw conflict();
-      });
+      }, ACCESS_DOCUMENT_STORE_OPTIONS);
       await setTransfer(ctx, { ...marker, phase: "owner-committed" });
       phase = "owner-committed";
     }
@@ -1596,8 +1750,13 @@ export function createAccessHandler(dependencies = {}) {
   /* ---------------- mutation dispatch ---------------- */
 
   async function dispatch(ctx, routeKey, body) {
-    if (routeKey === "PATCH /api/access" && body.keys.includes("orgDefault")) {
-      return changeOrgDefault(ctx, body);
+    /* Ahead of `inventory()` for the same reason its predecessor was: this
+       writes the document record itself and needs neither the grant roster nor
+       the invitation roster to do it. Ownership is established twice over
+       regardless — by `authorize` before the lease, and by the `ownerSub` check
+       inside the conditional write below. */
+    if (routeKey === "PATCH /api/access" && body.keys.includes("allowedDomains")) {
+      return changeAllowedDomains(ctx, body);
     }
     const roster = await inventory(ctx);
     if (routeKey === "POST /api/access") {
