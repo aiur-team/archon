@@ -114,6 +114,30 @@ jobs:
           hosted/test/publications.test.mjs
           hosted/test/publications-agent.test.mjs
 
+      # AHU-011's operational half: the publish-disable policy, the two per-IP
+      # rate rules, the production origin/registrable-site rules, the redacted
+      # operator environment example, the renderer deployment definition and the
+      # read-only census projection.
+      #
+      # It is a standalone runner rather than a `node --test` file because it
+      # spans four surfaces that no single suite owns, and because the rate rules
+      # have to be read off the handler modules' real `config` exports -- the
+      # object Netlify packages -- rather than off the TOML or off the runbook
+      # prose. It contacts no provider, reads no credential and needs no network.
+      #
+      # One contract here is asserted against a synthetic fixture by choice, not
+      # by necessity: AHU-005's renderer build has merged, and
+      # `scripts/test-hosted-renderer.mjs` already drives it for real. This
+      # runner asserts only the *invocation* contract around it -- that the
+      # command `renderer/netlify.toml` declares, run from the declared base
+      # directory, emits the declared publish directory -- and does so against a
+      # fixture so that two runners are not in charge of one output.
+      #
+      # It runs after the hosted install because it links against `hosted/lib`,
+      # which resolves `tldts` out of `hosted/node_modules`.
+      - name: hosted operations gate
+        run: node scripts/test-hosted-operations.mjs
+
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and
       # DOC_OWNERS, the wrong authorities here), no build command (so a deploy

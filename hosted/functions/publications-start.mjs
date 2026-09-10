@@ -53,4 +53,23 @@ export async function handleStart(request, resolveDependencies) {
 export default (request) =>
   handleStart(request, () => publicationDependencies({ env: process.env, getStore }));
 
-export const config = { path: "/api/hosted/publications" };
+export const config = {
+  path: "/api/hosted/publications",
+  /* C6: the public start route is the one endpoint that needs no bearer, so it
+     is the one an anonymous caller can drive in a loop. Ten a minute per client
+     IP is the pilot's mitigation for that, and it is delayed and best-effort by
+     construction -- the platform's own counters can lag by seconds, so this
+     bounds a sustained flood rather than a burst. It is not a hard account or
+     global quota, and nothing downstream may treat it as an authorisation
+     check: `createPublication` still refuses when publishing is disabled and
+     still validates every descriptor, whether or not a rule ever fired.
+
+     `aggregateBy` names the client IP *and* the request domain, so the counter
+     is per-site rather than shared across every domain this deployment answers
+     on. `windowSize` is in seconds, and both numbers are literal integers
+     rather than computed constants: an invalid rule is dropped by the platform
+     without failing the deploy, so a rule that does not parse leaves this route
+     silently unprotected, and a literal is what a reviewer and
+     `scripts/test-hosted-operations.mjs` can both read off the export. */
+  rateLimit: { windowLimit: 10, windowSize: 60, aggregateBy: ["ip", "domain"] },
+};

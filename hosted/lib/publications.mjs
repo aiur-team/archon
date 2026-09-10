@@ -308,15 +308,14 @@ export async function readOwnedPublication({ publicationId, principal } = {}, de
  * `HOSTED_PUBLISH_ENABLED` is checked here rather than in the handler so that no
  * future route can start a publication by forgetting to ask.
  *
- * It is checked *only* here, which is a decision rather than an omission and is
- * worth stating because it does not read as one. Turning publishing off stops
- * new publications from starting; it does not revoke authorisation an operator's
- * users already hold, so for up to `PENDING_TTL_SECONDS + UPLOAD_TTL_SECONDS`
- * afterwards an already-started publication can still be approved and can still
- * commit its bytes. Making the switch retroactive would mean a human's approval
- * silently becoming a 503 after they gave it, and would strand documents whose
- * upload was already in flight. An operator who needs the harder stop takes the
- * deployment down; this flag is a tap, not a valve.
+ * C6 gates the *upload* on the same flag, so `completePublication` carries the
+ * second half of this check; between them they are the whole tap. What the flag
+ * still does not do is revoke authorisation: an already-started publication can
+ * still be approved, and it can still be cancelled or left to expire. It simply
+ * cannot start, and it cannot commit bytes. Receipt recovery for a document that
+ * already completed is deliberately outside the tap - see the note on the
+ * already-complete branch in `completePublication` - because turning publishing
+ * off must not strand a receipt that was already earned.
  */
 export async function createPublication(descriptor, dependencies) {
   const { store, appOrigin, production, publishEnabled, now, randomBytes } =
@@ -666,7 +665,7 @@ export async function completePublication(
   { publicationId, agentSecret, html, contentSha256, contentBytes } = {},
   dependencies,
 ) {
-  const { store, appOrigin, production, now } = requireDependencies(dependencies);
+  const { store, appOrigin, production, publishEnabled, now } = requireDependencies(dependencies);
 
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
     const { record, etag } = await readForAgent(store, publicationId, agentSecret);
@@ -689,6 +688,25 @@ export async function completePublication(
         throw fail("receipt_expired", "this completion receipt is no longer available");
       }
       return Object.freeze({ created: false, result: Object.freeze(resultOf(record, appOrigin)) });
+    }
+
+    /* C6's second half of the publish tap: unset or false refuses a new *upload*
+       as well as a new start.
+
+       Its position is the whole of its correctness. It sits below the
+       already-complete branch above, so receipt recovery for a document that is
+       already stored keeps working while publishing is off - C6 requires that
+       explicitly, and a gate at the top of this function would have turned an
+       earned receipt into a 503. And it sits above the state and digest checks
+       below, so a refused upload never depends on how well-formed the body was.
+
+       It is checked here rather than in the artifact handler for the same reason
+       the start check lives in `createPublication`: a route cannot commit bytes
+       by forgetting to ask. Note that this does not make the flag retroactive
+       for an approval already given - the approval stands, and the record can
+       still be cancelled or left to expire - it refuses the write itself. */
+    if (!publishEnabled) {
+      throw fail("publishing_disabled", "hosted publishing is disabled on this deployment");
     }
 
     const current = effectiveState(record, nowMs);
