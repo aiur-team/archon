@@ -1527,7 +1527,7 @@ test("--help is the whole request or it is a mistake", async (t: TestContext) =>
 
 test("the restated wire constants still agree with the server's own contract", async (t: TestContext) => {
   /* This package deliberately restates the client-side subset of the contract
-     rather than importing `hosted/lib/contracts.mjs`: the published tarball is
+     rather than importing `netlify/lib/hosted/contracts.mjs`: the published tarball is
      `dist/` alone, so a repo-relative import resolves in development and is
      simply absent on a user's machine. The cost of that decision is drift —
      the server could raise a limit and this client would keep enforcing the
@@ -1536,20 +1536,20 @@ test("the restated wire constants still agree with the server's own contract", a
 
      So the copy is checked against the original wherever both exist: in the
      repository, and therefore in CI, that is every run. From an installed
-     package `hosted/` is not there, and the test reports itself skipped rather
+     package `netlify/` is not there, and the test reports itself skipped rather
      than failing on a machine that was never meant to have it.
 
      The server's constants are read out of the source text rather than
-     imported. `contracts.mjs` pulls in dependencies installed under `hosted/`,
-     which this package does not have and must not acquire; importing it would
+     imported. `contracts.mjs` pulls in dependencies installed at the repository
+     root, which this package does not have and must not acquire; importing it would
      throw for a reason that has nothing to do with drift, and a guard that
      turns "could not load" into "skipped" is a guard that silently stops
      running. Reading the text has no such failure mode, and every shared name
      must be found for the test to pass, so a change to how those constants are
      written fails here instead of quietly matching nothing. */
-  const repoContracts = join(COMPILED, "..", "..", "..", "hosted", "lib", "contracts.mjs");
+  const repoContracts = join(COMPILED, "..", "..", "..", "netlify", "lib", "hosted", "contracts.mjs");
   if (!existsSync(repoContracts)) {
-    t.skip("hosted/lib/contracts.mjs is not present; this is an installed package, not the repo");
+    t.skip("netlify/lib/hosted/contracts.mjs is not present; this is an installed package, not the repo");
     return;
   }
   const source = readFileSync(repoContracts, "utf8");
@@ -1576,7 +1576,7 @@ test("the restated wire constants still agree with the server's own contract", a
     "POLL_INTERVAL_SECONDS",
     "USER_CODE_MAX_SCALARS",
   ]) {
-    assert.ok(key in shared, `${key} was not found in hosted/lib/contracts.mjs`);
+    assert.ok(key in shared, `${key} was not found in netlify/lib/hosted/contracts.mjs`);
   }
 
   for (const [key, serverValue] of Object.entries(shared)) {

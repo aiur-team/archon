@@ -831,7 +831,7 @@ async function startEvil(state, config) {
 /**
  * The rows both copies of the render-message validator must agree on.
  *
- * `hosted/lib/contracts.mjs` is the canonical statement and the renderer cannot
+ * `netlify/lib/hosted/contracts.mjs` is the canonical statement and the renderer cannot
  * import it -- it is a separate static deployment with no dependency tree -- so
  * the renderer restates it. A restatement without this table is a fork waiting
  * to happen, and the failure it produces is the worst kind: an artifact the
@@ -883,7 +883,7 @@ function originParityRows() {
 }
 
 async function assertContractParity(rendererModule) {
-  const hosted = await import(pathToFileURL(join(ROOT, "hosted/lib/contracts.mjs")).href);
+  const hosted = await import(pathToFileURL(join(ROOT, "netlify/lib/hosted/contracts.mjs")).href);
 
   for (const [label, value] of messageParityRows()) {
     const verdict = (run) => {
@@ -946,7 +946,7 @@ async function assertContractParity(rendererModule) {
   }
 
   /* The one deliberate difference, asserted so it stays deliberate. The
-     public-suffix rule belongs to `hosted/lib/config.mjs`, which owns the list
+     public-suffix rule belongs to `netlify/lib/hosted/config.mjs`, which owns the list
      through a pinned dependency and refuses to start the application when the
      two configured origins share a registrable site. The renderer build does not
      restate it, and a future edit that quietly added a weaker version of it here

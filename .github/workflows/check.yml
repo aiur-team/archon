@@ -33,6 +33,16 @@ jobs:
       # stayed green (#107). Linking is the gate: ESM resolves named imports
       # before it evaluates anything. Modules are loaded, never invoked.
       #
+      # ACN-003 folded the hosted publishing deployment into this tree, so this
+      # one step now covers both: netlify/lib, netlify/functions and the hosted
+      # application under netlify/lib/hosted and netlify/functions/hosted-*.mjs.
+      # There is one install and one lockfile, so the boundary the hosted tree
+      # keeps is no longer "resolves under its own node_modules" but "resolves
+      # under the tree the connect tool copies, from a package the root manifest
+      # declares" -- checkable rather than positional, and
+      # `check-hosted-modules.test.mjs` below proves each rule still fails on
+      # its planted fault.
+      #
       # The position of this step is load-bearing: it runs before anything
       # compiles or installs a workspace, because a deploy carries only
       # netlify/, netlify.toml and the root lockfile. Moving it after a build
@@ -40,36 +50,15 @@ jobs:
       - name: every deploy module loads
         run: node scripts/check-function-modules.mjs
 
-      # `hosted/` is a SECOND Netlify deployment with its own lockfile, its own
-      # dependency set and no share of the root deploy tree. The steps below are
-      # its equivalent of the two above: a clean install first, then a link
-      # check against exactly what that install produced, then the tests.
-      #
-      # Step order is NOT what isolates the two trees, and an earlier version of
-      # this comment claimed it was. Node's resolution walks up, so the root
-      # `npm ci` two steps above puts the repository's own `node_modules` on the
-      # resolution path of every file under `hosted/` no matter where these
-      # steps sit. What actually delivers "a hosted function cold-starts with
-      # nothing but its own `node_modules`" is a rule inside the gate: it
-      # records what Node resolves for each import and fails when a bare
-      # specifier lands anywhere but `hosted/node_modules`. That is checkable
-      # rather than positional, and `check-hosted-modules.test.mjs` proves it
-      # fails on a package installed only at the root.
-      - name: hosted lockfile is in sync
-        run: npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
-
-      - name: every hosted module loads
-        run: node scripts/check-hosted-modules.mjs
-
       # The gate above is a silent-pass mechanism: an edit that empties its
       # fault list leaves CI green forever, and the symptom is a hosted deploy
       # that quietly carries the legacy identity tree. This runs the gate
       # against planted faults and requires it to fail on each one.
-      - name: the hosted module gate can fail
+      - name: the deploy module gate can fail
         run: node --test scripts/check-hosted-modules.test.mjs
 
       - name: hosted contract tests
-        run: node --test hosted/test/contracts.test.mjs
+        run: node --test netlify/test/hosted/contracts.test.mjs
 
       # The hosted auth tree. Every one of these runs against injected
       # dependencies -- an in-memory store with the real conditional-write
@@ -77,18 +66,17 @@ jobs:
       # AHU-003 is verified with no GitHub credential, no network and no
       # operator secret. A missing secret therefore cannot skip any of it.
       #
-      # These live in `hosted/test/` rather than beside their sources because
-      # `hosted/lib/` and `hosted/functions/` are deploy directories: the module
-      # gate above refuses a file there that imports `node:test` or reaches into
-      # `hosted/test/`, and Netlify would publish `hosted/functions/*.test.mjs`
-      # as a live route. Same four suites, one directory across.
+      # These live in `netlify/test/hosted/` rather than beside their sources because
+      # `netlify/lib/hosted/` and `netlify/functions/hosted-*.mjs` are deploy paths:
+      # the module gate above refuses a test file there, and Netlify would publish
+      # `netlify/functions/hosted-*.test.mjs` as a live route. Same four suites, one directory across.
       - name: hosted auth tests
         run: |
           node --test \
-            hosted/test/identity.test.mjs \
-            hosted/test/auth-store.test.mjs \
-            hosted/test/github-oauth.test.mjs \
-            hosted/test/auth-routes.test.mjs
+            netlify/test/hosted/identity.test.mjs \
+            netlify/test/hosted/auth-store.test.mjs \
+            netlify/test/hosted/github-oauth.test.mjs \
+            netlify/test/hosted/auth-routes.test.mjs
 
       # AHU-004's publication state. Three suites rather than one because they
       # test four different things: the provider adapter's conditional-write
@@ -98,10 +86,11 @@ jobs:
       # other test file in this workflow, so a file that stops being emitted
       # fails loudly instead of matching a glob of nothing.
       #
-      # These run under `hosted/test/` rather than beside the modules they
-      # cover: `scripts/check-hosted-modules.mjs` refuses a `*.test.mjs` inside
-      # `hosted/lib/` or `hosted/functions/`, because a deployed module that
-      # could import a fixture is one edit away from returning a fake success.
+      # These run under `netlify/test/hosted/` rather than beside the modules they
+      # cover: `scripts/check-function-modules.mjs` refuses a `*.test.mjs` inside
+      # `netlify/lib/hosted/` or a `netlify/functions/hosted-*` file, because a
+      # deployed module that could import a fixture is one edit away from returning
+      # a fake success.
       #
       # `--test-timeout` bounds each test. These suites verify compare-and-set
       # loops, and a regression that stops one of them terminating would
@@ -111,20 +100,20 @@ jobs:
       - name: hosted publication tests
         run: >-
           node --test --test-timeout=30000
-          hosted/test/publication-store.test.mjs
-          hosted/test/publications.test.mjs
-          hosted/test/publications-agent.test.mjs
-          hosted/test/publication-browser-binding.test.mjs
-          hosted/test/publications-browser.test.mjs
-          hosted/test/document-routes.test.mjs
-          hosted/test/publications-artifact.test.mjs
+          netlify/test/hosted/publication-store.test.mjs
+          netlify/test/hosted/publications.test.mjs
+          netlify/test/hosted/publications-agent.test.mjs
+          netlify/test/hosted/publication-browser-binding.test.mjs
+          netlify/test/hosted/publications-browser.test.mjs
+          netlify/test/hosted/document-routes.test.mjs
+          netlify/test/hosted/publications-artifact.test.mjs
 
       # The approval page is defined in terms of `location.hash`, `history`, a
       # `__Host-` cookie surviving a real navigation out to a provider and back,
       # and an agent-chosen title arriving as text. None of those can be
       # asserted against a hand-written DOM without asserting against an
       # approximation of one, so this drives a real Chromium against the real
-      # handlers and the real `public/publish/authorize.html`.
+      # handlers and the real `netlify/public/publish/authorize.html`.
       #
       # It gets its own step because it installs a pinned Playwright and one
       # Chromium into a temporary root first -- minutes of network on a cold
@@ -141,7 +130,7 @@ jobs:
       - name: hosted approval page browser matrix
         run: >-
           node --test --test-timeout=1500000
-          hosted/test/approval-browser.test.mjs
+          netlify/test/hosted/approval-browser.test.mjs
 
       # AHU-011's operational half: the publish-disable policy, the two per-IP
       # rate rules, the production origin/registrable-site rules, the redacted
@@ -162,8 +151,8 @@ jobs:
       # directory, emits the declared publish directory -- and does so against a
       # fixture so that two runners are not in charge of one output.
       #
-      # It runs after the hosted install because it links against `hosted/lib`,
-      # which resolves `tldts` out of `hosted/node_modules`.
+      # It runs after the root install because it links against
+      # `netlify/lib/hosted`, which resolves `tldts` out of `node_modules`.
       - name: hosted operations gate
         run: node scripts/test-hosted-operations.mjs
 
@@ -176,8 +165,8 @@ jobs:
       # 0 without them would turn "blocked" into "passed" silently, so a zero
       # exit fails this step.
       #
-      # It imports `hosted/lib` and `renderer/scripts/build.mjs` rather than
-      # restating either policy, so it runs after the hosted install above.
+      # It imports `netlify/lib/hosted` and `renderer/scripts/build.mjs` rather
+      # than restating either policy, so it runs after the root install above.
       - name: live acceptance refuses without operator prerequisites
         run: |
           if node scripts/test-hosted-live.mjs; then
@@ -358,9 +347,9 @@ jobs:
           # document, and "one engine does this correctly" is not the same claim
           # as "browsers do this". It installs its own pinned Playwright,
           # Chromium and Firefox the way the two runners above do, and it needs
-          # the `hosted` install several steps up, because it holds the
+          # the root install several steps up, because it holds the
           # renderer's copy of the render-message contract equal to
-          # `hosted/lib/contracts.mjs` before it starts a browser.
+          # `netlify/lib/hosted/contracts.mjs` before it starts a browser.
           node scripts/test-hosted-renderer.mjs
           # AHU-009's private-document oracle. It runs the real viewer, read,
           # session and logout handlers on one loopback origin over a
@@ -395,8 +384,8 @@ jobs:
       # resolved, for its browser only, to a loopback fixture that validates the
       # client id, the redirect URI, the PKCE challenge and the client secret.
       # Three earlier steps are prerequisites and are invisible from here: the
-      # hosted install (the handlers resolve `@netlify/blobs` and `tldts` out of
-      # `hosted/node_modules`, and the local blob server comes from the same
+      # root install (the handlers resolve `@netlify/blobs` and `tldts` out of
+      # `node_modules`, and the local blob server comes from the same
       # package), the typecheck install (`npm pack` runs prepack then prepare,
       # and prepare is `tsc`), and `openssl`, which the runner uses to mint the
       # one-name certificate its provider fixture needs to complete a TLS
@@ -423,13 +412,13 @@ jobs:
       # exists, and every token and code it uses is invented. AHU-013 owns the
       # live claim. The fixture is not a hand-written stand-in for the server's
       # rules: it validates the start descriptor through the real
-      # `hosted/lib/contracts.mjs`, the way `scripts/test-hosted-renderer.mjs`
+      # `netlify/lib/hosted/contracts.mjs`, the way `scripts/test-hosted-renderer.mjs`
       # binds the renderer to the same module, so a renamed descriptor key fails
       # here rather than on somebody's first real publish.
       #
       # Two earlier steps are prerequisites and are invisible from here: the
-      # `hosted lockfile is in sync` install (contracts.mjs resolves `tldts` out
-      # of `hosted/node_modules`) and the `typecheck` install (`npm pack` runs
+      # `root lockfile is in sync` install (contracts.mjs resolves `tldts` out of
+      # `node_modules`) and the `typecheck` install (`npm pack` runs
       # prepack then prepare, and prepare is `tsc`). Both failures name
       # themselves rather than surfacing as an unexplained crash.
       - name: the published package works for a clean consumer

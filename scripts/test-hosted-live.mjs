@@ -22,7 +22,7 @@
  *   2. **Read-only deployed probes.** With every prerequisite supplied, `probe`
  *      makes unauthenticated GET requests to the two deployed origins and holds
  *      the responses against the header sets this repository actually generates
- *      -- `SECURITY_HEADERS` from `hosted/lib/http.mjs` and `rendererHeaders()`
+ *      -- `SECURITY_HEADERS` from `netlify/lib/hosted/http.mjs` and `rendererHeaders()`
  *      from `renderer/scripts/build.mjs`. No forked copy of either policy lives
  *      here, so a policy change fails this runner instead of drifting past it.
  *
@@ -52,8 +52,8 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { SECURITY_HEADERS } from "../hosted/lib/http.mjs";
-import { registrableSite, validateOrigin, validateSessionResponse } from "../hosted/lib/contracts.mjs";
+import { SECURITY_HEADERS } from "../netlify/lib/hosted/http.mjs";
+import { registrableSite, validateOrigin, validateSessionResponse } from "../netlify/lib/hosted/contracts.mjs";
 import { rendererHeaders } from "../renderer/scripts/build.mjs";
 
 const SELF = fileURLToPath(import.meta.url);

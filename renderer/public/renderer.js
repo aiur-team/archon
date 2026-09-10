@@ -56,13 +56,13 @@ export const RENDER_MESSAGE_TYPES = Object.freeze({
 /**
  * C2's artifact byte bounds, restated here rather than imported.
  *
- * `hosted/lib/contracts.mjs` is the canonical statement of this contract, and
+ * `netlify/lib/hosted/contracts.mjs` is the canonical statement of this contract, and
  * this file cannot import it: the renderer is a separate deployment on a
  * separate site with no build step and no dependency tree, and reaching into
  * the application's module graph would be exactly the coupling the two-origin
  * split exists to prevent. So the numbers are restated, and
  * `scripts/test-hosted-renderer.mjs` asserts that this validator and
- * `validateRenderMessage` from `hosted/lib/contracts.mjs` return the same
+ * `validateRenderMessage` from `netlify/lib/hosted/contracts.mjs` return the same
  * verdict for every row of a shared table. A drift between the two copies is a
  * test failure rather than a production surprise.
  */
@@ -82,7 +82,7 @@ export const ARTIFACT_FRAME_TITLE = "Published document content";
  * A rejected message, carrying the wire error code its application-side twin
  * would have used.
  *
- * The codes match `hosted/lib/contracts.mjs` so that a reader tracing a refusal
+ * The codes match `netlify/lib/hosted/contracts.mjs` so that a reader tracing a refusal
  * across the two origins sees one vocabulary rather than two.
  */
 export class RenderMessageError extends Error {
@@ -155,7 +155,7 @@ export function validateRenderMessage(data) {
     throw invalid(`${field}.html`, "must not contain a NUL character");
   }
 
-  /* The two bounds carry different codes, matching `hosted/lib/contracts.mjs`:
+  /* The two bounds carry different codes, matching `netlify/lib/hosted/contracts.mjs`:
      an empty document is a malformed request, and an oversized one is the one
      refusal a sender can act on by sending less. A single code for both would
      tell a client to shrink a document that has no bytes to shrink. */

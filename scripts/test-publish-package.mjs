@@ -84,18 +84,18 @@ const execFileAsync = promisify(execFile);
  * first real publish. `scripts/test-hosted-renderer.mjs` binds the renderer to
  * the same module for the same reason.
  *
- * It resolves out of `hosted/node_modules`, which CI installs several steps
- * before this one; the message says so rather than letting an import error
+ * It resolves `tldts` out of the root `node_modules`, which CI installs several
+ * steps before this one; the message says so rather than letting an import error
  * surface as an unexplained crash.
  */
 let validateDescriptor;
 try {
-  ({ validateDescriptor } = await import("../hosted/lib/contracts.mjs"));
+  ({ validateDescriptor } = await import("../netlify/lib/hosted/contracts.mjs"));
 } catch (error) {
   process.stderr.write(
-    "FAIL  package consumer proof: cannot load hosted/lib/contracts.mjs" +
+    "FAIL  package consumer proof: cannot load netlify/lib/hosted/contracts.mjs" +
       ` (${error.message.split("\n")[0]});` +
-      " run `npm --prefix hosted ci --ignore-scripts --no-audit --no-fund` first\n",
+      " run `npm ci --ignore-scripts --no-audit --no-fund` first\n",
   );
   process.exit(1);
 }

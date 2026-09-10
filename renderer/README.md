@@ -30,7 +30,7 @@ downloads — is withheld by leaving the token out.
 The renderer is a **different registrable site** from the application, not a
 sibling subdomain. Sibling subdomains share cookies and share a site for
 SameSite purposes, so `render.example.com` beside `app.example.com` would not be
-the cookie-free origin this depends on. `hosted/lib/config.mjs` owns that rule
+the cookie-free origin this depends on. `netlify/lib/hosted/config.mjs` owns that rule
 and refuses to start the application when the two configured origins share a
 site.
 
@@ -115,7 +115,7 @@ its stylesheet.
 
 `--local-test` relaxes the HTTPS requirement for loopback testing. It is an
 argument rather than an environment variable, exactly as it is in
-`hosted/lib/config.mjs`: no value an operator can set on a deployed site can
+`netlify/lib/hosted/config.mjs`: no value an operator can set on a deployed site can
 select it.
 
 The build owns the security headers because one of them cannot be a committed
@@ -139,7 +139,7 @@ file nobody reads again.
 | `HOSTED_APP_ORIGIN` | yes | The one origin allowed to frame this renderer and send it a document |
 | `HOSTED_RENDER_ORIGIN` | yes | This deployment's own origin. Must differ from the application origin |
 
-Both are the same keys `hosted/` reads, deliberately: the application and the
+Both are the same keys `netlify/lib/hosted/` reads, deliberately: the application and the
 renderer have to agree on the pair, and two names for one value is how they stop
 agreeing. No secret is read here, because there is none this deployment could
 need.

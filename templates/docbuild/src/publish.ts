@@ -21,9 +21,9 @@
  *
  * ## Why the contract shapes are restated here
  *
- * `hosted/lib/contracts.mjs` is the executable form of the same wire contract,
+ * `netlify/lib/hosted/contracts.mjs` is the executable form of the same wire contract,
  * and this file deliberately does not import it. The installed package is a
- * tarball of `templates/docbuild/dist/`: a repo-relative `../../hosted/` import
+ * tarball of `templates/docbuild/dist/`: a repo-relative `../../../netlify/` import
  * resolves during development and is simply absent on a user's machine. So the
  * subset C5 needs is restated in package-owned source, narrowed to what a
  * *client* can check — no public-suffix table, because a client validating its
@@ -215,7 +215,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
  * pointed `--file` at a PDF, a JSON dump or their notes, and the rule below
  * still catches all three.
  *
- * `hosted/lib/contracts.mjs` applies the same rule to the uploaded body. The
+ * `netlify/lib/hosted/contracts.mjs` applies the same rule to the uploaded body. The
  * two have to agree: a client-side refusal is an actionable local error, and
  * the same bytes refused only by the server would be a failed upload after a
  * person had already approved it.

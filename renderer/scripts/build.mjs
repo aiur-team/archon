@@ -28,13 +28,13 @@
  * origin serialization, held to a character allowlist that has no room for
  * either character, and then still JSON-encoded on the way into script.
  *
- * The relaxed mode is an argument, exactly as it is in `hosted/lib/config.mjs`.
+ * The relaxed mode is an argument, exactly as it is in `netlify/lib/hosted/config.mjs`.
  * No environment variable can select it, so no value an operator sets on a
  * deployed site -- deliberately, by accident, or "temporarily on a preview" --
  * can turn the HTTPS requirement off.
  *
  * What this build does NOT check is the registrable-site separation between the
- * two origins. That rule belongs to `hosted/lib/config.mjs`, which owns the
+ * two origins. That rule belongs to `netlify/lib/hosted/config.mjs`, which owns the
  * public-suffix list through a pinned dependency and refuses to start the
  * application when the two origins share a site. Restating it here without that
  * list would mean inventing a second, weaker policy for trusted origins, which
@@ -63,7 +63,7 @@ export const GENERATED_FILES = Object.freeze(["renderer-config.js", "_headers"])
  * Redundant with the origin round-trip above it and kept anyway: this is the
  * pattern that makes "cannot contain a newline or a quote" true by inspection
  * rather than true by a chain of reasoning about what `URL` normalises. A
- * bracketed IPv6 literal is admitted because `hosted/lib/contracts.mjs` admits
+ * bracketed IPv6 literal is admitted because `netlify/lib/hosted/contracts.mjs` admits
  * `[::1]` as a loopback host and a build that rejected it would fail on a
  * configuration the application accepts.
  */
@@ -80,7 +80,7 @@ export class RendererBuildError extends Error {
 /**
  * One configured origin, canonical or a build failure.
  *
- * The rules are `validateOrigin` from `hosted/lib/contracts.mjs` minus the
+ * The rules are `validateOrigin` from `netlify/lib/hosted/contracts.mjs` minus the
  * public-suffix check, and `scripts/test-hosted-renderer.mjs` asserts the two
  * agree on every row of a shared table so the subset stays a subset.
  *
