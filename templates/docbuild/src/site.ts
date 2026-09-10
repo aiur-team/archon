@@ -54,8 +54,29 @@ const osError = (e: unknown): string => (e as NodeJS.ErrnoException).message;
 
 const ID_RE = /^[0-9a-f]{6}$/;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const RESERVED_ROUTES = new Set(["api", "d", "login", "invite", "_assets"]);
+const RESERVED_ROUTES = new Set(["api", "d", "login", "invite", "skills", "_assets"]);
 const NEVER_DESCEND = new Set(["_site", "node_modules", "dist", "netlify"]);
+
+/**
+ * Root static page trees, copied under their own name: `_site/login/...`.
+ */
+const STATIC_PAGES = ["login", "invite"];
+
+/**
+ * The hand-written homepage tree. Its contents land at the root of the publish
+ * tree, so `site/index.html` becomes `_site/index.html` and `site/assets/x.png`
+ * becomes `_site/assets/x.png`. Absent, the generated list page stands.
+ */
+const SITE_TREE = "site";
+
+/**
+ * The agent skill, served at `/skills/archon-doc/SKILL.md` from the one source
+ * the package also publishes. There is no second committed copy of the file.
+ */
+const SKILLS_TREE = "skills";
+
+/** Root files the site serves verbatim at their own name. */
+const SERVED_ROOT_FILES = ["AGENTS.md", "llms.txt"];
 
 interface SiteMetadata {
   instance: string;
@@ -81,8 +102,10 @@ function readUtf8(path: string, label = path): string {
 function isExcluded(rel: string, name: string): boolean {
   if (name.startsWith(".")) return true;
   if (NEVER_DESCEND.has(name)) return true;
-  // Root login/ and invite/ are reserved static pages, not document instances.
-  if (rel === "" && (name === "login" || name === "invite")) return true;
+  // Root static content is copied, never walked for documents: a symlink in one
+  // of these trees must reach the static-tree error, not the discovery error.
+  if (rel === "" && STATIC_PAGES.includes(name)) return true;
+  if (rel === "" && (name === SITE_TREE || name === SKILLS_TREE)) return true;
   // templates/skeleton/ is a copy source, not a published document.
   if (rel === "templates" && name === "skeleton") return true;
   return false;
@@ -253,12 +276,18 @@ function validateStaticTree(root: string, rel: string): void {
   }
 }
 
-/** Copy a root static tree byte-for-byte into `_site/`, directories sorted. */
-function copyStaticTree(root: string, outDir: string, rel: string): void {
+/**
+ * Copy a root static tree byte-for-byte into `_site/`, directories sorted.
+ *
+ * `destRel` is where the tree lands inside `_site/`, and defaults to its own
+ * repository path. Passing `""` publishes the tree's *contents* at the root,
+ * which is how the committed homepage replaces the generated index.
+ */
+function copyStaticTree(root: string, outDir: string, rel: string, destRel: string = rel): void {
   const stat = lstat(root, rel);
   if (stat === null) return;
   if (!stat.isDirectory()) return fail(`${rel}: expected a directory in static page trees`);
-  const dest = join(outDir, rel);
+  const dest = join(outDir, destRel);
   try {
     mkdirSync(dest, { recursive: true });
   } catch (e) {
@@ -277,7 +306,7 @@ function copyStaticTree(root: string, outDir: string, rel: string): void {
     if (child === null) continue;
     if (child.isSymbolicLink()) fail(`${childRel}: symbolic links are not supported in static page trees`);
     if (child.isDirectory()) {
-      copyStaticTree(root, outDir, childRel);
+      copyStaticTree(root, outDir, childRel, destRel === "" ? name : `${destRel}/${name}`);
       continue;
     }
     if (!child.isFile()) fail(`${childRel}: unsupported file type in static page tree`);
@@ -285,6 +314,55 @@ function copyStaticTree(root: string, outDir: string, rel: string): void {
       writeFileSync(join(dest, name), readFileSync(join(root, childRel)));
     } catch (e) {
       return fail(`${childRel}: ${osError(e)}`);
+    }
+  }
+}
+
+// ----------------------------------------------------------- served content
+
+/**
+ * Preflight everything the repository serves as committed content, before the
+ * previous `_site/` is deleted: the homepage tree, the skill tree, and each
+ * served root file. Every one of them is optional, so a repository that carries
+ * none of them builds exactly the site it built before they existed.
+ */
+function preflightServedContent(root: string): void {
+  validateStaticTree(root, SITE_TREE);
+  validateStaticTree(root, SKILLS_TREE);
+  for (const rel of SERVED_ROOT_FILES) {
+    const stat = lstat(root, rel);
+    if (stat === null) continue;
+    if (stat.isSymbolicLink()) fail(`${rel}: symbolic links are not supported in served root files`);
+    if (!stat.isFile()) fail(`${rel}: expected a regular file when present`);
+  }
+}
+
+/**
+ * Copy the committed served content into the publish tree: the homepage tree at
+ * the root, the skill tree under its own name, and the served root files.
+ *
+ * This runs after the generated index and redirects are written, so a committed
+ * `site/index.html` is what `_site/index.html` ends up containing. The property
+ * to assert is the bytes of the built file, not the order of these two writes.
+ *
+ * One helper holds every copy step, so a deployment that serves more committed
+ * content adds a line here rather than another pass over the publish tree.
+ */
+function copyServedContent(root: string, outDir: string): void {
+  // The homepage tree publishes its *contents* at the root: site/index.html is
+  // /index.html, site/assets/aiur-logo.png is /assets/aiur-logo.png.
+  copyStaticTree(root, outDir, SITE_TREE, "");
+  // The skill is copied from the package's own source. A second committed copy
+  // of SKILL.md would be free to drift; a build-time copy cannot.
+  copyStaticTree(root, outDir, SKILLS_TREE);
+  for (const rel of SERVED_ROOT_FILES) {
+    const stat = lstat(root, rel);
+    if (stat === null) continue;
+    if (!stat.isFile()) return fail(`${rel}: expected a regular file when present`);
+    try {
+      writeFileSync(join(outDir, rel), readFileSync(join(root, rel)));
+    } catch (e) {
+      return fail(`_site/${rel}: ${osError(e)}`);
     }
   }
 }
@@ -386,7 +464,8 @@ export function buildSite(root: string): SiteBuildResult {
   docs.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   validateInventory(docs);
 
-  for (const page of ["login", "invite"]) validateStaticTree(root, page);
+  for (const page of STATIC_PAGES) validateStaticTree(root, page);
+  preflightServedContent(root);
 
   const outDir = resolve(root, "_site");
   try {
@@ -422,7 +501,7 @@ export function buildSite(root: string): SiteBuildResult {
     documents.push({ instance: doc.instance, id: doc.id, slug: doc.slug, aliases: doc.aliases });
   }
 
-  for (const page of ["login", "invite"]) copyStaticTree(root, outDir, page);
+  for (const page of STATIC_PAGES) copyStaticTree(root, outDir, page);
 
   if (enhancer !== null) {
     const assetsDir = join(outDir, "_assets");
@@ -440,6 +519,9 @@ export function buildSite(root: string): SiteBuildResult {
   } catch (e) {
     return fail(`_site: ${osError(e)}`);
   }
+
+  // Last, so the committed homepage overrides the generated list page.
+  copyServedContent(root, outDir);
 
   // Previews and branch deploys must not be indexed; production output has no
   // _headers file (the clean rebuild already removed any stale one).

@@ -85,11 +85,14 @@ and it is the one that matters:
 | `templates/skeleton/` | Copy this to start a document |
 | `templates/components/` | Every component, rendered live with its markup |
 | `example/` | A complete worked document. Read this one first |
+| `how-archon-works/` | The document about Archon that the site serves at `/how-archon-works/` |
+| `site/` | The hand-written homepage. Published at the root of the built site |
 | `netlify/` | The live layer: sign-in, access, comments, suggestions, edits, history, presence |
 | `renderer/` | The isolated static origin that displays one uploaded document's active HTML |
 | `docs/research/` | The platform design. `00-integration-plan.md` is the ruling document |
 | `.claude/skills/architecture-doc/` | How to turn raw research into a document, in this repository |
 | `skills/archon-doc/` | The same, for someone who installed the package. Shipped in the tarball |
+| `AGENTS.md`, `llms.txt` | What an agent reads first. Served at `/AGENTS.md` and `/llms.txt` |
 
 ## Checks
 

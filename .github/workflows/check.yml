@@ -281,6 +281,7 @@ jobs:
             templates/docbuild/dist/index.test.js \
             templates/docbuild/dist/anchors.test.js \
             templates/docbuild/dist/hosted-profile.test.js \
+            templates/docbuild/dist/site.test.js \
             templates/docbuild/dist/publish.test.js
           node --test scripts/connect.test.mjs
           node --test scripts/temp-roots.test.mjs
