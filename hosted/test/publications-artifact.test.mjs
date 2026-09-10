@@ -629,7 +629,11 @@ test("a content-length that is not a usable number falls through to the streamin
   /* A chunked upload has no `Content-Length` at all, and a proxy can leave a
      malformed one; neither may reject a body the bytes themselves permit, and
      neither may let an oversize one through. */
-  for (const header of ["", "  ", "not-a-number", "-1", "1.5", "12,13"]) {
+  /* `1e9` and `0x400000` are the ones that matter: both are past the ceiling to
+     `Number`, and neither is a length any HTTP client meant to declare, so a
+     reader that coerced the header instead of parsing it would refuse a legal
+     document outright. */
+  for (const header of ["", "  ", "not-a-number", "-1", "1.5", "12,13", "1e9", "0x400000"]) {
     const { resolve, stored } = harness({ seed: "approved" });
     const request = upload(FIXTURE_HTML);
     request.headers.set("content-length", header);
