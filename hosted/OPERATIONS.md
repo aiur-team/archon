@@ -128,7 +128,9 @@ not use a GitHub App: this service wants identity and nothing else.
   GitHub account keeps their documents; a user who deletes their account and
   another who later claims the freed username do **not** inherit them.
 
-Install `GITHUB_CLIENT_SECRET` through the Netlify UI or `netlify env:set`, into
+Install `GITHUB_CLIENT_SECRET` through the Netlify UI or `netlify env:set` (the
+Netlify CLI is an operator prerequisite installed separately — neither lockfile
+in this repository provides it), into
 the production context of the application site only. Rotating it is a normal
 operation: set the new value, deploy, then delete the old credential at GitHub.
 
@@ -146,10 +148,14 @@ stands today:
   inside `createPublication`, not in the route handler, so no future route can
   start a publication by forgetting to ask.
 - **New uploads are refused too**, including for a publication that was already
-  approved. `PUT /api/hosted/publications/<id>/artifact` answers the same `503`.
-  It is checked inside `completePublication` for the same reason: a route cannot
-  commit bytes by forgetting to ask. Together these two are the whole tap — with
-  the flag off, no new bytes reach the store.
+  approved. The check is inside `completePublication`, the library function any
+  upload has to go through to commit bytes, so a route cannot commit them by
+  forgetting to ask. **The `PUT /api/hosted/publications/<id>/artifact` route
+  itself is not landed yet** — no handler for it exists under `hosted/functions/`
+  as of this writing, and `completePublication` has no production caller. The
+  guard is in place ahead of the route so that the route arrives already gated;
+  once it lands it will answer the same `503`. Together these two are the whole
+  tap — with the flag off, no new bytes reach the store.
 - **Status and receipt recovery keep working.** `POST
   /api/hosted/publications/<id>/status` deliberately does not consult the flag.
   An agent that already published can still recover its receipt for the
@@ -192,9 +198,14 @@ tells you the change has landed.
 
    Expect `HTTP/2 503` and `"code":"publishing_disabled"`. A `201` means the
    deploy did not pick up the change; repeat step 2.
-4. That `503` is the whole proof. Because the upload is gated on the same flag,
+4. That `503` is the whole proof. It is the one route you can probe from
+   outside, and because the upload path is gated on the same flag *inside
+   `completePublication`* — the function any future artifact route must call —
    there is no window to wait out: once the deploy carrying the change is live,
-   no new bytes can be committed, whatever was approved beforehand.
+   no new bytes can be committed, whatever was approved beforehand. Until the
+   artifact route lands there is no upload path to probe separately; the gate's
+   coverage of it is proven by `scripts/test-hosted-operations.mjs`, which calls
+   `completePublication` directly.
 
 ### Immediate stop
 
@@ -277,7 +288,14 @@ NETLIFY_SITE_ID=<application site id> NETLIFY_AUTH_TOKEN=<operator token> \
 ```
 
 Both arguments are required and have no defaults, so the store you inspect is
-always one you named.
+always one you named. Both environment variables are required too: the tool
+reads them and passes them to `getStore` as `siteID`/`token`, because
+`@netlify/blobs` picks up no ambient configuration outside a Netlify runtime.
+Omitting either fails immediately, naming the one that is missing. Use a
+personal access token scoped to the account that owns the application site.
+
+Run it from the repository root with `hosted/node_modules` installed
+(`npm --prefix hosted ci`); it resolves `@netlify/blobs` from there.
 
 It prints a JSON summary: `total`, `byState`, `byAgeBucket`, `retainedBytes` and
 a `rows` array of `{id, state, artifactBytes, ageSeconds, ageBucket}`.
@@ -325,7 +343,9 @@ still read.
    inspection and needs a named human to authorize it against the exact id list.
    Nothing in this repository performs it for you.
 7. **Delete, by exact key.** `netlify blobs:delete archon-hosted-v1
-   publications/<id>`, one id at a time, from the authorized list.
+   publications/<id>`, one id at a time, from the authorized list. This needs the
+   Netlify CLI, installed and linked by the operator; it is not a dependency of
+   either lockfile here, and nothing in this repository performs the deletion.
 8. **Re-census and resume.** Confirm the counts moved as expected and no complete
    record was touched, then re-enable publishing per §4's rollback.
 

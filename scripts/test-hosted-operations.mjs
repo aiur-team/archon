@@ -90,7 +90,11 @@ import {
   CENSUS_FORBIDDEN_FIELDS,
   CENSUS_ROW_FIELDS,
   censusRow,
+  credentialedStoreOpener,
+  hostedBlobsSpecifier,
   parseCensusArguments,
+  readOnlyHandle,
+  requireBlobsCredentials,
   runCensus,
   summariseCensus,
 } from "./hosted-census.mjs";
@@ -629,11 +633,74 @@ section("the census requires explicit targets and cannot write", async () => {
 
   assert.deepEqual(opened, [{ name: "archon-hosted-v1", consistency: "strong" }], "the census must open the named store strongly");
   assert.deepEqual(calls, ["list", "get", "get"], "the census must only list and read");
+
+  /* The call log above only catches a mutator the census actually invokes. The
+     surface itself is the invariant: a `delete` passthrough added to
+     `readOnlyHandle` and never called would leave every assertion above green. */
+  assert.deepEqual(
+    Object.keys(readOnlyHandle(store)),
+    ["list", "getWithMetadata"],
+    "the census handle must expose exactly `list` and `getWithMetadata`",
+  );
+  assert.ok(Object.isFrozen(readOnlyHandle(store)), "the census handle must be frozen, so no method can be added to it");
   assert.equal(summary.total, 1, "one legible record");
   assert.equal(summary.unreadable, 1, "an illegible record is counted, never guessed at");
   assert.equal(summary.byState.complete, 1);
   assert.equal(summary.retainedBytes, RECORDS.complete.descriptor.contentBytes);
   assert.ok(!JSON.stringify(summary).includes("not json"), "unreadable bytes must not reach the report");
+});
+
+section("the census carries its own Netlify credentials", async () => {
+  /* `@netlify/blobs` reads no ambient `NETLIFY_*` variable outside a Netlify
+     runtime, so a `getStore({name})` in an operator's shell throws
+     `MissingBlobsEnvironmentError` however carefully the runbook was followed.
+     The credentials have to be read here and passed on, and a missing one has to
+     name itself rather than surface as an SDK error. This is step 1 of the
+     retention procedure, so it running as documented is load-bearing. */
+  for (const [env, expected] of [
+    [{}, /NETLIFY_SITE_ID and NETLIFY_AUTH_TOKEN/],
+    [{ NETLIFY_AUTH_TOKEN: "t" }, /NETLIFY_SITE_ID must be set/],
+    [{ NETLIFY_SITE_ID: "s" }, /NETLIFY_AUTH_TOKEN must be set/],
+    [{ NETLIFY_SITE_ID: "s", NETLIFY_AUTH_TOKEN: "   " }, /NETLIFY_AUTH_TOKEN must be set/],
+  ]) {
+    assert.throws(() => requireBlobsCredentials(env), expected, `${JSON.stringify(env)} must be refused by name`);
+  }
+
+  assert.deepEqual(
+    requireBlobsCredentials({ NETLIFY_SITE_ID: "site-1", NETLIFY_AUTH_TOKEN: "token-1", NETLIFY_OTHER: "x" }),
+    { siteID: "site-1", token: "token-1" },
+    "the census must pass exactly the two `getStore` credential keys",
+  );
+
+  /* And the runbook's command must be the one that works: the documented
+     invocation, run against a provider double, has to reach `getStore` with the
+     site and token attached to the store options. */
+  const opened = [];
+  const sdk = (options) => {
+    opened.push(options);
+    return { async list() { return { blobs: [] }; }, async getWithMetadata() { return null; } };
+  };
+  await runCensus({
+    argv: ["--store", "archon-hosted-v1", "--prefix", "publications/"],
+    getStore: credentialedStoreOpener(sdk, requireBlobsCredentials({ NETLIFY_SITE_ID: "site-1", NETLIFY_AUTH_TOKEN: "token-1" })),
+    now: () => Date.parse("2026-01-01T00:00:00.000Z"),
+  });
+  assert.deepEqual(
+    opened,
+    [{ name: "archon-hosted-v1", consistency: "strong", siteID: "site-1", token: "token-1" }],
+    "the documented invocation must reach `getStore` with the site and token attached",
+  );
+
+  /* And the SDK has to come from the deployment whose store is being read. */
+  assert.ok(
+    hostedBlobsSpecifier().includes("/hosted/node_modules/@netlify/blobs/"),
+    "the census must load @netlify/blobs from hosted/node_modules, not the root install",
+  );
+  assert.throws(
+    () => hostedBlobsSpecifier(new URL("./nowhere/package.json", import.meta.url)),
+    /npm --prefix hosted ci/,
+    "a missing install must name the command that fixes it",
+  );
 });
 
 /* ------------------------------------------------------------------ */

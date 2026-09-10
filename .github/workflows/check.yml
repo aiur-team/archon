@@ -123,10 +123,15 @@ jobs:
       # spans four surfaces that no single suite owns, and because the rate rules
       # have to be read off the handler modules' real `config` exports -- the
       # object Netlify packages -- rather than off the TOML or off the runbook
-      # prose. It contacts no provider, reads no credential and needs no network:
-      # the one thing it cannot exercise for real is AHU-005's renderer build,
-      # whose *invocation* contract it asserts against a synthetic fixture in a
-      # temporary directory. Reconnecting that to the real build is AHU-012's.
+      # prose. It contacts no provider, reads no credential and needs no network.
+      #
+      # One contract here is asserted against a synthetic fixture by choice, not
+      # by necessity: AHU-005's renderer build has merged, and
+      # `scripts/test-hosted-renderer.mjs` already drives it for real. This
+      # runner asserts only the *invocation* contract around it -- that the
+      # command `renderer/netlify.toml` declares, run from the declared base
+      # directory, emits the declared publish directory -- and does so against a
+      # fixture so that two runners are not in charge of one output.
       #
       # It runs after the hosted install because it links against `hosted/lib`,
       # which resolves `tldts` out of `hosted/node_modules`.

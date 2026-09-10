@@ -37,14 +37,19 @@
  *
  *   node scripts/hosted-census.mjs --store archon-hosted-v1 --prefix publications/
  *
- * Netlify credentials come from the ambient `netlify` CLI environment
- * (`NETLIFY_SITE_ID` / `NETLIFY_AUTH_TOKEN`, or `netlify env` in a linked
- * directory). This tool reads them through `@netlify/blobs` and never prints
- * them.
+ * Netlify credentials come from `NETLIFY_SITE_ID` and `NETLIFY_AUTH_TOKEN`.
+ * `@netlify/blobs` does **not** read those variables by itself outside a
+ * Netlify runtime -- `getStore({name})` in a plain shell throws
+ * `MissingBlobsEnvironmentError` -- so this tool reads them itself and passes
+ * them to `getStore` as `siteID` and `token`. Either one missing is a loud
+ * failure before any request is made. Neither is ever printed.
  *
  * Output contract: a JSON summary object on stdout and exit 0, or one
  * `FAIL hosted census:` line on stderr and exit 1.
  */
+
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 
 import { validatePublication } from "../hosted/lib/contracts.mjs";
 
@@ -126,10 +131,14 @@ export function censusRow(record, nowMs) {
  * The whole census: counts by state, retained bytes, and an age distribution.
  *
  * `retainedBytes` counts only completed records, which is the number that
- * answers "how much published content is this deployment storing". The
- * `expiredNonComplete` count is the one the retention procedure acts on, and it
- * is derived from state and age rather than from a stored deadline so that a
- * record whose deadline field is missing still shows up.
+ * answers "how much published content is this deployment storing".
+ *
+ * There is deliberately no "expired non-complete" count. Which records are past
+ * their deadlines is a retention *judgement* -- it depends on the pending and
+ * upload windows in force when each record was written -- and OPERATIONS.md §7
+ * step 2 has the operator derive that target list by hand from `state` and
+ * `ageSeconds`. A number printed here would read as an authorised deletion list,
+ * which is exactly what this tool must not produce.
  */
 export function summariseCensus(rows) {
   const byState = {};
@@ -143,12 +152,70 @@ export function summariseCensus(rows) {
   return { total: rows.length, byState, byAgeBucket, retainedBytes, rows };
 }
 
-/** A read-only view of a provider store: exactly two methods, and no others. */
-function readOnlyHandle(store) {
+/**
+ * A read-only view of a provider store: exactly two methods, and no others.
+ *
+ * Exported so the gate can assert the surface directly. A double that only
+ * throws when a mutator is *called* stays green if a `delete` passthrough is
+ * ever added here and never exercised; enumerating the keys catches that.
+ */
+export function readOnlyHandle(store) {
   return Object.freeze({
     list: (options) => store.list(options),
     getWithMetadata: (key, options) => store.getWithMetadata(key, options),
   });
+}
+
+/**
+ * The Netlify credentials `getStore` needs, read from the process environment.
+ *
+ * Outside a Netlify runtime `@netlify/blobs` has no ambient configuration to
+ * pick up, so a `getStore({name})` that omitted these would throw
+ * `MissingBlobsEnvironmentError` from inside the SDK -- a failure that reads as
+ * a broken tool rather than as a missing credential. Reading them here turns
+ * that into one sentence that names the variable the operator forgot.
+ *
+ * Exported so the gate can assert both the refusal and the exact keys passed on.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {{siteID: string, token: string}}
+ */
+export function requireBlobsCredentials(env) {
+  const missing = ["NETLIFY_SITE_ID", "NETLIFY_AUTH_TOKEN"].filter((name) => {
+    const value = env[name];
+    return typeof value !== "string" || value.trim() === "";
+  });
+  if (missing.length > 0) {
+    throw new Error(`${missing.join(" and ")} must be set; the census reads the store through the Netlify API`);
+  }
+  return { siteID: env.NETLIFY_SITE_ID, token: env.NETLIFY_AUTH_TOKEN };
+}
+
+/**
+ * Where the CLI shell loads `@netlify/blobs` from: the hosted deployment's own
+ * install, resolved as `hosted/` would resolve it.
+ *
+ * Missing install is a prerequisite failure, not a crash: say which command
+ * fixes it.
+ */
+export function hostedBlobsSpecifier(from = new URL("../hosted/package.json", import.meta.url)) {
+  try {
+    return pathToFileURL(createRequire(from).resolve("@netlify/blobs")).href;
+  } catch {
+    throw new Error("@netlify/blobs is not installed under hosted/; run `npm --prefix hosted ci` first");
+  }
+}
+
+/**
+ * The `getStore` the CLI shell hands to `runCensus`: the SDK's own, with the
+ * operator's credentials attached to every store it opens.
+ *
+ * A named function rather than an inline closure so the gate drives the exact
+ * composition the CLI uses, instead of re-deriving it and asserting its own
+ * arithmetic.
+ */
+export function credentialedStoreOpener(getStore, credentials) {
+  return (options) => getStore({ ...options, ...credentials });
 }
 
 /**
@@ -219,8 +286,17 @@ export async function runCensus({ argv, getStore, now = Date.now }) {
  * not have to install a provider SDK to find out. */
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
-    const { getStore } = await import("@netlify/blobs");
-    const summary = await runCensus({ argv: process.argv.slice(2), getStore });
+    const credentials = requireBlobsCredentials(process.env);
+    /* Resolved out of `hosted/node_modules` rather than the root install: this
+       tool inspects the hosted deployment's store, so it should speak to it
+       through the same lockfile-pinned SDK that deployment ships. A bare
+       `import "@netlify/blobs"` from this directory would resolve against the
+       root package instead, which is a different install of a different tree. */
+    const { getStore } = await import(hostedBlobsSpecifier());
+    const summary = await runCensus({
+      argv: process.argv.slice(2),
+      getStore: credentialedStoreOpener(getStore, credentials),
+    });
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(`FAIL hosted census: ${error.message.split("\n")[0]}\n`);
