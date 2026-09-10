@@ -71,7 +71,7 @@ const TRANSCRIPT = /^PASS {2}hosted owner viewer matrix \(chromium [\w.]+; (\d+)
  * the only thing CI reads and a worker that returned early after four cases
  * would otherwise print a `PASS` that reads exactly like a full run.
  */
-const EXPECTED_CASES = 37;
+const EXPECTED_CASES = 38;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -387,9 +387,16 @@ async function startRenderer() {
     const common = Object.fromEntries(headers);
 
     if (url.pathname === FORGE_PATH) {
+      /* It announces readiness *repeatedly*. A single message at load is easy
+         for the viewer to be safe from by accident -- it arrives before the
+         renderer frame exists, and a null frame is refused by a guard that has
+         nothing to do with who sent the message. An attacker would not stop at
+         one, and neither does this: the interval guarantees a forged message
+         lands in the window where the viewer has a frame and is waiting for it
+         to speak, which is the only moment the source check is what refuses it. */
       const script =
         'window.__seen=[];addEventListener("message",function(e){window.__seen.push(String(e.data&&e.data.type))});'
-        + 'top.postMessage({type:"archon:ready",v:1},"*");';
+        + 'setInterval(function(){top.postMessage({type:"archon:ready",v:1},"*");},50);';
       response.writeHead(200, { ...common, "Content-Type": "text/html; charset=utf-8" });
       response.end(
         `<!doctype html><meta charset="utf-8"><title>not the renderer</title><script>${script}<\/script>`,
@@ -607,7 +614,7 @@ async function fetchApp(origin, path, { token = null, method = "GET", headers = 
  * denial's *whole response* -- headers included -- carries no marker of the
  * document it refused.
  */
-async function assertHttpSurface({ app, ids, tokens, records, markers }) {
+async function assertHttpSurface({ app, ids, tokens, records, markers, base }) {
   const cases = [];
   const record = (label) => cases.push(label);
 
@@ -646,6 +653,26 @@ async function assertHttpSurface({ app, ids, tokens, records, markers }) {
     "the owner's bytes do not hash to the approved digest",
   );
   record("content:owner");
+
+  /* The owner's *own* metadata is the response a projection bug leaks through:
+     every denial assertion above is about somebody who gets nothing, so a
+     handler that serialised the whole record would satisfy all of them. */
+  const owned = await (await fetchApp(app.origin, `/api/hosted/docs/${ids.owned}`, {
+    token: tokens.owner,
+  })).text();
+  for (const forbidden of [
+    base.agentSecretHash,
+    base.browserSecretHash,
+    base.userCode,
+    records.owned.html.slice(0, 48),
+    '"agentSecretHash"',
+    '"browserSecretHash"',
+    '"html"',
+    '"state"',
+  ]) {
+    assert.ok(!owned.includes(forbidden), `owner metadata carried ${forbidden.slice(0, 24)}`);
+  }
+  record("metadata:no-envelope");
 
   /* The byte-order-mark document, whose whole point is the byte-exact round
      trip. It is a second complete record with a BOM at the front. */
@@ -850,6 +877,26 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       });
       assert.deepEqual(insideFrame, [false, false, false, false], "trusted chrome is inside the frame");
 
+      /* The account-origin document contains no authored node. This is the
+         "do not fall back to inserting authored HTML in the account document"
+         rule as an assertion about the DOM rather than about a policy: an
+         `innerHTML` fallback added to `viewer.js` would put the artifact's own
+         elements here, on the origin holding the session cookie, and every
+         other case in this matrix would stay green. The stage holds exactly one
+         child and it is the renderer frame. */
+      const shell = await tab.evaluate(() => {
+        const stage = document.querySelector("[data-archon-stage]");
+        return {
+          authoredIds: ["draw", "chart", "probe", "state", "heading"]
+            .filter((id) => document.getElementById(id) !== null),
+          stageChildren: [...stage.children].map((child) => child.localName),
+          scriptSources: [...document.querySelectorAll("script")].map((s) => s.getAttribute("src")),
+        };
+      });
+      assert.deepEqual(shell.authoredIds, [], "authored elements are in the account document");
+      assert.deepEqual(shell.stageChildren, ["iframe"], "the stage holds more than the frame");
+      assert.deepEqual(shell.scriptSources, ["/viewer.js"], "the trusted page grew a script");
+
       /* The artifact is two frames down, and its own control works. */
       const artifact = await waitFor(
         async () => tab.frames().find((frame) => frame.url() === ARTIFACT_URL) ?? null,
@@ -1019,24 +1066,49 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
     ["a forged readiness message from the renderer origin gets nothing", async (context) => {
       await signIn(context, app.origin, tokens.owner);
       const tab = await context.newPage();
-      await tab.goto(page(`/docs/${ids.owned}`));
-      await waitFor(
-        async () => (await tab.getAttribute("html", "data-archon-state")) === "rendered",
-        "the viewer never rendered",
-      );
 
-      /* A second frame, served from the *correct* renderer origin, posting a
-         flawless readiness message to the viewer's window. Its origin matches
-         and its source does not, which is the one forgery an origin comparison
-         alone cannot see. */
-      await tab.evaluate((forge) => {
-        const frame = document.createElement("iframe");
-        frame.id = "forge";
-        frame.src = forge;
-        document.body.appendChild(frame);
+      /* The forgery has to arrive *first*, and this case is only worth running
+         if it does. A forged readiness message that lands after the document is
+         already displayed is refused by a guard that has nothing to do with who
+         sent it, so an earlier version of this case passed with the source check
+         deleted -- it was testing the "one artifact per renderer" rule twice.
+         So the real renderer's own document is held for two seconds while a
+         second frame from the renderer origin announces readiness every fifty
+         milliseconds. For those two seconds the viewer has a frame, is waiting
+         for it to speak, and is being told it has -- by the wrong window, from
+         the right origin. The source check is the only thing refusing. */
+      await tab.route(`${renderer.origin}/`, async (route) => {
+        await new Promise((done) => setTimeout(done, 2000));
+        await route.continue();
+      });
+      await tab.addInitScript((forge) => {
+        document.addEventListener("DOMContentLoaded", () => {
+          const frame = document.createElement("iframe");
+          frame.id = "forge";
+          frame.src = forge;
+          document.body.appendChild(frame);
+        });
       }, `${renderer.origin}${FORGE_PATH}`);
 
-      await new Promise((done) => setTimeout(done, 1000));
+      await tab.goto(page(`/docs/${ids.owned}`));
+
+      /* The forged message is seen and discarded, and the real handshake still
+         completes. With the source check removed the viewer acts on the forgery,
+         hands the bytes to a frame whose renderer has not loaded yet, and marks
+         itself rendered -- so this wait is what fails. */
+      const artifact = await waitFor(
+        async () => tab.frames().find((frame) => frame.url() === ARTIFACT_URL) ?? null,
+        async () =>
+          `a forged readiness message consumed the hand-off ${JSON.stringify({
+            state: await tab.getAttribute("html", "data-archon-state"),
+            status: await statusOf(tab),
+          })}`,
+        { timeout: 30_000 },
+      );
+      assert.equal(await tab.getAttribute("html", "data-archon-state"), "rendered");
+      assert.equal(await artifact.locator("#heading").innerText(), "Quarterly figures");
+
+      /* And the forger itself received nothing. */
       const seen = await tab.evaluate(() => {
         const frame = document.getElementById("forge");
         try {
@@ -1334,7 +1406,7 @@ async function worker() {
   let cases = 0;
   let browser = null;
   try {
-    cases += await assertHttpSurface({ app, ids, tokens, records, markers });
+    cases += await assertHttpSurface({ app, ids, tokens, records, markers, base });
 
     const entry = join(tempRoot, "node_modules", "playwright", "index.js");
     const loaded = await import(pathToFileURL(entry).href);
