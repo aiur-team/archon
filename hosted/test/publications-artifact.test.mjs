@@ -202,23 +202,23 @@ const STATE_REJECTIONS = [
 for (const { seed, status, code } of STATE_REJECTIONS) {
   test(`a ${seed} publication refuses the upload with ${status} ${code}`, async () => {
     const { resolve, writes } = harness({ seed });
-    await assertError(await handleArtifact(upload(FIXTURE_HTML), resolve), status, code);
+    const request = upload(FIXTURE_HTML);
+    await assertError(await handleArtifact(request, resolve), status, code);
     assert.deepEqual(writes(), [], "a refused state must not be written to");
+    /* The state is what refuses, and it refuses before the body is spent - which
+       is also what distinguishes this route's own gate from the identical answer
+       `completePublication` would give after reading 2 MiB. */
+    assert.equal(request.bodyUsed, false, `a ${seed} upload must be refused before its body is read`);
   });
 }
 
 test("an approved publication past its upload deadline is 410, not a late completion", async () => {
   const { resolve, clock, writes } = harness({ seed: "approved" });
   clock.setIso(RECORDS.approved.uploadExpiresAt);
-  await assertError(await handleArtifact(upload(FIXTURE_HTML), resolve), 410, "authorization_expired");
-  assert.deepEqual(writes(), []);
-});
-
-test("a rejected upload leaves its body unread", async () => {
-  const { resolve } = harness({ seed: "pending" });
   const request = upload(FIXTURE_HTML);
-  await assertError(await handleArtifact(request, resolve), 403, "approval_required");
-  assert.equal(request.bodyUsed, false, "an unapproved upload must be refused before its body is read");
+  await assertError(await handleArtifact(request, resolve), 410, "authorization_expired");
+  assert.deepEqual(writes(), []);
+  assert.equal(request.bodyUsed, false);
 });
 
 /* ------------------------------------------------------------------ */

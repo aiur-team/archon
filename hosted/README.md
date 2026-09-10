@@ -203,6 +203,21 @@ Every response it builds carries `Cache-Control: private, no-store`,
 `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`, because
 Netlify does not apply `netlify.toml` headers to function output.
 
+### `lib/artifact-body.mjs`
+
+The upload request body, and the one place raw HTTP bytes become facts about a
+document. It checks the exact `text/html; charset=utf-8` media type before
+reading anything, bounds the read as it happens rather than after — a declared
+`Content-Length` past C2's ceiling is refused outright, and an undeclared body
+stops at the first chunk that crosses it — and decodes strictly, preserving an
+optional UTF-8 BOM. The digest and length it returns are computed over the
+octets received, never read out of a header or a descriptor. Comparing them
+against the approved descriptor stays with `completePublication`.
+
+| Export | Returns |
+| --- | --- |
+| `readArtifactBody(request)` | `{html, contentSha256, contentBytes}` |
+
 ## Routes
 
 | Route | Method | Authentication |
