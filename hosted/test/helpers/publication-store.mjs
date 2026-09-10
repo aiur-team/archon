@@ -37,6 +37,7 @@ export function createProviderDouble() {
   const opened = [];
   const calls = [];
   let onBeforeWrite = null;
+  let reads = 0;
 
   const nextEtag = () => {
     sequence += 1;
@@ -48,11 +49,23 @@ export function createProviderDouble() {
   const store = {
     async getWithMetadata(key, options = {}) {
       calls.push({ op: "get", key, options });
-      const fault = readFaults.shift();
+      reads += 1;
+      /* A fault may name the read it applies to. Without that, a fault planted
+         for "the readback after the write" is drained by the *first* read of the
+         call - which silently turns an ambiguous-write test into a duplicate of
+         the plain read-failure test, green and proving nothing. `skip: n` lets a
+         test say which read it means. */
+      const fault =
+        readFaults.length > 0 && (readFaults[0].skip ?? 0) <= 0 ? readFaults.shift() : null;
+      if (fault === null && readFaults.length > 0) readFaults[0].skip -= 1;
       if (fault?.throws) throw new Error("provider read failure");
       const entry = blobs.get(key);
       if (entry === undefined) return null;
-      if (fault?.omitEtag) return { data: entry.data, etag: "", metadata: {} };
+      /* The real package spells a missing ETag header as `undefined`, not `""`
+         (`getWithMetadata` in dist/main.js: `res.headers.get("etag") ?? void 0`).
+         Both are modelled, because the production guard accepts neither. */
+      if (fault?.omitEtag) return { data: entry.data, etag: undefined, metadata: {} };
+      if (fault?.emptyEtag) return { data: entry.data, etag: "", metadata: {} };
       if (fault?.data !== undefined) return { data: fault.data, etag: entry.etag, metadata: {} };
       if (fault?.unusable) return { data: null, etag: entry.etag, metadata: {} };
       return { data: entry.data, etag: entry.etag, metadata: {} };
@@ -80,8 +93,11 @@ export function createProviderDouble() {
           ? existing === undefined
           : existing !== undefined && existing.etag === options.onlyIfMatch;
 
-      const fault = writeFaults.shift();
+      /* Only a *permitted* write consumes a fault. Shifting first would let a
+         refused write silently eat a fault planted for the write after it, and
+         `assertFaultsConsumed` would then have nothing left to complain about. */
       if (!permitted) return { modified: false };
+      const fault = writeFaults.shift();
 
       if (fault?.throwsBeforeCommit) throw new Error("provider write failure");
 
@@ -110,11 +126,45 @@ export function createProviderDouble() {
     put(key, data) {
       blobs.set(key, { data, etag: nextEtag() });
     },
+    /**
+     * Land a record as if the write under test had already been applied by the
+     * server whose response was then lost.
+     *
+     * Used with `beforeWrite` to reproduce the one shape a `Map` cannot: the
+     * client's conditional PUT commits, the response is lost, the package
+     * re-sends the same `If-Match`, and the server - which has already applied
+     * it - answers 412. The adapter sees `modified: false` for a write that in
+     * fact happened.
+     */
+    applyDirectly(key, record) {
+      blobs.set(key, { data: JSON.stringify(record), etag: nextEtag() });
+    },
+    /**
+     * Plant a read fault. `skip: n` lets it apply to the (n+1)-th read from now,
+     * which is how a test targets the readback after a write rather than the
+     * read that precedes it.
+     */
     failNextRead(fault) {
-      readFaults.push(fault);
+      readFaults.push({ skip: 0, ...fault });
     },
     failNextWrite(fault) {
       writeFaults.push(fault);
+    },
+    /** Reads issued so far, for a test that needs to plant a fault relative to now. */
+    readCount: () => reads,
+    /**
+     * Fail if a planted fault was never consumed.
+     *
+     * A fault that no call reached is the signature of a test that thinks it is
+     * exercising a path it never reaches, which is exactly the failure this
+     * double is supposed to make impossible.
+     */
+    assertFaultsConsumed() {
+      if (readFaults.length > 0 || writeFaults.length > 0) {
+        throw new Error(
+          `unconsumed fault(s): ${readFaults.length} read, ${writeFaults.length} write`,
+        );
+      }
     },
     /** Run `hook` once, immediately before the next write is evaluated. */
     beforeWrite(hook) {

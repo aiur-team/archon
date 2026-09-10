@@ -37,8 +37,17 @@
  *    document afterwards - that is `readOwnedPublication`, which asks for a
  *    principal and compares it to the owner the browser fixed at approval.
  *  - **A projection carries no secret.** No status, review or error path returns
- *    `agentSecretHash`, `browserSecretHash` or `html`; only `readOwnedPublication`
- *    returns bytes, and only to the owner.
+ *    `agentSecretHash`, `browserSecretHash` or `html`.
+ *
+ *    The two exceptions are `readPublication` and `readOwnedPublication`, which
+ *    C3 freezes as returning the whole stored record - and a stored record
+ *    carries both secret hashes as well as, once complete, the document. Those
+ *    two are **server-internal reads, not HTTP projections**: a consumer that
+ *    serialises what they return, or embeds it in a page, publishes
+ *    `browserSecretHash`, and that value is not merely a digest of a capability
+ *    - `reviewPublication` and `decidePublication` accept a binding by comparing
+ *    the *presented* hash to the stored one, so the stored value is itself
+ *    replayable as the browser binding. Project before you serialise.
  *
  * Dependencies are injected. The store, the clock and the random source all
  * arrive through `createPublications`, so a test drives a real transition
@@ -100,6 +109,24 @@ function secretMatches(presented, storedHash) {
   const left = Buffer.from(sha256Hex(presented), "utf8");
   const right = Buffer.from(storedHash, "utf8");
   if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * Whether presented bytes are the bytes already stored, compared in constant
+ * time over their digests.
+ *
+ * `presented !== stored` would be a length-then-memcmp against the stored
+ * document, and this is the one comparison where an agent bearer touches bytes
+ * it is not otherwise allowed to read. Reaching it already requires a matching
+ * `contentSha256`, so the residual oracle is narrow - but hashing both sides
+ * costs nothing and removes it, and it keeps every comparison in this module
+ * constant-time rather than most of them.
+ */
+function sameDocument(presented, stored) {
+  if (typeof presented !== "string" || typeof stored !== "string") return false;
+  const left = Buffer.from(sha256Hex(presented), "utf8");
+  const right = Buffer.from(sha256Hex(stored), "utf8");
   return timingSafeEqual(left, right);
 }
 
@@ -280,6 +307,16 @@ export async function readOwnedPublication({ publicationId, principal } = {}, de
  *
  * `HOSTED_PUBLISH_ENABLED` is checked here rather than in the handler so that no
  * future route can start a publication by forgetting to ask.
+ *
+ * It is checked *only* here, which is a decision rather than an omission and is
+ * worth stating because it does not read as one. Turning publishing off stops
+ * new publications from starting; it does not revoke authorisation an operator's
+ * users already hold, so for up to `PENDING_TTL_SECONDS + UPLOAD_TTL_SECONDS`
+ * afterwards an already-started publication can still be approved and can still
+ * commit its bytes. Making the switch retroactive would mean a human's approval
+ * silently becoming a 503 after they gave it, and would strand documents whose
+ * upload was already in flight. An operator who needs the harder stop takes the
+ * deployment down; this flag is a tap, not a valve.
  */
 export async function createPublication(descriptor, dependencies) {
   const { store, appOrigin, production, publishEnabled, now, randomBytes } =
@@ -289,15 +326,16 @@ export async function createPublication(descriptor, dependencies) {
   }
   const validated = validateDescriptor(descriptor);
 
-  const createdAtMs = now();
-  const createdAt = isoAt(createdAtMs);
-  const pendingExpiresAt = isoAfter(createdAtMs, HOSTED_LIMITS.PENDING_TTL_SECONDS);
-
   /* A 128-bit id collides with probability nobody will ever observe, so this
      loop is not really about collisions - it is about never resolving one by
      handing the loser the winner's record. Each attempt draws a *fresh* id, so a
-     collision costs one wasted round trip rather than an operation. */
+     collision costs one wasted round trip rather than an operation - and a fresh
+     clock reading with it, because a record stamped with the time of attempt one
+     would give its approver a shorter window than the contract promises. */
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
+    const createdAtMs = now();
+    const createdAt = isoAt(createdAtMs);
+    const pendingExpiresAt = isoAfter(createdAtMs, HOSTED_LIMITS.PENDING_TTL_SECONDS);
     const id = Buffer.from(randomBytes(ID_BYTES)).toString("hex");
     const agentSecret = mintSecret(randomBytes);
     const browserSecret = mintSecret(randomBytes);
@@ -486,8 +524,13 @@ export async function decidePublication(
         : { ...record, state: "denied", ownerAccountId: approver.accountId },
     );
 
+    /* `observed` means the stored record is exactly this decision, without the
+       provider having proved this call wrote it - which is what a committed
+       write whose response was lost looks like. The approver asked for a state
+       and that state is stored; reporting a conflict here would tell somebody
+       their successful approval failed. */
     const written = await store.update(next, etag);
-    if (written.outcome === "committed") {
+    if (written.outcome === "committed" || written.outcome === "observed") {
       return reviewProjection(written.record, now(), approver.accountId);
     }
   }
@@ -568,9 +611,14 @@ export async function statusPublication({ publicationId, agentSecret } = {}, dep
  *
  * Cancellation is a state, never a deletion. A completed publication returns its
  * unchanged receipt, because the document exists and the agent asking to cancel
- * has simply lost a race it cannot win; an already-terminal operation returns
- * that terminal state, because cancelling something that has already stopped is
- * a no-op rather than an error.
+ * has simply lost a race it cannot win; a denied, cancelled or expired operation
+ * returns that terminal state, because cancelling something that has already
+ * stopped is a no-op rather than an error.
+ *
+ * The one terminal state that is not a no-op is a completion whose receipt
+ * window has closed: it answers `receipt_expired`, exactly as a poll would. The
+ * bearer's twenty-four hours of recovery are what bound the receipt, and cancel
+ * returns the receipt, so cancel is bounded by them too.
  */
 export async function cancelPublication({ publicationId, agentSecret } = {}, dependencies) {
   const { store, appOrigin, production, now } = requireDependencies(dependencies);
@@ -588,7 +636,7 @@ export async function cancelPublication({ publicationId, agentSecret } = {}, dep
 
     const next = validatePublication({ ...record, state: "cancelled" });
     const written = await store.update(next, etag);
-    if (written.outcome === "committed") {
+    if (written.outcome === "committed" || written.outcome === "observed") {
       return statusEnvelope(written.record, now(), { appOrigin, production });
     }
   }
@@ -633,7 +681,7 @@ export async function completePublication(
       if (
         record.descriptor.contentSha256 !== contentSha256 ||
         record.descriptor.contentBytes !== contentBytes ||
-        record.html !== html
+        !sameDocument(html, record.html)
       ) {
         throw fail("descriptor_mismatch", "this publication has already completed with other bytes");
       }
@@ -676,6 +724,18 @@ export async function completePublication(
     if (written.outcome === "committed") {
       return Object.freeze({
         created: true,
+        result: Object.freeze(resultOf(written.record, appOrigin)),
+      });
+    }
+    /* `observed` is the one place completion has to be stricter than its
+       siblings. The document is stored and it is this caller's document, but the
+       provider did not prove this call is what wrote it - so the honest answer
+       is the one a retry would get. C3 reserves 201 for the write that first
+       commits a document, and claiming it on an unproven write would report a
+       creation that may have happened one attempt ago. */
+    if (written.outcome === "observed") {
+      return Object.freeze({
+        created: false,
         result: Object.freeze(resultOf(written.record, appOrigin)),
       });
     }

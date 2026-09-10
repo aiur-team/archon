@@ -162,13 +162,17 @@ delete here, so v1 never removes a publication record.
 | `publicationKey(id)` | `publications/<id>`, re-validating the id. A six-hex self-hosted document id fails it. |
 | `PUBLICATION_STORE_NAME`, `PUBLICATION_KEY_PREFIX`, `MAX_WRITE_ATTEMPTS` | The store name, the namespace, and the bound of 6 attempts. |
 
-A write result is `committed`, `refused`, or ambiguous. Only a resolved
-`modified: false` is `refused`, which is positive proof that no write occurred
-and the only outcome a caller may retry on. Everything else — a throw, a result
-that is not the documented shape, a `modified: true` with no ETag — is read back
-with strong consistency and compared to the exact record that was written, and a
-readback that also fails surfaces as retryable `unavailable` with the uncertainty
-intact.
+Only `modified: true` with a non-empty ETag is taken at face value. Everything
+else — a throw, a result that is not the documented shape, a `modified: true`
+with no ETag, **and a resolved `modified: false`** — is read back with strong
+consistency and compared to the exact record that was written. That last one is
+the subtle case: `@netlify/blobs` retries the same conditional PUT on a network
+error or a 5xx, so a write that commits and loses its response is re-sent, is
+answered 412 by a server that already applied it, and arrives as
+`modified: false`. The readback yields `committed`, `observed` (the stored record
+is the intended one, but this call cannot prove it was the writer) or `refused`;
+a readback that also fails surfaces as retryable `unavailable` with the
+uncertainty intact.
 
 ### `lib/publications.mjs`
 

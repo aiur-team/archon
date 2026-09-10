@@ -10,22 +10,37 @@
  * Three properties are the whole design, and each exists because the obvious
  * alternative loses a document or invents one:
  *
- *  1. **A write result is `committed`, `refused`, or nothing.** `refused` means
- *     the provider resolved a conditional write with `modified: false`, which is
- *     positive proof that no write happened and is therefore the only outcome a
- *     caller may retry on. Everything else - a thrown error, a result that is
- *     not the documented shape, a `modified: true` with no ETag - is *ambiguous*
- *     and is never reported as either success or failure without reading the
- *     record back first.
+ *  1. **No write result is trusted without a readback except an unambiguous
+ *     success.** Only `modified: true` with a non-empty ETag is taken at face
+ *     value. Everything else - a throw, a result that is not the documented
+ *     shape, a `modified: true` with no ETag, *and a resolved `modified: false`*
+ *     - goes to the readback.
+ *
+ *     That last one is the subtle case and it was wrong in an earlier draft of
+ *     this module. `modified: false` looks like positive proof that nothing was
+ *     written, and it is not: `@netlify/blobs` retries the *same* conditional
+ *     PUT up to five times on a network error or a 5xx
+ *     (`fetchAndRetry` in its `chunk-*.js`). So a write that commits and then
+ *     loses its response is re-sent with the same `If-Match`, answered 412 by a
+ *     server that has already applied it, and surfaces here as
+ *     `modified: false`. Believing it told the human whose approval had in fact
+ *     succeeded that their approval conflicted, and left `create` abandoning a
+ *     record it had just written and that nothing can ever delete.
  *  2. **Ambiguity is resolved by reading, not by guessing.** `@netlify/blobs`
- *     resolves a conditional `setJSON` as `{modified: true, etag: ""}` for any
- *     status that is neither 200 nor 412 - so a 500 that changed nothing and a
- *     201 that changed everything arrive here looking similar. The adapter reads
- *     the key back with strong consistency and compares it to the exact record
- *     it tried to write. A match is a commit; a different record is a loss; an
- *     absent record after an attempted update is a loss. Only a readback that
- *     *also* fails leaves the outcome unknown, and that is the one case that
- *     surfaces as retryable `unavailable` with the uncertainty intact.
+ *     also resolves a conditional `setJSON` as `{modified: true, etag: ""}` for
+ *     any status that is neither 200 nor 412 - so a 500 that changed nothing and
+ *     a 201 that changed everything arrive here looking similar. The adapter
+ *     reads the key back with strong consistency and compares it to the exact
+ *     record it tried to write.
+ *
+ *     A match means the stored state is the state the caller wanted. When the
+ *     provider also said `modified: true` that is a `committed`; otherwise it is
+ *     an `observed` - the intent is satisfied, but this call cannot prove it was
+ *     the writer, and a caller that needs to distinguish "I created this" from
+ *     "this is what I wanted" must treat the two differently. A different record
+ *     is `refused`, and so is an absent one. Only a readback that *also* fails
+ *     leaves the outcome unknown, and that is the one case that surfaces as
+ *     retryable `unavailable` with the uncertainty intact.
  *  3. **A stored record is validated before anybody sees it.** A malformed
  *     envelope, an unknown state name and an unknown schema version are read
  *     failures, not a record in some default state. `validatePublication` throws
@@ -157,7 +172,7 @@ function isWellFormedWriteResult(result) {
  * @returns {Readonly<{
  *   read: (id: string) => Promise<{record: object, etag: string} | null>,
  *   create: (record: object) => Promise<{outcome: "created"|"exists", record?: object, etag?: string}>,
- *   update: (record: object, etag: string) => Promise<{outcome: "committed"|"refused", record?: object, etag?: string}>,
+ *   update: (record: object, etag: string) => Promise<{outcome: "committed"|"observed"|"refused", record?: object, etag?: string}>,
  * }>}
  */
 export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME } = {}) {
@@ -229,36 +244,34 @@ export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME
   }
 
   /**
-   * Read a key back after an ambiguous write, and say whether `intended` won.
+   * Read a key back after a write this call cannot vouch for, and say what is
+   * actually stored relative to what was intended.
    *
    * A readback that itself fails re-throws `unavailable`, which is the honest
-   * answer: the write may or may not have committed and we still do not know.
+   * answer: the write may or may not have landed and we still do not know.
    */
-  async function resolveAmbiguity(intended, { expectExisting }) {
+  async function readBack(intended) {
     const observed = await read(intended.id);
-    if (observed === null) {
-      /* An update whose key is gone cannot have committed - and a create whose
-         key is absent did not create anything either. */
-      return { committed: false, observed: null };
-    }
-    if (sameRecord(observed.record, intended)) {
-      return { committed: true, observed };
-    }
-    /* Somebody else's record is at the key. For a create that is a collision;
-       for an update it means our compare-and-set lost and the caller must
-       re-evaluate the whole transition against what is actually stored. */
-    return { committed: false, observed, existed: expectExisting };
+    if (observed === null) return { matches: false, observed: null };
+    return { matches: sameRecord(observed.record, intended), observed };
   }
 
   /**
    * Create the pending record, and only ever create it.
    *
    * `onlyIfNew` is the entire concurrency story for this call: two requests that
-   * somehow chose the same id produce exactly one `created`, and the loser is
-   * told `exists` and is given nothing about the record that beat it. Returning
-   * the existing record here would let a colliding caller read another
-   * operation's user code and expiry, and in the shape this API has it would
-   * read as "you created this".
+   * somehow chose the same id produce exactly one winner, and the loser is told
+   * `exists` and is given nothing about the record that beat it. Returning the
+   * existing record here would let a colliding caller read another operation's
+   * user code and expiry, and in the shape this API has it would read as "you
+   * created this".
+   *
+   * A `modified: false` is *not* short-circuited to `exists`. The record found
+   * at the key may be the one this very call wrote a moment ago and lost the
+   * response to, and treating that as a collision made `createPublication`
+   * abandon its own freshly written record - and its minted secrets with it -
+   * leaving a durable pending publication that nobody holds a capability for and
+   * that nothing in this design can ever delete.
    */
   async function create(record) {
     const validated = validatePublication(record);
@@ -268,33 +281,36 @@ export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME
     try {
       result = await handle().setJSON(key, validated, { onlyIfNew: true });
     } catch {
-      const resolution = await resolveAmbiguity(validated, { expectExisting: false });
-      if (resolution.committed) return { outcome: "created", record: resolution.observed.record, etag: resolution.observed.etag };
-      if (resolution.observed !== null) return { outcome: "exists" };
-      throw unavailable("could not confirm whether the record was created");
+      return resolveCreate(validated);
     }
 
-    if (!isWellFormedWriteResult(result)) {
-      const resolution = await resolveAmbiguity(validated, { expectExisting: false });
-      if (resolution.committed) return { outcome: "created", record: resolution.observed.record, etag: resolution.observed.etag };
-      if (resolution.observed !== null) return { outcome: "exists" };
-      throw unavailable("could not confirm whether the record was created");
-    }
-
-    if (result.modified === false) return { outcome: "exists" };
+    if (!isWellFormedWriteResult(result)) return resolveCreate(validated);
+    if (result.modified === false) return resolveCreate(validated);
     return { outcome: "created", record: validated, etag: result.etag };
   }
 
+  async function resolveCreate(intended) {
+    const { matches, observed } = await readBack(intended);
+    if (matches) return { outcome: "created", record: observed.record, etag: observed.etag };
+    if (observed !== null) return { outcome: "exists" };
+    throw unavailable("could not confirm whether the record was created");
+  }
+
   /**
-   * Replace the record at `record.id`, but only if it still has `etag`.
+   * Replace the record at `record.id`, but only if it still carries `etag`.
    *
-   * `refused` is returned only for a resolved `modified: false`, which proves no
-   * write occurred and is what makes a caller's retry safe. An ambiguous
-   * response is read back first, and a readback showing a different record is
-   * reported as `refused` too - not because we know our write lost, but because
-   * the stored state is not what we wrote and the caller's next act must be to
-   * re-evaluate its transition against that state rather than to assume either
-   * outcome.
+   * Three outcomes, and the middle one is the reason this is not a boolean:
+   *
+   *  - `committed` - the provider reported an unambiguous success. This call
+   *    wrote the record.
+   *  - `observed` - the stored record is exactly the record that was intended,
+   *    but the provider's answer did not prove this call wrote it. A caller
+   *    whose only question is "is the state I wanted the state that is stored"
+   *    can treat this as success; a caller that must distinguish creating a
+   *    document from finding one already there must not.
+   *  - `refused` - the stored record is something else, or the key is absent.
+   *    The caller's next act is to re-evaluate its whole transition against what
+   *    is actually stored, not to assume its write lost.
    */
   async function update(record, etag) {
     if (typeof etag !== "string" || etag.length === 0) {
@@ -314,15 +330,13 @@ export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME
     }
 
     if (!isWellFormedWriteResult(result)) return resolveUpdate(validated);
-    if (result.modified === false) return { outcome: "refused" };
+    if (result.modified === false) return resolveUpdate(validated);
     return { outcome: "committed", record: validated, etag: result.etag };
   }
 
   async function resolveUpdate(intended) {
-    const resolution = await resolveAmbiguity(intended, { expectExisting: true });
-    if (resolution.committed) {
-      return { outcome: "committed", record: resolution.observed.record, etag: resolution.observed.etag };
-    }
+    const { matches, observed } = await readBack(intended);
+    if (matches) return { outcome: "observed", record: observed.record, etag: observed.etag };
     return { outcome: "refused" };
   }
 

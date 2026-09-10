@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { HOSTED_LIMITS, HostedContractError, validatePublication } from "../lib/contracts.mjs";
-import { createPublicationStore } from "../lib/publication-store.mjs";
+import { createPublicationStore, MAX_WRITE_ATTEMPTS } from "../lib/publication-store.mjs";
 import {
   bindPublication,
   cancelPublication,
@@ -134,7 +134,10 @@ function stringsIn(value, found = []) {
 }
 
 function assertCarriesNoSecret(projection) {
-  const strings = stringsIn(projection);
+  /* Substring, not equality: a hash embedded in a URL, a message or a truncated
+     prefix is still a leak, and exact-match would miss every one of them. The
+     whole rendering is searched, so a secret nested at any depth is caught. */
+  const rendered = stringsIn(projection).join("\u0000");
   for (const secret of [
     RECORDS.pending.agentSecretHash,
     RECORDS.pending.browserSecretHash,
@@ -142,7 +145,7 @@ function assertCarriesNoSecret(projection) {
     FIXTURE_RECORD_BROWSER_SECRET,
     FIXTURE_HTML,
   ]) {
-    assert.ok(!strings.includes(secret), `projection leaked ${secret.slice(0, 16)}…`);
+    assert.ok(!rendered.includes(secret), `projection leaked ${secret.slice(0, 16)}…`);
   }
 }
 
@@ -387,6 +390,121 @@ test("approval cannot revive a terminal record", async () => {
     );
     assert.deepEqual(stored(), before, `${terminal} must survive an approval attempt`);
   }
+});
+
+test("denying fixes the owner and closes the operation without an upload window", async () => {
+  const { publications, stored } = harness({ seed: "pending" });
+  const decided = await publications.decidePublication({
+    publicationId: FIXTURE_PUBLICATION_ID,
+    browserBinding: BINDING,
+    principal: FIXTURE_PRINCIPAL,
+    decision: "deny",
+    displayedAccountId: FIXTURE_PRINCIPAL.accountId,
+  });
+
+  const record = stored();
+  assert.equal(record.state, "denied");
+  assert.equal(record.ownerAccountId, FIXTURE_PRINCIPAL.accountId);
+  assert.equal(record.uploadExpiresAt, null, "a denial opens no upload window");
+  assert.equal(record.html, null);
+  assert.equal(decided.state, "denied");
+
+  /* And the agent is told a terminal state, not a transport failure. */
+  assert.equal((await publications.statusPublication(AGENT)).state, "denied");
+  await rejects(publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD }), "state_conflict");
+  assert.deepEqual(stored(), record);
+});
+
+test("an approval racing a denial on the same ETag leaves exactly one decision", async () => {
+  const { publications, provider, stored } = harness({ seed: "pending" });
+  const decide = (decision, principal) =>
+    publications
+      .decidePublication({
+        publicationId: FIXTURE_PUBLICATION_ID,
+        browserBinding: BINDING,
+        principal,
+        decision,
+        displayedAccountId: principal.accountId,
+      })
+      .then((ok) => ({ ok }), (error) => ({ error }));
+
+  let second = null;
+  provider.beforeWrite(async () => {
+    second = await decide("deny", OTHER_PRINCIPAL);
+  });
+  const first = await decide("approve", FIXTURE_PRINCIPAL);
+
+  const record = stored();
+  assert.equal(record.state, "denied", "the write that landed first is the one that stands");
+  assert.equal(record.ownerAccountId, OTHER_PRINCIPAL.accountId);
+  assert.equal(second.ok.state, "denied");
+  assert.equal(first.error.code, "state_conflict", "the approval cannot revive a decided record");
+  assert.equal(provider.keys().length, 1);
+});
+
+test("an approval racing expiry cannot land after the deadline", async () => {
+  const { publications, provider, clock, stored } = harness({ seed: "pending" });
+
+  /* The first attempt loses its compare-and-set, and the pending deadline passes
+     while it does. The retry must re-read the clock, not reuse the one it
+     entered with. */
+  provider.beforeWrite(async () => {
+    provider.applyDirectly(FIXTURE_KEY, RECORDS.pending);
+    clock.setIso(RECORDS.pending.pendingExpiresAt);
+  });
+
+  await rejects(
+    publications.decidePublication({
+      publicationId: FIXTURE_PUBLICATION_ID,
+      browserBinding: BINDING,
+      principal: FIXTURE_PRINCIPAL,
+      decision: "approve",
+      displayedAccountId: FIXTURE_PRINCIPAL.accountId,
+    }),
+    "authorization_expired",
+  );
+  assert.equal(stored().state, "pending");
+  assert.equal(stored().ownerAccountId, null, "no owner may be fixed after the deadline");
+});
+
+test("a second account cannot take ownership of an already-approved record", async () => {
+  const { publications, stored } = harness({ seed: "approved" });
+  const before = stored();
+
+  await rejects(
+    publications.decidePublication({
+      publicationId: FIXTURE_PUBLICATION_ID,
+      browserBinding: BINDING,
+      principal: OTHER_PRINCIPAL,
+      decision: "approve",
+      displayedAccountId: OTHER_PRINCIPAL.accountId,
+    }),
+    "state_conflict",
+  );
+  assert.deepEqual(stored(), before, "the owner fixed at approval is permanent");
+
+  /* And a completion still commits to the original owner, not the challenger. */
+  const committed = await publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD });
+  assert.equal(committed.result.ownerAccountId, FIXTURE_OWNER_ACCOUNT_ID);
+  assert.equal(stored().ownerAccountId, FIXTURE_OWNER_ACCOUNT_ID);
+});
+
+test("a completed record's owner survives a retry from a second account's session", async () => {
+  const { publications, stored } = harness({ seed: "complete" });
+  const before = stored();
+
+  const retry = await publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD });
+  assert.equal(retry.created, false);
+  assert.equal(retry.result.ownerAccountId, FIXTURE_OWNER_ACCOUNT_ID);
+
+  await rejects(
+    publications.readOwnedPublication({
+      publicationId: FIXTURE_PUBLICATION_ID,
+      principal: OTHER_PRINCIPAL,
+    }),
+    "not_found",
+  );
+  assert.deepEqual(stored(), before);
 });
 
 test("approval after the pending deadline is refused without any write", async () => {
@@ -763,15 +881,59 @@ test("two identical completions produce one record and one document id", async (
 /* ambiguous provider responses                                        */
 /* ------------------------------------------------------------------ */
 
-test("a completion that commits and then loses its response returns the committed receipt", async () => {
+test("a completion that commits and then loses its response returns its receipt, not a failure", async () => {
   const { publications, provider, stored } = harness({ seed: "approved" });
   provider.failNextWrite({ throwsAfterCommit: true });
 
   const committed = await publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD });
-  assert.equal(committed.created, true);
+  /* The document is stored and it is this caller's document, so the receipt is
+     real. `created` is false because the provider never proved this call is what
+     wrote it, and C3 reserves 201 for the write that first commits a document -
+     the honest answer for an unproven write is the one a retry would get. */
+  assert.equal(committed.created, false);
   assert.deepEqual({ ...committed.result }, { ...FIXTURE_RESULT });
   assert.equal(stored().state, "complete");
   assert.equal(provider.keys().length, 1, "the lost response must not allocate a second id");
+  provider.assertFaultsConsumed();
+});
+
+test("an approval whose response is lost is reported as the approval it was", async () => {
+  const { publications, stored, provider } = harness({ seed: "pending" });
+  provider.failNextWrite({ throwsAfterCommit: true });
+
+  /* Believing the provider's `modified: false` here told the human whose
+     approval had in fact landed that their approval conflicted. */
+  const decided = await publications.decidePublication({
+    publicationId: FIXTURE_PUBLICATION_ID,
+    browserBinding: BINDING,
+    principal: FIXTURE_PRINCIPAL,
+    decision: "approve",
+    displayedAccountId: FIXTURE_PRINCIPAL.accountId,
+  });
+
+  assert.equal(decided.state, "approved");
+  assert.equal(decided.ownerAccountId, FIXTURE_PRINCIPAL.accountId);
+  assert.equal(stored().state, "approved");
+  provider.assertFaultsConsumed();
+});
+
+test("a start whose response is lost keeps its own record instead of orphaning it", async () => {
+  const { publications, provider, stored } = harness();
+  provider.failNextWrite({ throwsAfterCommit: true });
+
+  const started = await publications.createPublication(VALID_DESCRIPTOR);
+
+  assert.equal(provider.keys().length, 1, "no orphan pending record may be left behind");
+  const record = stored();
+  assert.equal(record.id, started.publicationId, "the returned id is the stored record's id");
+  /* And the secrets handed back are the ones the stored record hashes, so the
+     caller can actually use the publication it was told about. */
+  const status = await publications.statusPublication({
+    publicationId: started.publicationId,
+    agentSecret: started.agentSecret,
+  });
+  assert.equal(status.state, "pending");
+  provider.assertFaultsConsumed();
 });
 
 test("a completion that never committed reads back and retries within the deadline", async () => {
@@ -782,14 +944,24 @@ test("a completion that never committed reads back and retries within the deadli
   assert.equal(committed.created, true);
   assert.equal(stored().state, "complete");
 
-  const sets = provider.calls.map((call) => call.op).join(",");
-  assert.match(sets, /set,get,get,set/, "the retry must be preceded by a readback and a fresh read");
+  const ops = provider.calls.map((call) => call.op);
+  const firstSet = ops.indexOf("set");
+  assert.equal(
+    ops[firstSet + 1],
+    "get",
+    "the failed write must be read back before anything else is decided",
+  );
+  assert.ok(ops.slice(firstSet + 1).includes("set"), "and the retry must still happen");
 });
 
 test("an ambiguous completion whose readback fails is retryable and claims nothing", async () => {
-  const { publications, provider } = harness({ seed: "approved" });
+  const { publications, provider, stored } = harness({ seed: "approved" });
   provider.failNextWrite({ throwsAfterCommit: true });
-  provider.failNextRead({ throws: true });
+  /* `skip: 1` is load-bearing. `completePublication` reads the record before it
+     writes, so an unskipped fault is drained by *that* read and the request
+     fails before any write - which makes this a duplicate of the plain
+     read-failure test and leaves the ambiguous-write path uncovered. */
+  provider.failNextRead({ throws: true, skip: 1 });
 
   const error = await rejects(
     publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD }),
@@ -797,6 +969,12 @@ test("an ambiguous completion whose readback fails is retryable and claims nothi
   );
   assert.equal(error.retryable, true);
   assert.equal(error.status, 503);
+  provider.assertFaultsConsumed();
+  assert.equal(
+    stored().state,
+    "complete",
+    "the write did commit; the uncertainty is that this call cannot know it",
+  );
 });
 
 test("a storage read failure is unavailable on every operation, and leaks nothing", async () => {
@@ -821,6 +999,51 @@ test("a storage read failure is unavailable on every operation, and leaks nothin
     const error = await rejects(operation(publications), "unavailable");
     assertCarriesNoSecret(error.toWire());
   }
+});
+
+test("every compare-and-set loop gives up as retryable rather than spinning", async () => {
+  /* A record that keeps changing underneath every attempt. Six lost rounds on a
+     single record is a fault, not contention, so the answer is a retryable 503 -
+     and, critically, the loop terminates at all. */
+  const churn = (provider, seedState) => {
+    let flip = 0;
+    const original = provider.raw(FIXTURE_KEY).data;
+    provider.beforeWrite(async function again() {
+      flip += 1;
+      provider.applyDirectly(FIXTURE_KEY, JSON.parse(original));
+      provider.beforeWrite(again);
+    });
+    return () => flip;
+  };
+
+  const decide = harness({ seed: "pending" });
+  const decideRounds = churn(decide.provider);
+  const decideError = await rejects(
+    decide.publications.decidePublication({
+      publicationId: FIXTURE_PUBLICATION_ID,
+      browserBinding: BINDING,
+      principal: FIXTURE_PRINCIPAL,
+      decision: "approve",
+      displayedAccountId: FIXTURE_PRINCIPAL.accountId,
+    }),
+    "unavailable",
+  );
+  assert.equal(decideError.retryable, true);
+  assert.equal(decideRounds(), MAX_WRITE_ATTEMPTS, "the bound is the attempt limit, exactly");
+  assert.equal(decide.stored().state, "pending");
+
+  const cancel = harness({ seed: "pending" });
+  churn(cancel.provider);
+  assert.equal((await rejects(cancel.publications.cancelPublication(AGENT), "unavailable")).retryable, true);
+  assert.equal(cancel.stored().state, "pending");
+
+  const complete = harness({ seed: "approved" });
+  churn(complete.provider);
+  await rejects(
+    complete.publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD }),
+    "unavailable",
+  );
+  assert.equal(complete.stored().state, "approved", "no document is committed by a give-up");
 });
 
 /* ------------------------------------------------------------------ */

@@ -237,15 +237,77 @@ test("an update with no ETag is a programming error, not an unconditional write"
   assert.equal(JSON.parse(provider.raw(FIXTURE_KEY).data).state, "pending");
 });
 
-test("an update that commits and then throws is resolved by readback as committed", async () => {
+test("an update that commits and then throws reads back as observed, not committed", async () => {
   const { provider, store } = harness();
   const created = await store.create(RECORDS.pending);
   provider.failNextWrite({ throwsAfterCommit: true });
 
   const written = await store.update(RECORDS.complete, created.etag);
-  assert.equal(written.outcome, "committed");
+  /* The stored state is the intended state, but the provider never confirmed
+     this call wrote it - so it is `observed`, and a caller that must know
+     whether it created the document has to treat that differently. */
+  assert.equal(written.outcome, "observed");
   assert.ok(written.etag.length > 0);
   assert.equal(JSON.parse(provider.raw(FIXTURE_KEY).data).state, "complete");
+  provider.assertFaultsConsumed();
+});
+
+test("a refused update is read back, because a 412 is not proof that no write happened", async () => {
+  const { provider, store } = harness();
+  const created = await store.create(RECORDS.pending);
+
+  /* The exact shape `@netlify/blobs` produces when a conditional PUT commits and
+     then loses its response: the client re-sends the same `If-Match`, a server
+     that has already applied it answers 412, and `setJSON` resolves
+     `modified: false`. Believing that would report a successful write as a
+     conflict. */
+  provider.beforeWrite(async () => {
+    provider.applyDirectly(FIXTURE_KEY, RECORDS.complete);
+  });
+  const written = await store.update(RECORDS.complete, created.etag);
+
+  assert.equal(written.outcome, "observed");
+  assert.equal(JSON.parse(provider.raw(FIXTURE_KEY).data).state, "complete");
+  const ops = provider.calls.map((call) => call.op);
+  assert.equal(ops.at(-1), "get", "a refused write must be read back before it is believed");
+});
+
+test("a refused create is read back, so a lost response does not abandon its own record", async () => {
+  const { provider, store } = harness();
+
+  provider.beforeWrite(async () => {
+    provider.applyDirectly(FIXTURE_KEY, RECORDS.pending);
+  });
+  const created = await store.create(RECORDS.pending);
+
+  assert.equal(created.outcome, "created", "the record at the key is this call's own record");
+  assert.ok(created.etag.length > 0);
+  assert.equal(provider.keys().length, 1, "no orphan record is left behind");
+});
+
+test("a malformed update result is read back rather than believed", async () => {
+  const { provider, store } = harness();
+  const created = await store.create(RECORDS.pending);
+  /* The real package returns this for any conditional-write status that is
+     neither 200 nor 412 - including a success whose response carried no ETag
+     header - so it is the likeliest ambiguous shape to reach `update`. */
+  provider.failNextWrite({ result: { modified: true, etag: "" } });
+
+  const written = await store.update(RECORDS.approved, created.etag);
+  assert.equal(written.outcome, "observed");
+  assert.ok(written.etag.length > 0, "the readback must supply the ETag the write did not");
+  assert.equal(JSON.parse(provider.raw(FIXTURE_KEY).data).state, "approved");
+  provider.assertFaultsConsumed();
+});
+
+test("a hit whose ETag header is absent is unavailable, in either spelling", async () => {
+  for (const fault of [{ omitEtag: true }, { emptyEtag: true }]) {
+    const { provider, store } = harness();
+    await store.create(RECORDS.pending);
+    provider.failNextRead(fault);
+    await rejects(store.read(FIXTURE_PUBLICATION_ID), "unavailable");
+    provider.assertFaultsConsumed();
+  }
 });
 
 test("an update that throws before committing is refused, and readback precedes the answer", async () => {
@@ -279,16 +341,22 @@ test("an update whose readback shows somebody else's record is refused, not over
   const { provider, store } = harness();
   const created = await store.create(RECORDS.pending);
 
-  /* A cancellation lands between our read and our write, then our response is
-     lost. The readback shows a record that is not ours, so the caller is sent
-     back to re-evaluate rather than told it won. */
+  /* A cancellation lands between our read and our write. The write is refused,
+     the readback shows a record that is not ours, and the caller is sent back to
+     re-evaluate rather than told either that it won or that nothing happened. */
   provider.beforeWrite(async () => {
     await store.update(RECORDS.cancelled, provider.raw(FIXTURE_KEY).etag);
   });
+  const before = provider.calls.length;
   const written = await store.update(RECORDS.complete, created.etag);
 
   assert.equal(written.outcome, "refused");
   assert.equal(JSON.parse(provider.raw(FIXTURE_KEY).data).state, "cancelled");
+  assert.equal(
+    provider.calls.slice(before).at(-1).op,
+    "get",
+    "the refusal must be reached through a readback",
+  );
 });
 
 test("the adapter never issues an unconditional write", async () => {

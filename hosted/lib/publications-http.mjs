@@ -142,7 +142,18 @@ export function publicationIdFrom(request, verb) {
   if (match === null) {
     throw new HostedContractError("not_found", "unknown publication route", { field: "path" });
   }
-  return decodeURIComponent(match[1]);
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    /* `decodeURIComponent` throws `URIError` on a malformed escape such as
+       `%zz`, and a `URIError` is not a `HostedContractError` - so without this
+       it would be replaced wholesale by `errorResponse` with a *retryable* 503,
+       and a conforming client would loop forever on a request that can never
+       succeed. A malformed id is the caller's mistake, and it is a 400. */
+    throw new HostedContractError("invalid_request", "publicationId is not a valid path segment", {
+      field: "publicationId",
+    });
+  }
 }
 
 /**

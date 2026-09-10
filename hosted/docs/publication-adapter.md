@@ -45,9 +45,19 @@ A dependency set is:
 | `store` | a `createPublicationStore({ getStore })` adapter |
 | `appOrigin` | the configured app origin; receipts and the approval URL are built on it |
 | `production` | `false` only for the loopback-only local-test mode |
-| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; `createPublication` is the only operation that reads it |
+| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; `createPublication` is the only operation that reads it (see below) |
 | `now` | `() => epochMilliseconds`, defaulting to `Date.now` |
 | `randomBytes` | `(size) => Uint8Array`, defaulting to `node:crypto` |
+
+`publishEnabled` gating only `createPublication` is a decision, not an omission.
+Turning publishing off stops new publications from starting; it does not revoke
+authorisation users already hold, so for up to
+`PENDING_TTL_SECONDS + UPLOAD_TTL_SECONDS` (25 minutes) an already-started
+publication can still be approved and can still commit its bytes. The
+alternative — a human's approval becoming a 503 after they gave it, and documents
+stranded mid-upload — is worse. An operator who needs the harder stop takes the
+deployment down. `statusPublication` skips the flag for a different reason: a
+receipt for an already-published document must survive the switch.
 
 `publicationDependencies({ env, getStore, mode })` builds the first four from
 `readHostedConfig`. It does not open the store — `createPublicationStore` opens
@@ -74,6 +84,25 @@ The review projection is `{v, publicationId, descriptor, userCode, state,
 ownerAccountId, currentAccountId, expiresAt}`. It never carries a secret hash and
 never carries `html`, in any state.
 
+> **`readPublication` and `readOwnedPublication` are server-internal reads, not
+> HTTP projections. Project before you serialise.**
+>
+> C3 freezes both as returning the stored record, and a stored record carries
+> `agentSecretHash` and `browserSecretHash` as well as, once complete, the
+> document. `browserSecretHash` is not merely a digest of a capability: C3 also
+> freezes `bindPublication` as returning `{publicationId, browserSecretHash}`,
+> and `reviewPublication` / `decidePublication` authorise a binding by comparing
+> the *presented* hash to the stored one — so the stored value is itself
+> replayable as the browser binding. A consumer that serialises one of these
+> records into a response body, a page, or a JSON island publishes the ability to
+> approve that publication. Build a projection with the two hashes and (except
+> for the owner's own document route) `html` removed.
+>
+> Hardening the binding itself — an HMAC under a server key, or keeping the
+> browser secret in the cookie and re-running the secret verifier — would change
+> a frozen C3 shape and needs a coordinated contract edit, so it is filed rather
+> than done here.
+
 `completePublication` returns `created: true` for the write that actually
 committed the document and `created: false` for an identical retry of an
 already-completed publication. AHU-008 maps those to HTTP 201 and 200.
@@ -89,7 +118,7 @@ at every use, because nothing in v1 deletes a record.
 | --- | --- | --- | --- |
 | `pending` | → `approved` / `denied`, owner fixed | `403 approval_required` | → `cancelled` |
 | `approved` | `409 state_conflict` | → `complete` | → `cancelled` |
-| `complete` | `409 state_conflict` | identical bytes → the same receipt; anything else → `409 descriptor_mismatch` | returns the receipt; **never deletes** |
+| `complete` | `409 state_conflict` | identical bytes → the same receipt; anything else → `409 descriptor_mismatch` | returns the receipt; **never deletes**. Past the receipt deadline, `410 receipt_expired` — cancel returns the receipt, so it is bounded by the receipt window too |
 | `denied` | `409 state_conflict` | `409 state_conflict` | returns `denied` |
 | `cancelled` | `409 state_conflict` | `409 state_conflict` | returns `cancelled` |
 | `expired` | `410 authorization_expired` | `410 authorization_expired` | returns `expired` |
@@ -111,7 +140,7 @@ codes this module produces:
 | `invalid_capability` | a bearer or browser binding that does not match the record |
 | `approval_required` | an upload against a publication nobody has approved |
 | `csrf_failed` | the account the approval page displayed is not the session account |
-| `not_found` | no such publication — and every owner-read refusal, so the route is not an ownership oracle |
+| `not_found` | no such publication — and every owner-read refusal, so that route is not an ownership oracle. Note that `statusPublication`, `cancelPublication` and `bindPublication` deliberately do *not* flatten `invalid_capability` into this, so a genuinely wrong bearer stays distinguishable from a mistyped id; the id is 128-bit, so the residual existence oracle needs the id already |
 | `descriptor_mismatch` | bytes that are not the approved descriptor, or a differing retry of a completed record |
 | `state_conflict` | a transition out of a terminal state |
 | `authorization_expired` | the approval or upload deadline has passed |
@@ -126,20 +155,35 @@ version is never coerced into `pending` or `complete`.
 ## Ambiguous writes
 
 `@netlify/blobs` resolves a conditional `setJSON` as `{modified: true, etag: ""}`
-for any response status that is neither 200 nor 412, and it can throw after the
-provider has already committed. So a write result is treated as exactly one of
-three things:
+for any response status that is neither 200 nor 412, it can throw after the
+provider has already committed, **and it retries the same conditional PUT up to
+five times on a network error or a 5xx**. That last one is why a resolved
+`modified: false` is not proof that nothing was written: a write that commits and
+then loses its response is re-sent with the same `If-Match`, answered 412 by a
+server that has already applied it, and arrives as `modified: false`.
 
-* **committed** — `modified: true` with a non-empty ETag.
-* **refused** — a resolved `modified: false`. This is positive proof that no
-  write occurred, and it is the only outcome a caller may retry on.
-* **ambiguous** — anything else. The adapter reads the key back with strong
-  consistency and compares it to the exact record it tried to write. A match is
-  a commit. A different record means the caller must re-evaluate its whole
-  transition against fresh state and a fresh clock reading. A readback that
-  *also* fails surfaces as retryable `unavailable` with the uncertainty intact —
-  never as a definitive failure, and never as a retry that would allocate a
-  second document.
+So only one shape is taken at face value, and everything else is read back:
+
+* **committed** — `modified: true` with a non-empty ETag. This call wrote the
+  record.
+* **observed** — the readback shows exactly the record that was intended, but the
+  provider's answer did not prove this call wrote it. The state the caller wanted
+  is the state that is stored.
+* **refused** — the readback shows a different record, or none. The caller
+  re-evaluates its whole transition against fresh state and a fresh clock
+  reading. It must not assume its write lost.
+
+A readback that *also* fails surfaces as retryable `unavailable` with the
+uncertainty intact — never as a definitive failure, and never as a retry that
+would allocate a second document.
+
+`observed` is the distinction that matters to consumers. `decidePublication` and
+`cancelPublication` treat it as success, because the approver or canceller asked
+for a state and that state is stored — reporting a conflict there told a human
+their successful approval had failed. `completePublication` treats it as
+`created: false`, because C3 reserves 201 for the write that first commits a
+document and an unproven write cannot claim it; the receipt is still returned, so
+the caller gets the same answer a retry would give rather than an error.
 
 Each attempt of a compare-and-set loop re-reads the record, re-reads the clock,
 and re-checks every guard: state, owner, digest, length and deadline. A write
