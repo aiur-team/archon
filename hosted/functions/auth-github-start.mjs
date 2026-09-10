@@ -19,9 +19,17 @@
  * hand a value to the static sign-in page for it to echo back - the body may not
  * carry it and JavaScript may not read the cookie.
  *
- * So the binding is presence and freshness rather than an echo, and it rests on
- * two independent properties:
+ * So the binding is not an echo. It is a server-issued, single-use secret held
+ * in a cookie, and it rests on three independent properties:
  *
+ *  - **Provenance.** `GET /api/hosted/session` mints the value with
+ *    `createTransient("login")` and stores only its hash. This route consumes
+ *    the presented cookie against that record, so a cookie a client simply made
+ *    up is refused. An earlier version accepted any well-formed value on the
+ *    grounds that the two properties below carried the defence; they do, but "a
+ *    captured binding cannot be replayed" was then not true of a *fabricated*
+ *    one, and a presence check is not the "separate transient CSRF binding" C1
+ *    asks for.
  *  - **`SameSite=Lax` withholds the cookie from a cross-site POST entirely.** A
  *    form on another origin that posts here carries no `__Host-archon_login` at
  *    all, so "the cookie is present" is by itself a statement that the request
@@ -29,10 +37,10 @@
  *  - **The `Origin` header must equal the one configured app origin exactly.**
  *    Browsers send it on every form POST and every state-changing fetch.
  *
- * And the binding is single-use: the first use writes a claim marker with
- * `onlyIfNew`, so a captured value cannot be replayed and every sign-in attempt
- * is a fresh transaction. A retry therefore starts a new transaction rather than
- * replaying a consumed one, which is what C1 asks of a login retry.
+ * And it is single-use: consumption is a compare-and-set on the issued record,
+ * so a captured value cannot be replayed and every sign-in attempt is a fresh
+ * transaction. A retry therefore starts a new transaction rather than replaying
+ * a consumed one, which is what C1 asks of a login retry.
  *
  * ## Failures are pages, not envelopes
  *
@@ -151,12 +159,15 @@ export function createStartRoute({ store, config: hostedConfig }) {
       await store.revokeSession(sessionToken);
       cookies.push(clearCookie(SESSION_COOKIE));
     } else {
-      /* One check, not two: `claimTransient` refuses an absent or malformed
-         token as well as an already-claimed one, and all three are the same
-         answer here. A separate null check above it would be a guard no input
-         could reach on its own. */
+      /* The binding must be one this service *issued*, not merely one that is
+         well-formed. `consumeTransient` answers both halves at once: it finds
+         the record `GET /api/hosted/session` minted for this browser, and wins
+         the compare-and-set that makes it single-use. Absent, malformed,
+         fabricated, expired and already-redeemed all come back as the same
+         null, which is the same answer to the caller and deliberately gives a
+         racing attacker nothing to tell them apart by. */
       const binding = readCookie(request, LOGIN_COOKIE);
-      if (!(await store.claimTransient("login", binding))) throw new CsrfFailedError();
+      if ((await store.consumeTransient("login", binding)) === null) throw new CsrfFailedError();
       cookies.push(clearCookie(LOGIN_COOKIE));
     }
 

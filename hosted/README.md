@@ -215,11 +215,18 @@ Four things are load-bearing:
   that throws is *ambiguous* — a timed-out request may still have applied — so
   the record is read back. Dead means success; live means an outage, and an
   outage is an `AuthUnavailableError` rather than a claim of success.
-- **The pre-login binding is claimed, not issued.** `claimTransient` writes the
-  single-use marker when a token is first *used*, so the route that hands out
-  the binding writes nothing at all. Minting a record on an unauthenticated
-  `GET` made that route an anonymous write amplifier into the same store the
-  sessions live in.
+- **The pre-login binding has provenance.** `GET /api/hosted/session` mints it
+  with `createTransient("login")` and stores only its hash; the start route
+  redeems the presented cookie with `consumeTransient("login", …)`. So the
+  binding proves two things — this browser was handed the value by this
+  deployment, and it has not been spent — rather than only that some
+  well-formed cookie was present. An earlier version wrote nothing at issue
+  time and let the start route claim any 32–256 character token once, to keep an
+  unauthenticated `GET` from writing; that made a *fabricated* cookie as good as
+  an issued one, and left `SameSite=Lax` plus the exact `Origin` carrying the
+  whole CSRF defence alone. The record it now writes is what the redemption
+  checks against, and it is bounded by the same fifteen-minute window as every
+  other transient.
 
 Nothing schedules a cleanup. Expiry is enforced on every lookup, so physical
 records outliving their lifetimes is the normal case rather than an anomaly; see
@@ -282,7 +289,7 @@ defended. The legacy root login's `safeNext` is deliberately *not* reused: its
 
 | Route | Method | Behaviour |
 | --- | --- | --- |
-| `/api/hosted/session` | `GET` | `{v:1, authenticated:false}` (and issues the pre-login binding) or `{v:1, authenticated:true, accountId, login, csrfToken}`. |
+| `/api/hosted/session` | `GET` | `{v:1, authenticated:false}` or `{v:1, authenticated:true, accountId, login, csrfToken}`. Both answers issue a fresh pre-login binding; the signed-out answer also clears a dead session cookie. |
 | `/api/hosted/auth/github/start` | `POST` | Begins a browser-bound authorization; `303` to GitHub. |
 | `/api/hosted/auth/github/callback` | `GET` | Consumes state once, rotates the session, `303` to the stored destination. |
 | `/api/hosted/auth/logout` | `POST` | Revokes server-side, then clears the cookie. |
@@ -571,12 +578,14 @@ records older than those windows is safe at any time and is the whole of the
 maintenance this ticket asks for. Do not assume the store offers a TTL or a
 conditional delete — this design does not depend on either.
 
-`GET /api/hosted/session` writes nothing, so no unauthenticated read can grow
-the store. The remaining anonymous write surface is `POST
-/api/hosted/auth/github/start`, which writes one claim marker and one
-transaction per accepted request. Rate limiting that route is a platform
-concern this ticket does not implement; the records it creates are small and are
-covered by the same fifteen-minute retention window.
+The anonymous write surface is two routes. `GET /api/hosted/session` writes one
+small `auth/login/` record per request — the pre-login binding it issues, which
+exists so the start route can prove the binding came from here — and `POST
+/api/hosted/auth/github/start` writes one `auth/oauth/` transaction per accepted
+request. Both are covered by the fifteen-minute retention window above, and
+neither can grow `sessions/`. Rate limiting is a platform concern this ticket
+does not implement; if an operator wants a cheaper anonymous `GET`, the lever is
+a rate limit in front of the route, not a binding with no provenance.
 
 ### Live acceptance is still owed
 

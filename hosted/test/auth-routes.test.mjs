@@ -25,6 +25,7 @@ import {
   LOGIN_COOKIE,
   OAUTH_COOKIE,
   SESSION_COOKIE,
+  SESSION_COOKIE_MAX_AGE,
   createPendingBinding,
   deriveCsrfToken,
   identifyHosted,
@@ -129,15 +130,57 @@ test("the signed-out response issues the pre-login binding and nothing else", as
   assert.ok(!/domain=/i.test(cookies.get(LOGIN_COOKIE)));
 });
 
-test("an anonymous GET writes nothing to the store", async () => {
+test("an anonymous GET writes only the login binding it issues", async () => {
   const app = deployment();
   for (let i = 0; i < 5; i += 1) await app.session(browserRequest("/api/hosted/session"));
+  const keys = app.blobs.keys();
+  assert.equal(keys.length, 5, "one issued binding record per bootstrap and nothing else");
+  assert.ok(keys.every((key) => key.startsWith("auth/login/")), keys.join(", "));
   assert.deepEqual(
-    app.blobs.keys(),
+    keys.filter((key) => key.startsWith("sessions/")),
     [],
-    "a client that never returns its cookie must not mint one permanent record per request",
+    "an unauthenticated read must never touch the session namespace",
   );
-  assert.deepEqual(app.blobs.writes, []);
+});
+
+test("a signed-in visitor is issued a usable pre-login binding too", async () => {
+  const app = deployment();
+  const { token } = await signIn(app);
+
+  const response = await app.session(
+    browserRequest("/api/hosted/session", { cookies: { [SESSION_COOKIE]: token } }),
+  );
+  const body = await response.json();
+  assert.equal(body.authenticated, true);
+  const login = cookieValue(setCookies(response).get(LOGIN_COOKIE));
+  assert.match(login ?? "", /^[A-Za-z0-9_-]{32,}$/, "the authenticated branch must issue one");
+
+  /* The whole point: the primary button on the sign-in page is a form POST, and
+     for a signed-in visitor it used to arrive with no binding at all and bounce
+     off `/login/?status=expired` with nothing to act on. */
+  const started = await app.start(
+    browserRequest("/api/hosted/auth/github/start", {
+      method: "POST",
+      cookies: { [SESSION_COOKIE]: token, [LOGIN_COOKIE]: login },
+      form: {},
+    }),
+  );
+  assert.equal(started.status, 303);
+  assert.ok(started.headers.get("location").startsWith("https://github.com/login/oauth/authorize"));
+});
+
+test("a dead session cookie is cleared by the signed-out answer", async () => {
+  const app = deployment();
+  const { token } = await signIn(app);
+  await app.store.revokeSession(token);
+
+  const response = await app.session(
+    browserRequest("/api/hosted/session", { cookies: { [SESSION_COOKIE]: token } }),
+  );
+  assert.deepEqual(await response.json(), { v: 1, authenticated: false });
+  const cleared = setCookies(response).get(SESSION_COOKIE);
+  assert.equal(cookieValue(cleared), "", "a revoked token must not stay in the browser");
+  assert.match(cleared, /Max-Age=0/);
 });
 
 test("a bootstrap does not consume an existing OAuth state or publication binding", async () => {
@@ -297,7 +340,12 @@ test("a start from the wrong origin, or with no origin, is refused before anythi
     assert.equal(page.status, 303);
     assert.equal(page.headers.get("location"), "/login/?status=expired");
   }
-  assert.deepEqual(app.blobs.keys(), [], "a refused start writes no transaction and claims no binding");
+  assert.deepEqual(
+    app.blobs.keys().filter((key) => !key.startsWith("auth/login/")),
+    [],
+    "a refused start writes no transaction; the untouched binding is still live",
+  );
+  assert.notEqual(await app.store.readTransient("login", login), null, "and was not consumed");
 });
 
 test("a start with no binding cookie, or a replayed one, is refused", async () => {
@@ -311,9 +359,10 @@ test("a start with no binding cookie, or a replayed one, is refused", async () =
     browserRequest("/api/hosted/auth/github/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, json: {} }),
   );
   assert.equal(first.status, 303);
-  assert.ok(
-    app.blobs.keys().some((key) => key.startsWith("auth/login/")),
-    "the first use is what writes the claim marker",
+  assert.equal(
+    await app.store.readTransient("login", login),
+    null,
+    "the first use consumes the issued record",
   );
 
   const replay = await app.start(
@@ -323,9 +372,11 @@ test("a start with no binding cookie, or a replayed one, is refused", async () =
   assert.equal((await replay.json()).error.code, "csrf_failed");
 });
 
-test("a malformed binding cookie is refused without writing anything", async () => {
+test("a malformed or fabricated binding cookie is refused without writing anything", async () => {
   const app = deployment();
-  for (const binding of ["", "short", "not/base64url/at/all", "x".repeat(300)]) {
+  /* The last one is well-formed and simply was never issued by this deployment:
+     the binding is provenance, not a shape check. */
+  for (const binding of ["", "short", "not/base64url/at/all", "x".repeat(300), "c".repeat(43)]) {
     const response = await app.start(
       browserRequest("/api/hosted/auth/github/start", {
         method: "POST",
@@ -474,9 +525,18 @@ test("a whole sign-in lands on the requested destination as the right account", 
 });
 
 test("the session cookie lifetime is the seven-day absolute expiry", async () => {
+  /* Both numbers are written out rather than read from the modules under
+     test. Advancing the clock by the production constant would pass for any
+     value of it: a thirty-day server record and a seven-day cookie would look
+     consistent here while a copied token outlived the cookie by three weeks. */
+  const SEVEN_DAYS = 604800;
+  assert.equal(SESSION_TTL_SECONDS, SEVEN_DAYS, "C1 freezes the record at seven days");
+  assert.equal(SESSION_COOKIE_MAX_AGE, SEVEN_DAYS, "the cookie may not outlive the record");
+  assert.equal(SESSION_COOKIE_MAX_AGE, SESSION_TTL_SECONDS);
+
   const app = deployment();
   const { token } = await signIn(app);
-  app.clock.advanceSeconds(SESSION_TTL_SECONDS - 1);
+  app.clock.advanceSeconds(SEVEN_DAYS - 1);
   assert.notEqual(await app.store.readSession(token), null);
   app.clock.advanceSeconds(2);
   assert.equal(await app.store.readSession(token), null);
@@ -559,6 +619,20 @@ test("a denied consent is a normal outcome with an actionable retry", async () =
   );
   assert.equal(setCookies(response).has(SESSION_COOKIE), false);
   assert.equal(app.provider.calls.length, 0, "a denied consent never redeems a code");
+
+  /* The transaction is over, so the state must be spent. While it stayed live,
+     anyone holding a copy of the cookie and the callback URL could redeem it
+     with any code for the rest of the fifteen-minute window - and the visitor
+     who pressed Cancel is the one person known not to want that. */
+  assert.equal(await app.store.readTransient("oauth", state), null, "the state is consumed");
+  const replay = await app.callback(
+    browserRequest(`/api/hosted/auth/github/callback?state=${state}&code=c`, {
+      cookies: { [OAUTH_COOKIE]: binding },
+    }),
+  );
+  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
+  assert.equal(app.provider.calls.length, 0);
 });
 
 test("a provider that refuses, or misbehaves, signs nobody in", async () => {

@@ -449,42 +449,6 @@ export class AuthStore {
     });
   }
 
-  /**
-   * Record the first use of a browser-supplied transient token.
-   *
-   * The inverse of `createTransient`: no record exists until the token is
-   * *used*, so the issuing response writes nothing at all. That is what keeps an
-   * unauthenticated `GET` from being a write amplifier - a client that never
-   * returns its cookie would otherwise mint one permanent record per request,
-   * and nothing in this design collects them.
-   *
-   * Single use still holds, because the claim is an `onlyIfNew` write: the first
-   * caller creates the marker, every later caller is refused by the store. What
-   * is deliberately *not* claimed is provenance. Any well-formed token can be
-   * claimed once, and that is sound here because the pre-login binding's CSRF
-   * property comes from `SameSite=Lax` plus the exact `Origin` - a cross-site
-   * POST carries no cookie at all - rather than from the value having been
-   * minted by this service.
-   *
-   * @returns {Promise<boolean>} true when this call is the token's first use.
-   */
-  async claimTransient(kind, token, { ttlSeconds = TRANSIENT_TTL_SECONDS } = {}) {
-    if (!TRANSIENT_KINDS.includes(kind)) throw new TypeError(`unknown transient kind: ${kind}`);
-    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(token)) return false;
-    const at = this.now();
-    const record = {
-      v: 1,
-      kind,
-      payload: {},
-      createdAt: isoAt(at),
-      expiresAt: isoAt(at + ttlSeconds * 1000),
-      consumedAt: isoAt(at),
-      revokedAt: null,
-      writeId: randomToken(),
-    };
-    return this.#applyGuarded(AuthStore.transientKey(kind, token), record, { onlyIfNew: true });
-  }
-
   /** Kill a transient record without consuming it, e.g. clearing a binding. */
   async revokeTransient(kind, token) {
     if (typeof token !== "string" || token === "") return false;

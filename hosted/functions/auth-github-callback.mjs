@@ -117,8 +117,22 @@ export function createCallbackRoute({ store, config: hostedConfig, fetchImpl }) 
 
     /* A denied consent still arrives with a valid binding, so it is checked
        after it and before the exchange. It is a normal outcome, not a transport
-       failure. */
-    if (url.searchParams.get("error") !== null) return failed("denied", { destination });
+       failure - but the transaction is over either way, so the state is consumed
+       here too. Leaving it live let a captured cookie-and-state pair be redeemed
+       with any code for the rest of the fifteen-minute window; the visitor who
+       cancelled is the one person we know did not intend that. A consume that
+       loses or errors changes nothing about the answer: the visitor still lands
+       on the denied page. */
+    if (url.searchParams.get("error") !== null) {
+      try {
+        await store.consumeTransient("oauth", state);
+      } catch {
+        /* An outage while retiring an already-refused transaction is not worth
+           a different page. The record expires on its own within fifteen
+           minutes and is checked on every read. */
+      }
+      return failed("denied", { destination });
+    }
 
     let transaction;
     try {

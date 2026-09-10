@@ -268,21 +268,26 @@ test("a read with no ETag refuses the compare-and-set instead of downgrading it"
   assert.notEqual(await store.readTransient("oauth", transient.token), null);
 });
 
-test("a claim is single use and needs no prior record", async () => {
-  const { store, blobs } = memoryAuthStore();
-  const token = "c".repeat(43);
-  assert.deepEqual(blobs.keys(), [], "issuing a binding writes nothing");
-  assert.equal(await store.claimTransient("login", token), true);
-  assert.equal(await store.claimTransient("login", token), false, "a replay must lose");
-  assert.equal(await store.readTransient("login", token), null, "a claim is already consumed");
+test("a login binding is single use and must have been issued here", async () => {
+  const { store } = memoryAuthStore();
+  const issued = await store.createTransient("login");
+  assert.notEqual(await store.consumeTransient("login", issued.token), null);
+  assert.equal(await store.consumeTransient("login", issued.token), null, "a replay must lose");
+  assert.equal(await store.readTransient("login", issued.token), null);
 });
 
-test("a malformed claim token is refused without writing", async () => {
+test("a login binding this store never issued is refused", async () => {
   const { store, blobs } = memoryAuthStore();
+  /* Well-formed in every respect and simply not ours. An earlier design read
+     only the shape of the value, so this fabricated token was accepted once and
+     the binding proved nothing beyond `SameSite` and `Origin`. */
+  const fabricated = "c".repeat(43);
+  assert.equal(await store.consumeTransient("login", fabricated), null);
+
   for (const token of ["", "short", "has/slash".padEnd(40, "a"), "x".repeat(300), null, 12]) {
-    assert.equal(await store.claimTransient("login", token), false, String(token));
+    assert.equal(await store.consumeTransient("login", token), null, String(token));
   }
-  assert.deepEqual(blobs.keys(), []);
+  assert.deepEqual(blobs.keys(), [], "refusing an unissued binding writes nothing");
 });
 
 test("reading a consumed transient record finds nothing", async () => {
