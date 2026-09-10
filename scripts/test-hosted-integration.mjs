@@ -113,7 +113,7 @@ const TRANSCRIPT = /^PASS {2}hosted integration matrix \(chromium [\w.]+; (\d+) 
  * caught somewhere forgiving would otherwise print a line that reads like a
  * full run.
  */
-const EXPECTED_CASES = 101;
+const EXPECTED_CASES = 102;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -2142,14 +2142,12 @@ async function providerFailures(world, browser) {
   const signedIn = await currentSession(page);
   assert.equal(signedIn.authenticated, true, "the sign-in produced no session");
 
-  /* Replayed into the browser that made it: the transaction is consumed, so a
-     second arrival is refused rather than minting a second session.
-
-     The provider fixture also issues single-use codes, so a refusal on its own
-     does not say who refused. `tokenCalls` is what separates them: the callback
-     handler consumes the OAuth transaction *before* it exchanges the code, so
-     an application that still holds the guard never reaches the provider, and
-     one that lost it does. */
+  /* Replayed into the browser that made it. A completed sign-in clears the
+     transaction's binding cookie, so this replay is refused at the first line
+     of the handler -- it never reaches the store and never reaches the
+     provider, which `tokenCalls` records. What this case owns is the *cookie*
+     half; the consumed-transaction half is 3.1c below, which replays with the
+     cookie still in hand. */
   const tokenCallsBeforeReplay = provider.state.tokenCalls;
   await page.goto(callbackUrl);
   await page.waitForURL(
@@ -2190,6 +2188,74 @@ async function providerFailures(world, browser) {
   );
   record("auth: an OAuth callback replayed into another browser signs nobody in");
   await stranger.close();
+
+  /* 3.1c The replay that still holds the transaction's binding cookie.
+   *
+   * The two cases above are refused by the *cookie*: a completed sign-in clears
+   * `__Host-archon_oauth`, so a second arrival never gets past the first line of
+   * the handler. That leaves the record's own single-use guard unowned, and a
+   * captured cookie is exactly what an attacker who wanted to redeem the state a
+   * second time would have. So the cookie is read out of the jar while the
+   * visitor is still on the provider's chooser -- the one moment it legitimately
+   * exists -- and the callback is replayed with it afterwards, from outside the
+   * browser because a browser cannot re-send a cookie the server has cleared.
+   *
+   * The refusal it must produce is the application's, not the fixture's: the
+   * fixture also issues single-use codes, so `tokenCalls` is what separates the
+   * two. The handler consumes the transaction *before* it exchanges the code, so
+   * an application holding the guard never reaches the provider at all. */
+  const captured = await openContext(world, browser);
+  const capturedPage = await captured.newPage();
+  const capturedCallbacks = [];
+  capturedPage.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/hosted/auth/github/callback") capturedCallbacks.push(request.url());
+  });
+  await capturedPage.goto(`${app.origin}/login/?destination=%2Flogin%2F`);
+  await waitFor(
+    async () => !(await capturedPage.locator("#submit").isDisabled()),
+    "the sign-in binding for the captured-cookie replay",
+  );
+  await capturedPage.locator("#submit").click();
+  await capturedPage.locator("#pick-first").waitFor({ state: "visible", timeout: 30_000 });
+
+  /* Mid-flight: the transaction is open and its binding cookie is live. */
+  const oauthCookie = (await captured.cookies())
+    .find((cookie) => cookie.name === "__Host-archon_oauth");
+  assert.notEqual(oauthCookie, undefined, "the sign-in set no OAuth binding cookie to capture");
+
+  await capturedPage.locator("#pick-first").click();
+  await waitFor(async () => {
+    if (!capturedPage.url().startsWith(app.origin)) return false;
+    try {
+      return (await currentSession(capturedPage)).authenticated === true;
+    } catch {
+      return false;
+    }
+  }, "the captured-cookie sign-in to produce a session");
+  assert.equal(capturedCallbacks.length, 1, "the captured sign-in produced no single callback");
+
+  const tokenCallsBeforeCapturedReplay = provider.state.tokenCalls;
+  const replayed = await fetch(capturedCallbacks[0], {
+    redirect: "manual",
+    headers: { cookie: `${oauthCookie.name}=${oauthCookie.value}` },
+  });
+  assert.equal(
+    provider.state.tokenCalls,
+    tokenCallsBeforeCapturedReplay,
+    "a replay carrying the captured binding cookie was exchanged with the provider a second time",
+  );
+  assert.equal(
+    new URL(replayed.headers.get("location"), app.origin).searchParams.get("status"),
+    "expired",
+    "a replay carrying the captured binding cookie was not refused",
+  );
+  assert.ok(
+    (replayed.headers.getSetCookie() ?? []).every((cookie) => !cookie.startsWith("__Host-archon_session=")),
+    "a refused replay handed out a session cookie",
+  );
+  record("auth: a callback replayed with the transaction's own binding cookie is refused before the provider");
+  await captured.close();
 
   /* 3.2 The provider is down. The visitor must be told that, and must not be
          told it expired -- "we could not find out" and "no" are different

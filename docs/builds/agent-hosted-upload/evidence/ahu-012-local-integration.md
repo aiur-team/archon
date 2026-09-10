@@ -24,7 +24,7 @@ Five servers on loopback, plus a browser, plus two child-process clients.
 
 Browser: Chromium, pinned via `playwright@1.55.0`. The exact build is printed in
 the runner's own PASS line, e.g.
-`PASS  hosted integration matrix (chromium 140.0.7339.16; 101 cases)`.
+`PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)`.
 
 Once the servers are up, nothing in the matrix contacts a network host.
 `github.com` is the only external name the browser may resolve and it resolves
@@ -133,7 +133,7 @@ gap that more local cases would close.
 
 ## What the run covers
 
-One hundred and one cases across ten matrices, each named in the runner and counted by
+One hundred and two cases across ten matrices, each named in the runner and counted by
 its supervisor:
 
 1. The whole happy path — clean-installed client, browser approval, a *second*
@@ -145,7 +145,8 @@ its supervisor:
    opened the link trying to decide the publication anyway, a browser bound to
    one publication trying to decide another, and the adapter's own binding check
    presented with a digest no browser could construct.
-3. Provider faults — a replayed callback in the same browser and in another, an
+3. Provider faults — a replayed callback in the same browser and in another, a
+   replay carrying the transaction's own binding cookie captured mid-flight, an
    outage, and a grant carrying an unexpected scope.
 4. Upload and receipt — a client-supplied owner, an unapproved upload, altered
    bytes, a wrong media type, the identical retry, a retry carrying *other*
@@ -215,7 +216,16 @@ node scripts/test-hosted-integration.mjs   # from the worktree root
 | M3 | the descriptor recheck in `completePublication`'s approved branch | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
 | M3b | the descriptor recheck in `completePublication`'s already-complete branch | **fails** — `a completed publication accepted other bytes with status 200` |
 | M4 | the ambiguous-write readback in `createPublicationStore.update` (`return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}`) | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
-| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 101 cases)` |
+| M5 | the browser-secret check in `bindPublication` (`hosted/lib/publications.mjs`) | **fails** — `timed out waiting for the approval page to refuse a mutated link` |
+| M6 | the bound-id check in `requireBrowserBinding` (`hosted/lib/publication-browser-binding.mjs`) | **fails** — `a decision for a publication this browser never bound was answered 401` |
+| M7 | both `consumedAt` guards in `AuthStore` (`readTransient` and `consumeTransient`) | **fails** — `a replay carrying the captured binding cookie was exchanged with the provider a second time` |
+| M8 | the binding digest check in `requireBinding` (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a decision carrying a binding for another secret was accepted` |
+| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)` |
+
+M1-M4 were measured in the first round, against `848edd9` and its 97 cases;
+M5-M8 and the C0 control were measured against the current head and its 102.
+Each of the four new rows ran in a detached worktree that was clean before the
+mutation and clean again after the restore.
 
 ### What the first run caught, and what it cost
 
@@ -247,6 +257,37 @@ A third correction came out of the same work: the ambiguous-approval case
 originally asserted the absence of failure words in the status line, and M4
 survived it because "This publication already has an answer." contains none of
 them. Asserting the response rather than the prose is what made it a proof.
+
+### What the second round caught
+
+M5-M8 were added after review found that the browser half of the capability
+chain was not owned: the gate stayed green at 97/97 with `bindPublication`'s
+browser-secret check gone, and again with `requireBinding`'s digest check gone.
+Both are now killed, and the shape of the fix repeats the first round's lesson.
+
+- **M5 and M6 are ordinary wire cases.** A link whose fragment secret is altered
+  by one character never reaches the review card, and a browser holding a
+  binding for one publication is refused a decision on another. Neither existed
+  before: every prior binding case started from a legitimately bound session.
+- **M8 is unreachable over HTTP, for the same structural reason M3 was.** The
+  browser's proof is an opaque `__Host-` cookie whose operation string lives
+  server-side, so no client can present the adapter with a binding that names
+  this publication under another secret's digest — the route refuses the id
+  mismatch first. The case calls the real producer with the real dependencies
+  and the real record, and asserts no owner was fixed.
+- **M7 took two attempts, and the first one was the interesting failure.** The
+  OAuth-replay case had been passing for the *fixture's* reason: its codes are
+  single use, so the replay was refused whether or not the application still
+  held its own guard. The obvious fix — assert the provider's `tokenCalls` did
+  not move — did not close it either, and the mutation run said so: a completed
+  sign-in clears the transaction's binding cookie, so the replay is refused at
+  the first line of the handler and never reaches the store under either tree.
+  What owns `consumedAt` is a replay that still *has* that cookie. The cookie is
+  now read out of the jar while the visitor is on the provider's chooser, the
+  one moment it legitimately exists, and the callback is replayed with it from
+  outside the browser. Under the mutated tree the state is redeemed a second
+  time and the provider is called again; under the restored tree the handler
+  refuses before the exchange.
 
 ## Reproducing it
 
