@@ -19,7 +19,7 @@
  * of production pieces, with exactly one thing controlled:
  *
  *   * **Storage is the real producer over a real local runtime.** The record is
- *     written by `hosted/lib/publication-store.mjs` through `@netlify/blobs`
+ *     written by `netlify/lib/hosted/publication-store.mjs` through `@netlify/blobs`
  *     into `BlobsServer`, the provider's own local server -- the same
  *     implementation `netlify dev` runs -- over a private temporary directory.
  *     ETags, `If-Match`, `If-None-Match` and 412 are the provider's, not ours.
@@ -61,7 +61,7 @@
  *     and `http://localhost:b` are different origins -- which is what the exact
  *     origin comparisons in every handler and in the renderer are about -- but
  *     they are not different *registrable sites*, so the SameSite consequences
- *     of the two-site split are not exercised here. `hosted/lib/config.mjs`
+ *     of the two-site split are not exercised here. `netlify/lib/hosted/config.mjs`
  *     enforces the site rule in production and skips it in `local-test` mode
  *     precisely because a loopback host has no registrable site to compare.
  *     AHU-013 owns that half.
@@ -219,8 +219,8 @@ function install(root) {
  * worker would otherwise be left behind.
  */
 async function parent() {
-  if (!existsSync(join(ROOT, "hosted", "node_modules", "@netlify", "blobs"))) {
-    die("hosted/node_modules is missing; run `npm --prefix hosted ci --ignore-scripts --no-audit --no-fund` first");
+  if (!existsSync(join(ROOT, "node_modules", "@netlify", "blobs"))) {
+    die("node_modules is missing; run `npm ci --ignore-scripts --no-audit --no-fund` first");
   }
   const tempRoot = await mkdtemp(join(isolatedTmpdir(), "ahu012-integration-"));
   let stdout = "";
@@ -477,7 +477,7 @@ function readDeploymentHeaders() {
  * the Netlify CLI runs; it implements the API surface the client speaks,
  * including `If-Match` / `If-None-Match` and the 412 that the whole publication
  * state machine is a compare-and-set against. That is the difference this
- * runner is here to make: `hosted/lib/publication-store.mjs` is exercised
+ * runner is here to make: `netlify/lib/hosted/publication-store.mjs` is exercised
  * against an implementation that does not know what answer the code under test
  * wanted.
  *
@@ -499,10 +499,10 @@ function readDeploymentHeaders() {
  *   * `failNextRead` -- a read the provider could not answer.
  */
 async function startBlobs(directory) {
-  const hostedRequire = (specifier) =>
-    import(pathToFileURL(join(ROOT, "hosted", "node_modules", specifier)).href);
-  const { BlobsServer } = await hostedRequire("@netlify/blobs/dist/server.js");
-  const { getStore } = await hostedRequire("@netlify/blobs/dist/main.js");
+  const installed = (specifier) =>
+    import(pathToFileURL(join(ROOT, "node_modules", specifier)).href);
+  const { BlobsServer } = await installed("@netlify/blobs/dist/server.js");
+  const { getStore } = await installed("@netlify/blobs/dist/main.js");
 
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const token = randomBytes(24).toString("hex");
@@ -841,7 +841,7 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
 /**
  * The `fetchImpl` the real callback handler is given.
  *
- * It maps exactly the two provider URLs `hosted/lib/github-oauth.mjs` names and
+ * It maps exactly the two provider URLs `netlify/lib/hosted/github-oauth.mjs` names and
  * refuses everything else, so a handler that acquired a third provider call --
  * or reached any other host -- fails here rather than silently working against
  * a fixture that answers anything.
@@ -886,7 +886,7 @@ function compilePath(pattern) {
 }
 
 /** The static tree the hosted deployment publishes, and its one rewrite. */
-const STATIC_ROOT = join(ROOT, "hosted", "public");
+const STATIC_ROOT = join(ROOT, "netlify", "public");
 
 /**
  * The application: the actual handlers, the actual static tree, the actual
@@ -1401,23 +1401,25 @@ const CLIENT_ID = "Iv1.integrationclient";
 const CLIENT_SECRET = "integration-client-secret-not-a-real-credential";
 
 async function assemble(tempRoot) {
-  const hosted = (path) => import(pathToFileURL(join(ROOT, "hosted", path)).href);
+  /* Every hosted module by its repository path: the hosted tree now lives
+     inside the one deploy tree, so there is no second root to join onto. */
+  const load = (path) => import(pathToFileURL(join(ROOT, path)).href);
 
   const [
     contracts, configModule, httpModule, identity, publicationsModule, publicationStore, authStoreModule,
     githubOauth, start, status, artifact, cancel, bind, review, decision,
     authStart, authCallback, authLogout, session, viewer, documentRead, documents,
   ] = await Promise.all([
-    hosted("lib/contracts.mjs"), hosted("lib/config.mjs"), hosted("lib/http.mjs"),
-    hosted("lib/identity.mjs"), hosted("lib/publications.mjs"), hosted("lib/publication-store.mjs"),
-    hosted("lib/auth-store.mjs"), hosted("lib/github-oauth.mjs"),
-    hosted("functions/publications-start.mjs"), hosted("functions/publications-status.mjs"),
-    hosted("functions/publications-artifact.mjs"), hosted("functions/publications-cancel.mjs"),
-    hosted("functions/publications-bind.mjs"), hosted("functions/publications-review.mjs"),
-    hosted("functions/publications-decision.mjs"), hosted("functions/auth-github-start.mjs"),
-    hosted("functions/auth-github-callback.mjs"), hosted("functions/auth-logout.mjs"),
-    hosted("functions/session.mjs"), hosted("functions/document-viewer.mjs"),
-    hosted("functions/document-read.mjs"), hosted("lib/documents.mjs"),
+    load("netlify/lib/hosted/contracts.mjs"), load("netlify/lib/hosted/config.mjs"), load("netlify/lib/hosted/http.mjs"),
+    load("netlify/lib/hosted/identity.mjs"), load("netlify/lib/hosted/publications.mjs"), load("netlify/lib/hosted/publication-store.mjs"),
+    load("netlify/lib/hosted/auth-store.mjs"), load("netlify/lib/hosted/github-oauth.mjs"),
+    load("netlify/functions/hosted-publications-start.mjs"), load("netlify/functions/hosted-publications-status.mjs"),
+    load("netlify/functions/hosted-publications-artifact.mjs"), load("netlify/functions/hosted-publications-cancel.mjs"),
+    load("netlify/functions/hosted-publications-bind.mjs"), load("netlify/functions/hosted-publications-review.mjs"),
+    load("netlify/functions/hosted-publications-decision.mjs"), load("netlify/functions/hosted-auth-github-start.mjs"),
+    load("netlify/functions/hosted-auth-github-callback.mjs"), load("netlify/functions/hosted-auth-logout.mjs"),
+    load("netlify/functions/hosted-session.mjs"), load("netlify/functions/hosted-document-viewer.mjs"),
+    load("netlify/functions/hosted-document-read.mjs"), load("netlify/lib/hosted/documents.mjs"),
   ]);
   const rendererBuild = await import(pathToFileURL(join(ROOT, "renderer", "scripts", "build.mjs")).href);
 

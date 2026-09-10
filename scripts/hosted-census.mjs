@@ -51,7 +51,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
-import { validatePublication } from "../hosted/lib/contracts.mjs";
+import { validatePublication } from "../netlify/lib/hosted/contracts.mjs";
 
 /**
  * The exact fields a census row may contain.
@@ -192,17 +192,22 @@ export function requireBlobsCredentials(env) {
 }
 
 /**
- * Where the CLI shell loads `@netlify/blobs` from: the hosted deployment's own
- * install, resolved as `hosted/` would resolve it.
+ * Where the CLI shell loads `@netlify/blobs` from: the deployment's own install,
+ * resolved from the root manifest that travels with the deploy tree.
+ *
+ * ACN-003 folded the hosted tree into `netlify/` and its manifest into the root
+ * one, so there is a single lockfile-pinned SDK rather than two. Resolving from
+ * the root `package.json` is what keeps this tool speaking to the store through
+ * exactly the copy the deployment ships.
  *
  * Missing install is a prerequisite failure, not a crash: say which command
  * fixes it.
  */
-export function hostedBlobsSpecifier(from = new URL("../hosted/package.json", import.meta.url)) {
+export function hostedBlobsSpecifier(from = new URL("../package.json", import.meta.url)) {
   try {
     return pathToFileURL(createRequire(from).resolve("@netlify/blobs")).href;
   } catch {
-    throw new Error("@netlify/blobs is not installed under hosted/; run `npm --prefix hosted ci` first");
+    throw new Error("@netlify/blobs is not installed; run `npm ci` first");
   }
 }
 
@@ -287,11 +292,11 @@ export async function runCensus({ argv, getStore, now = Date.now }) {
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
     const credentials = requireBlobsCredentials(process.env);
-    /* Resolved out of `hosted/node_modules` rather than the root install: this
-       tool inspects the hosted deployment's store, so it should speak to it
-       through the same lockfile-pinned SDK that deployment ships. A bare
-       `import "@netlify/blobs"` from this directory would resolve against the
-       root package instead, which is a different install of a different tree. */
+    /* Resolved from the root manifest rather than by a bare specifier out of
+       `scripts/`: this tool inspects the deployment's store, so it should speak
+       to it through the same lockfile-pinned SDK the deploy tree ships, and
+       naming where it comes from keeps that true if `scripts/` ever gains an
+       install of its own. */
     const { getStore } = await import(hostedBlobsSpecifier());
     const summary = await runCensus({
       argv: process.argv.slice(2),

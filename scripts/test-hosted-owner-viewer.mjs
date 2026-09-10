@@ -545,7 +545,7 @@ async function writeResponse(response, nodeResponse, { head = false } = {}) {
  * `/api/hosted/docs/<id>/content`, `/api/hosted/session` and
  * `/api/hosted/auth/logout` are the exported production handlers, and the only
  * injected values are the store, the clock and the configuration -- which is the
- * same seam `hosted/test/` uses and the same code path the deploy runs.
+ * same seam `netlify/test/hosted/` uses and the same code path the deploy runs.
  *
  * The three paths that are *not* production are prefixed `/_` and exist to give
  * the browser something to look at: a stand-in sign-in page that records where a
@@ -617,7 +617,7 @@ async function startApp(handlers) {
         );
       }
       if (url.pathname === "/viewer.js" || url.pathname === "/viewer.css") {
-        const body = await readFile(join(ROOT, "hosted", "public", url.pathname.slice(1)));
+        const body = await readFile(join(ROOT, "netlify", "public", url.pathname.slice(1)));
         return inert(200, CONTENT_TYPES[url.pathname.slice(url.pathname.lastIndexOf("."))], body);
       }
 
@@ -859,7 +859,7 @@ const statusOf = (page) => page.locator("[data-archon-status]").innerText();
  * cookie planted through the automation API is a cookie the browser never had to
  * accept, so a session that a real `Set-Cookie` could not have established would
  * still work here -- which is the one thing this fixture must not paper over.
- * `serializeCookie` from `hosted/lib/identity.mjs` produces the header, so the
+ * `serializeCookie` from `netlify/lib/hosted/identity.mjs` produces the header, so the
  * attributes are production's rather than this file's.
  */
 async function signIn(context, appOrigin, token) {
@@ -1551,8 +1551,8 @@ function readyParityRows() {
  * @returns {Promise<number>} assertions made
  */
 async function assertViewerGuards() {
-  const contracts = await import(pathToFileURL(join(ROOT, "hosted/lib/contracts.mjs")).href);
-  const source = await readFile(join(ROOT, "hosted", "public", "viewer.js"), "utf8");
+  const contracts = await import(pathToFileURL(join(ROOT, "netlify/lib/hosted/contracts.mjs")).href);
+  const source = await readFile(join(ROOT, "netlify", "public", "viewer.js"), "utf8");
   let cases = 0;
 
   /* The two message-type constants, before anything that uses them. A viewer
@@ -1672,7 +1672,7 @@ async function assertViewerGuards() {
   );
   cases += 1;
 
-  const documents = await import(pathToFileURL(join(ROOT, "hosted/lib/documents.mjs")).href);
+  const documents = await import(pathToFileURL(join(ROOT, "netlify/lib/hosted/documents.mjs")).href);
   assert.match(
     documents.viewerShell(origin),
     /<meta name="referrer" content="no-referrer" \/>/,
@@ -1697,18 +1697,20 @@ async function worker() {
   if (!NONCE_PATTERN.test(nonce)) die("the worker was started without a supervisor nonce");
   if (tempRoot === "") die("the worker was started without a temporary root");
 
-  const hosted = (path) => import(pathToFileURL(join(ROOT, "hosted", path)).href);
-  const { createPublicationStore } = await hosted("lib/publication-store.mjs");
-  const { createViewerRoute } = await hosted("functions/document-viewer.mjs");
-  const { createDocumentReadRoutes } = await hosted("functions/document-read.mjs");
-  const { createSessionRoute } = await hosted("functions/session.mjs");
-  const { createLogoutRoute } = await hosted("functions/auth-logout.mjs");
-  const { withErrorBoundary } = await hosted("lib/http.mjs");
-  const { SESSION_COOKIE_MAX_AGE, serializeCookie } = await hosted("lib/identity.mjs");
-  const { readHostedConfig } = await hosted("lib/config.mjs");
-  const authFixtures = await hosted("test/fixtures/auth.mjs");
-  const publicationFixtures = await hosted("test/fixtures/publications.mjs");
-  const storeHelpers = await hosted("test/helpers/publication-store.mjs");
+  /* Every hosted module by its repository path: the hosted tree now lives
+     inside the one deploy tree, so there is no second root to join onto. */
+  const load = (path) => import(pathToFileURL(join(ROOT, path)).href);
+  const { createPublicationStore } = await load("netlify/lib/hosted/publication-store.mjs");
+  const { createViewerRoute } = await load("netlify/functions/hosted-document-viewer.mjs");
+  const { createDocumentReadRoutes } = await load("netlify/functions/hosted-document-read.mjs");
+  const { createSessionRoute } = await load("netlify/functions/hosted-session.mjs");
+  const { createLogoutRoute } = await load("netlify/functions/hosted-auth-logout.mjs");
+  const { withErrorBoundary } = await load("netlify/lib/hosted/http.mjs");
+  const { SESSION_COOKIE_MAX_AGE, serializeCookie } = await load("netlify/lib/hosted/identity.mjs");
+  const { readHostedConfig } = await load("netlify/lib/hosted/config.mjs");
+  const authFixtures = await load("netlify/test/hosted/fixtures/auth.mjs");
+  const publicationFixtures = await load("netlify/test/hosted/fixtures/publications.mjs");
+  const storeHelpers = await load("netlify/test/hosted/helpers/publication-store.mjs");
   const build = await import(pathToFileURL(join(ROOT, "renderer/scripts/build.mjs")).href);
 
   /* Ports first: the renderer's `frame-ancestors` names the application origin,

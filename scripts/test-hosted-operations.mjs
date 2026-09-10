@@ -45,7 +45,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -53,18 +53,18 @@ import { promisify } from "node:util";
 import {
   HOSTED_CONFIG_KEYS,
   readHostedConfig,
-} from "../hosted/lib/config.mjs";
-import { HOSTED_LIMITS, validateWireError } from "../hosted/lib/contracts.mjs";
-import { completePublication, publicationDependencies } from "../hosted/lib/publications.mjs";
+} from "../netlify/lib/hosted/config.mjs";
+import { HOSTED_LIMITS, validateWireError } from "../netlify/lib/hosted/contracts.mjs";
+import { completePublication, publicationDependencies } from "../netlify/lib/hosted/publications.mjs";
 import startHandler, {
   handleStart,
   config as startConfig,
-} from "../hosted/functions/publications-start.mjs";
+} from "../netlify/functions/hosted-publications-start.mjs";
 import statusHandler, {
   handleStatus,
   config as statusConfig,
-} from "../hosted/functions/publications-status.mjs";
-import cancelHandler, { config as cancelConfig } from "../hosted/functions/publications-cancel.mjs";
+} from "../netlify/functions/hosted-publications-status.mjs";
+import cancelHandler, { config as cancelConfig } from "../netlify/functions/hosted-publications-cancel.mjs";
 import {
   FIXTURE_APP_ORIGIN,
   FIXTURE_HTML,
@@ -75,7 +75,7 @@ import {
   PUBLISHING_ENV,
   RECORDS,
   VALID_DESCRIPTOR,
-} from "../hosted/test/fixtures/publications.mjs";
+} from "../netlify/test/hosted/fixtures/publications.mjs";
 import {
   FIXTURE_LOCAL_APP_ORIGIN,
   FIXTURE_LOCAL_RENDER_ORIGIN,
@@ -84,8 +84,8 @@ import {
   FIXTURE_RENDER_ORIGIN,
   FIXTURE_SIBLING_RENDER_ORIGIN,
   FIXTURE_UNLISTED_SUFFIX_ORIGIN,
-} from "../hosted/test/contract-fixtures.mjs";
-import { createProviderDouble } from "../hosted/test/helpers/publication-store.mjs";
+} from "../netlify/test/hosted/contract-fixtures.mjs";
+import { createProviderDouble } from "../netlify/test/hosted/helpers/publication-store.mjs";
 import {
   CENSUS_FORBIDDEN_FIELDS,
   CENSUS_ROW_FIELDS,
@@ -700,23 +700,20 @@ section("the census carries its own Netlify credentials", async () => {
 
   /* And the SDK has to come from the deployment whose store is being read. */
   assert.ok(
-    hostedBlobsSpecifier().includes("/hosted/node_modules/@netlify/blobs/"),
-    "the census must load @netlify/blobs from hosted/node_modules, not the root install",
+    hostedBlobsSpecifier().includes("/node_modules/@netlify/blobs/"),
+    "the census must load @netlify/blobs from the install the deploy tree ships",
   );
-  /* Resolved from a fresh temporary directory, not from a path inside the repo:
-     the root install also carries `@netlify/blobs`, so a `from` under `scripts/`
-     would walk up and find it, and this assertion would pass for the wrong
-     reason on a machine that had run `npm ci` at the root. */
-  const empty = await mkdtemp(join(tmpdir(), "archon-census-noinstall-"));
-  try {
-    assert.throws(
-      () => hostedBlobsSpecifier(pathToFileURL(join(empty, "package.json"))),
-      /npm --prefix hosted ci/,
-      "a missing install must name the command that fixes it",
-    );
-  } finally {
-    await rm(empty, { recursive: true, force: true });
-  }
+  /* Resolved from a path directly under the filesystem root rather than from a
+     temporary directory: Node's resolution walks up, so any `from` with the
+     checkout above it finds the root install and this assertion would pass for
+     the wrong reason. `os.tmpdir()` is not far enough away either -- it follows
+     `TMPDIR`, which a sandbox can point inside the workspace. Nothing is created
+     here, because resolution only needs the directory the URL names. */
+  assert.throws(
+    () => hostedBlobsSpecifier(pathToFileURL(join(parse(process.cwd()).root, "archon-census-noinstall", "package.json"))),
+    /npm ci/,
+    "a missing install must name the command that fixes it",
+  );
 });
 
 /* ------------------------------------------------------------------ */

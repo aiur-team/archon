@@ -6,7 +6,7 @@
 # is read, and it must be served from a different registrable site from the
 # application -- not a sibling subdomain. Sibling subdomains share cookies and
 # share a site for SameSite purposes, and "cookie-free" is the property the whole
-# design rests on. `hosted/lib/config.mjs` refuses to start the application when
+# design rests on. `netlify/lib/hosted/config.mjs` refuses to start the application when
 # the two origins share a site, which is where that rule is enforced.
 #
 # What is absent is the point:

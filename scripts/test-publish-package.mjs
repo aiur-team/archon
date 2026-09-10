@@ -90,10 +90,10 @@ const execFileAsync = promisify(execFile);
  */
 let validateDescriptor;
 try {
-  ({ validateDescriptor } = await import("../hosted/lib/contracts.mjs"));
+  ({ validateDescriptor } = await import("../netlify/lib/hosted/contracts.mjs"));
 } catch (error) {
   process.stderr.write(
-    "FAIL  package consumer proof: cannot load hosted/lib/contracts.mjs" +
+    "FAIL  package consumer proof: cannot load netlify/lib/hosted/contracts.mjs" +
       ` (${error.message.split("\n")[0]});` +
       " run `npm --prefix hosted ci --ignore-scripts --no-audit --no-fund` first\n",
   );
