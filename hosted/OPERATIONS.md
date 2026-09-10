@@ -488,3 +488,23 @@ The list is bounded at **20 domains**, each at most 253 characters, and is store
 normalized: lower-cased, de-duplicated and sorted. An entry that is not a domain
 — a wildcard, a URL, an address, a name with a trailing dot, or anything
 non-ASCII — is refused as `invalid_domain` naming the entry.
+
+### Rolling this deploy back
+
+Deploying domain access is a **one-way door for the records it touches**, and
+that is worth knowing before you deploy rather than during a rollback.
+
+The stored record gains an `allowedDomains` field and its version goes from `1`
+to `2`. The new code reads both versions, so rolling *forward* is safe and no
+existing document needs migrating. The previous deploy's validator does not: it
+rejects any record carrying a field it does not know, whatever the version says.
+So every publication created or transitioned after this deploy — not just those
+with a domain list — becomes unreadable to the code that ran before it, and
+`publication-store.mjs` reports that as a retryable `unavailable`, which a
+client will retry against a condition that cannot resolve.
+
+This is a property of adding the field at all rather than of the version number;
+`ownerEmail` has the same shape. Practically: treat a rollback past this deploy
+as needing a data decision, not just a revert, and prefer rolling forward with a
+fix. Nothing here is urgent today — no document has been published on a live
+deployment yet.
