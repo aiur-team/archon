@@ -24,7 +24,7 @@ Five servers on loopback, plus a browser, plus two child-process clients.
 
 Browser: Chromium, pinned via `playwright@1.55.0`. The exact build is printed in
 the runner's own PASS line, e.g.
-`PASS  hosted integration matrix (chromium 140.0.7339.16; 97 cases)`.
+`PASS  hosted integration matrix (chromium 140.0.7339.16; 101 cases)`.
 
 Once the servers are up, nothing in the matrix contacts a network host.
 `github.com` is the only external name the browser may resolve and it resolves
@@ -42,22 +42,47 @@ stores, the browser approval page and its bootstrap, the trusted viewer, the
 renderer build and its policies, the packaged client, the descriptor grammar,
 every origin, cookie and CSRF check, and the durable records.
 
-Substituted, and only these three:
+Substituted, and only these four:
 
 1. **The identity provider upstream.** No GitHub account exists. The state
    cookie, the PKCE verifier, the callback handler, the session and the account
    binding are production code; only the party at the other end is a fixture.
-2. **The clock, for two deadline cases.** `publicationDependencies` is the
+2. **The seam that points the callback at that fixture.** The browser reaches
+   `https://github.com` through a Chromium `--host-resolver-rules` mapping, but
+   the callback handler's own token and user calls are server-side, so the
+   runner constructs `createCallbackRoute` with a `fetchImpl`. That wrapper maps
+   exactly the two URLs `hosted/lib/github-oauth.mjs` names to the fixture and
+   throws on anything else, so a handler that acquired a third upstream call
+   fails the run. It is a real injection point in the producer's own signature
+   and it is the only argument any route is constructed with that production
+   would not pass; it does not alter what the handler does with an answer.
+3. **The clock, for two deadline cases.** `publicationDependencies` is the
    producer's own dependency builder and the state machine reads its clock out
    of it, so the upload-deadline and receipt-window cases move that clock rather
    than waiting ten minutes and twenty-four hours. The handler, the store and
    the record are unchanged.
-3. **Three provider outcomes, one call wide.** A wrapper around the `Store`
+4. **Three provider outcomes, one call wide.** A wrapper around the `Store`
    object — the boundary between the real store producer and the real provider
    client — can make one write not reach the provider, make one write *commit
    and lose its answer*, or make one read fail. It cannot answer a read from
    memory, cannot decide whether a conditional write wins, and never replaces a
    handler or a store.
+
+### How the agent half is driven
+
+The packaged client is exercised end to end by matrix 1 and by the packaged
+document's navigation in matrix 7: `npm pack`, an install outside this checkout,
+and the installed `docbuild` and `archon-publish` binaries in separate
+processes. Matrices 2-9 speak the wire protocol directly instead, through the
+runner's own `agentFetch` — the same routes, the same bearer, the same bodies,
+but the runner rather than the CLI composing the request.
+
+That is deliberate: a refusal matrix needs to send requests the client will not
+send (a client-supplied owner, altered bytes, a wrong media type, a mismatched
+digest) and to send them at moments the client's own retry loop would pace. It
+does mean those cases prove the *server's* contract and not the client's use of
+it. Anything the client alone could get wrong is owned by matrix 1, by AHU-006's
+protocol tests, and by AHU-010's packaging proof.
 
 ## Limits of this evidence
 
@@ -108,14 +133,18 @@ gap that more local cases would close.
 
 ## What the run covers
 
-Ninety-seven cases across ten matrices, each named in the runner and counted by
+One hundred and one cases across ten matrices, each named in the runner and counted by
 its supervisor:
 
 1. The whole happy path — clean-installed client, browser approval, a *second*
    client process resuming and uploading, the durable record, the owner's
    receipt URL rendering the real artifact, and the local source unchanged.
 2. Account binding — switching accounts mid-review, a stale displayed identity,
-   an absent and a wrong CSRF token, a foreign `Origin`, and `GET`.
+   an absent and a wrong CSRF token, a foreign `Origin`, `GET`, a link whose
+   browser secret was altered by one character, a signed-in browser that never
+   opened the link trying to decide the publication anyway, a browser bound to
+   one publication trying to decide another, and the adapter's own binding check
+   presented with a digest no browser could construct.
 3. Provider faults — a replayed callback in the same browser and in another, an
    outage, and a grant carrying an unexpected scope.
 4. Upload and receipt — a client-supplied owner, an unapproved upload, altered
@@ -186,7 +215,7 @@ node scripts/test-hosted-integration.mjs   # from the worktree root
 | M3 | the descriptor recheck in `completePublication`'s approved branch | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
 | M3b | the descriptor recheck in `completePublication`'s already-complete branch | **fails** — `a completed publication accepted other bytes with status 200` |
 | M4 | the ambiguous-write readback in `createPublicationStore.update` (`return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}`) | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
-| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 97 cases)` |
+| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 101 cases)` |
 
 ### What the first run caught, and what it cost
 

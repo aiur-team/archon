@@ -113,7 +113,7 @@ const TRANSCRIPT = /^PASS {2}hosted integration matrix \(chromium [\w.]+; (\d+) 
  * caught somewhere forgiving would otherwise print a line that reads like a
  * full run.
  */
-const EXPECTED_CASES = 99;
+const EXPECTED_CASES = 101;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -2032,6 +2032,78 @@ async function authBinding(world, browser) {
   assert.equal(unbound.body?.error?.code, "approval_required");
   record("auth: a signed-in browser that never opened the link cannot decide the publication");
 
+  /* 2.8 And holding a binding is not holding *this* one. This third context
+         opened a different publication's link and bound it legitimately, so it
+         has both a session and a browser binding -- for someone else's
+         operation. The route compares the bound id to the path's id before the
+         adapter is reached, which is also the honest answer for a second tab:
+         one pending approval per browser is what a single `__Host-` cookie can
+         express. */
+  const other = await startPublication(world, {
+    title: "Another pending publication",
+    html: "<!doctype html><title>other</title><p>other</p>",
+  });
+  const otherContext = await openContext(world, browser);
+  const otherPage = await otherContext.newPage();
+  await approveInBrowser(otherPage, other.verificationUriComplete, { decision: null });
+  const otherSession = await currentSession(otherPage);
+  const crossed = await browserJson(otherPage, decisionPath, {
+    method: "POST",
+    body: JSON.stringify({ decision: "approve", displayedAccountId: otherSession.accountId }),
+    headers: { "content-type": "application/json", "x-archon-csrf": otherSession.csrfToken },
+  });
+  assert.equal(
+    crossed.status,
+    403,
+    `a decision for a publication this browser never bound was answered ${crossed.status}`,
+  );
+  assert.equal(crossed.body?.error?.code, "approval_required");
+  record("auth: a browser bound to one publication cannot decide another");
+
+  /* 2.9 The adapter's own binding check, reached the one way the route cannot
+   *     reach it.
+   *
+   * The browser's proof is an opaque `__Host-` cookie whose operation string
+   * lives server-side, so no client can present the state machine with a
+   * binding that names this publication under someone else's secret digest --
+   * the route refuses an id mismatch first, and a digest mismatch under a
+   * matching id is not a thing a browser can construct. The guard inside
+   * `decidePublication` is therefore untestable from outside, and this calls the
+   * real producer with the real dependencies and the real record and presents
+   * exactly that combination. No owner may be fixed.
+   */
+  const principal = {
+    accountId: `gh_${provider.identities.first.id}`,
+    provider: "github.com",
+    providerUserId: String(provider.identities.first.id),
+    login: provider.identities.first.login,
+  };
+  await assert.rejects(
+    () => world.modules.publicationsModule.decidePublication(
+      {
+        publicationId: other.publicationId,
+        /* This publication's id, under a digest that is not its browser
+           secret's. */
+        browserBinding: { publicationId: other.publicationId, browserSecretHash: "f".repeat(64) },
+        principal,
+        decision: "approve",
+        displayedAccountId: principal.accountId,
+      },
+      world.publications(),
+    ),
+    (error) => error.code === "invalid_capability",
+    "a decision carrying a binding for another secret was accepted",
+  );
+  const otherAfter = await publicationStatus(world, other);
+  assert.equal(
+    (await otherAfter.json()).state,
+    "pending",
+    "a refused binding fixed an owner anyway",
+  );
+  record("auth: a binding that names this publication under another secret is refused before any owner is fixed");
+
+  await otherPage.close();
+  await otherContext.close();
   await unboundPage.close();
   await wrongPage.close();
   await wrongContext.close();
