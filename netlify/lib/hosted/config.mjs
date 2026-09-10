@@ -18,11 +18,10 @@
  *    an environment variable. That is the difference between a test affordance
  *    and a production bypass: no value an operator can set on a Netlify site -
  *    deliberately, by accident, or "temporarily on a preview" - can turn off the
- *    HTTPS requirement or the two-site separation. C6 names five operator
- *    variables and ACN-007 adds one more, and this module reads exactly those
- *    six - `HOSTED_CONFIG_KEYS` is the whole list.
- *  - **Secrets are unformattable.** `GITHUB_CLIENT_SECRET` is reachable only by
- *    calling `config.github.readClientSecret()`. It is not a property, so no
+ *    HTTPS requirement or the two-site separation. This module reads exactly the
+ *    keys listed below and nothing else.
+ *  - **Secrets are unformattable.** `AUTH0_CLIENT_SECRET` is reachable only by
+ *    calling `config.auth0.readClientSecret()`. It is not a property, so no
  *    combination of `JSON.stringify`, `util.inspect` (including
  *    `{showHidden: true, getters: true, customInspect: false}`), spread,
  *    `structuredClone` or template interpolation can render it - an inspector
@@ -40,15 +39,16 @@ import { isLoopbackOrigin, registrableSite, validateOrigin, HostedContractError 
 export const REDACTED = "[redacted]";
 
 /**
- * The environment variables this module reads. C6's five plus ACN-007's
- * public-mailbox override - the local-test mode is still an argument rather
- * than a key, and this list is still the whole environment surface.
+ * The environment variables this module reads: C6's keys plus ACN-007's
+ * public-mailbox override, and nothing else - the local-test mode is an
+ * argument, not one more key.
  */
 export const HOSTED_CONFIG_KEYS = Object.freeze([
   "HOSTED_APP_ORIGIN",
   "HOSTED_RENDER_ORIGIN",
-  "GITHUB_CLIENT_ID",
-  "GITHUB_CLIENT_SECRET",
+  "AUTH0_DOMAIN",
+  "AUTH0_CLIENT_ID",
+  "AUTH0_CLIENT_SECRET",
   "HOSTED_PUBLISH_ENABLED",
   "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
 ]);
@@ -91,7 +91,7 @@ export class HostedConfigError extends Error {
  * to the empty string have both not configured it. The check has to happen
  * here, before any per-key format rule, because a missing value coerces
  * treacherously - `/^[A-Za-z0-9._-]{8,128}$/.test(undefined)` tests the string
- * `"undefined"` and passes, so an unset `GITHUB_CLIENT_ID` would otherwise be
+ * `"undefined"` and passes, so an unset `AUTH0_CLIENT_ID` would otherwise be
  * accepted as a nine-character client id.
  */
 function requiredValue(env, key) {
@@ -140,24 +140,30 @@ function optionalBoolean(env, key) {
 }
 
 /**
- * The GitHub OAuth credential, with the secret behind a call rather than a
+ * The Auth0 OIDC credential, with the secret behind a call rather than a
  * property.
  *
  * The secret lives in this closure and is never a property of anything, so
  * there is no descriptor for an inspector to find and no getter for
  * `{getters: true}` to invoke. `readClientSecret()` is deliberately a verb: the
  * one call site that performs the code exchange says out loud that it is
- * reading a secret, and every other reader gets `[redacted]`.
+ * reading a secret, and every other reader gets `[redacted]`. `domain` and
+ * `clientId` are public - they appear in the authorize URL a browser is
+ * redirected to - so they are ordinary enumerable properties.
  */
-function buildGitHubCredential(clientId, clientSecret) {
-  const redactedView = () => ({ clientId, clientSecret: REDACTED });
+function buildAuth0Credential(domain, clientId, clientSecret) {
+  const redactedView = () => ({ domain, clientId, clientSecret: REDACTED });
   const credential = {};
   Object.defineProperties(credential, {
+    domain: { value: domain, enumerable: true },
     clientId: { value: clientId, enumerable: true },
     readClientSecret: { value: () => clientSecret, enumerable: false },
     toJSON: { value: redactedView, enumerable: false },
     [inspect.custom]: { value: redactedView, enumerable: false },
-    toString: { value: () => `GitHubCredential(${clientId}, ${REDACTED})`, enumerable: false },
+    toString: {
+      value: () => `Auth0Credential(${domain}, ${clientId}, ${REDACTED})`,
+      enumerable: false,
+    },
   });
   return Object.freeze(credential);
 }
@@ -180,7 +186,7 @@ function buildGitHubCredential(clientId, clientSecret) {
  *   renderSite: string | null,
  *   publishEnabled: boolean,
  *   allowPublicMailboxes: boolean,
- *   github: Readonly<{clientId: string, readClientSecret: () => string}>,
+ *   auth0: Readonly<{domain: string, clientId: string, readClientSecret: () => string}>,
  * }>}
  * @throws {HostedConfigError} naming the offending key, never its value
  */
@@ -237,19 +243,38 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     }
   }
 
-  const clientId = requiredValue(env, "GITHUB_CLIENT_ID");
-  if (!/^[A-Za-z0-9._-]{8,128}$/.test(clientId)) {
-    throw new HostedConfigError("GITHUB_CLIENT_ID", "must be 8-128 characters of [A-Za-z0-9._-]");
+  const domain = requiredValue(env, "AUTH0_DOMAIN");
+  /* A host and nothing else: no scheme, no path, no port, no trailing slash. The
+     authorize, token, JWKS and logout URLs are all built by prefixing `https://`
+     and suffixing a fixed path, so a domain carrying a scheme or a path would be
+     a redirect-to-anywhere primitive behind a name that reads like a setting.
+     Labels are lowercase `[a-z0-9-]`, no leading or trailing hyphen, at least
+     two of them, which admits both `tenant.us.auth0.com` and a custom domain. */
+  if (
+    domain.length > 253 ||
+    !/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
+      domain,
+    )
+  ) {
+    throw new HostedConfigError(
+      "AUTH0_DOMAIN",
+      "must be a bare lowercase host of at least two DNS labels, with no scheme, port, path or trailing slash",
+    );
   }
-  const clientSecret = requiredValue(env, "GITHUB_CLIENT_SECRET");
+
+  const clientId = requiredValue(env, "AUTH0_CLIENT_ID");
+  if (!/^[A-Za-z0-9._-]{8,128}$/.test(clientId)) {
+    throw new HostedConfigError("AUTH0_CLIENT_ID", "must be 8-128 characters of [A-Za-z0-9._-]");
+  }
+  const clientSecret = requiredValue(env, "AUTH0_CLIENT_SECRET");
   if (clientSecret.length < 16 || /\s/.test(clientSecret)) {
     throw new HostedConfigError(
-      "GITHUB_CLIENT_SECRET",
+      "AUTH0_CLIENT_SECRET",
       "must be at least 16 characters with no whitespace",
     );
   }
   if (clientSecret === clientId) {
-    throw new HostedConfigError("GITHUB_CLIENT_SECRET", "must not equal GITHUB_CLIENT_ID");
+    throw new HostedConfigError("AUTH0_CLIENT_SECRET", "must not equal AUTH0_CLIENT_ID");
   }
 
   const publishEnabled = optionalBoolean(env, "HOSTED_PUBLISH_ENABLED");
@@ -262,7 +287,7 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
      other flag here. */
   const allowPublicMailboxes = optionalBoolean(env, "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS");
 
-  const github = buildGitHubCredential(clientId, clientSecret);
+  const auth0 = buildAuth0Credential(domain, clientId, clientSecret);
   const redactedView = () => ({
     mode,
     production,
@@ -272,7 +297,7 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     renderSite,
     publishEnabled,
     allowPublicMailboxes,
-    github: { clientId, clientSecret: REDACTED },
+    auth0: { domain, clientId, clientSecret: REDACTED },
   });
 
   const config = {
@@ -284,7 +309,7 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     renderSite,
     publishEnabled,
     allowPublicMailboxes,
-    github,
+    auth0,
   };
   Object.defineProperties(config, {
     toJSON: { value: redactedView, enumerable: false },
@@ -311,7 +336,8 @@ export function formatHostedConfig(config) {
     `render=${config.renderOrigin}`,
     `publish=${config.publishEnabled ? "enabled" : "disabled"}`,
     `publicMailboxDomains=${config.allowPublicMailboxes ? "allowed" : "refused"}`,
-    `githubClientId=${config.github.clientId}`,
-    `githubClientSecret=${REDACTED}`,
+    `auth0Domain=${config.auth0.domain}`,
+    `auth0ClientId=${config.auth0.clientId}`,
+    `auth0ClientSecret=${REDACTED}`,
   ].join(" ");
 }

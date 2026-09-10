@@ -59,8 +59,9 @@ export {
 export const PUBLISHING_ENV = Object.freeze({
   HOSTED_APP_ORIGIN: FIXTURE_APP_ORIGIN,
   HOSTED_RENDER_ORIGIN: "https://render.archon.example.net",
-  GITHUB_CLIENT_ID: "Iv1.fixtureclientid",
-  GITHUB_CLIENT_SECRET: "fixture-client-secret-not-a-real-credential",
+  AUTH0_DOMAIN: "tenant.archon.example.com",
+  AUTH0_CLIENT_ID: "exampleAuth0ClientId0000000000000",
+  AUTH0_CLIENT_SECRET: "fixture-client-secret-not-a-real-credential",
   HOSTED_PUBLISH_ENABLED: "true",
 });
 

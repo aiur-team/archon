@@ -223,8 +223,9 @@ export const FIXTURE_LOCAL_RENDER_ORIGIN = "http://localhost:8899";
 export const FIXTURE_ENV = Object.freeze({
   HOSTED_APP_ORIGIN: FIXTURE_APP_ORIGIN,
   HOSTED_RENDER_ORIGIN: FIXTURE_RENDER_ORIGIN,
-  GITHUB_CLIENT_ID: "Iv1.fixtureclientid",
-  GITHUB_CLIENT_SECRET: "fixture-client-secret-value-not-real",
+  AUTH0_DOMAIN: "tenant.archon.example.com",
+  AUTH0_CLIENT_ID: "exampleAuth0ClientId0000000000000",
+  AUTH0_CLIENT_SECRET: "fixture-client-secret-value-not-real",
   HOSTED_PUBLISH_ENABLED: "false",
 });
 

@@ -982,8 +982,9 @@ async function assertBuildOutputIsStatic(tempRoot, appOrigin, renderOrigin) {
     env: {
       HOSTED_APP_ORIGIN: appOrigin,
       HOSTED_RENDER_ORIGIN: renderOrigin,
-      GITHUB_CLIENT_ID: "Iv1.0123456789abcdef",
-      GITHUB_CLIENT_SECRET: secret,
+      AUTH0_DOMAIN: "tenant.archon.example.com",
+      AUTH0_CLIENT_ID: "exampleAuth0ClientId0123456789abc",
+      AUTH0_CLIENT_SECRET: secret,
       HOSTED_PUBLISH_ENABLED: "true",
       AWS_SECRET_ACCESS_KEY: secret,
     },
@@ -997,7 +998,7 @@ async function assertBuildOutputIsStatic(tempRoot, appOrigin, renderOrigin) {
   for (const name of result.files) {
     const bytes = await readFile(join(outDir, name), "utf8");
     assert.ok(!bytes.includes(secret), `${name} carried an environment secret into the deploy`);
-    assert.ok(!bytes.includes("Iv1.0123456789abcdef"), `${name} carried a client id into the deploy`);
+    assert.ok(!bytes.includes("exampleAuth0ClientId0123456789abc"), `${name} carried a client id into the deploy`);
     assert.ok(!bytes.includes(DOCUMENT_BYTES), `${name} carried fixture document content`);
   }
   const config = await readFile(join(outDir, "renderer-config.js"), "utf8");

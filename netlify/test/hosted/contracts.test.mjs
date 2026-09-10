@@ -1531,14 +1531,17 @@ test("a complete production configuration is accepted, with publishing off", () 
   assert.equal(config.appSite, "example.com");
   assert.equal(config.renderSite, "example.net");
   assert.equal(config.publishEnabled, false);
+  assert.equal(config.auth0.domain, FIXTURE_ENV.AUTH0_DOMAIN);
+  assert.equal(config.auth0.clientId, FIXTURE_ENV.AUTH0_CLIENT_ID);
   assert.ok(Object.isFrozen(config));
 });
 
-test("the reader consults exactly C6's five operator variables and ACN-007's sixth", () => {
+test("the reader consults exactly C6's operator variables and ACN-007's override", () => {
   assert.deepEqual([...HOSTED_CONFIG_KEYS].sort(), [
     "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
-    "GITHUB_CLIENT_ID",
-    "GITHUB_CLIENT_SECRET",
+    "AUTH0_CLIENT_ID",
+    "AUTH0_CLIENT_SECRET",
+    "AUTH0_DOMAIN",
     "HOSTED_APP_ORIGIN",
     "HOSTED_PUBLISH_ENABLED",
     "HOSTED_RENDER_ORIGIN",
@@ -1566,8 +1569,9 @@ test("every required key is required, and the error names the key", () => {
   for (const key of [
     "HOSTED_APP_ORIGIN",
     "HOSTED_RENDER_ORIGIN",
-    "GITHUB_CLIENT_ID",
-    "GITHUB_CLIENT_SECRET",
+    "AUTH0_DOMAIN",
+    "AUTH0_CLIENT_ID",
+    "AUTH0_CLIENT_SECRET",
   ]) {
     assert.throws(
       () => readHostedConfig(without(FIXTURE_ENV, key)),
@@ -1651,7 +1655,7 @@ test("the relaxed mode is loopback-only and cannot describe a real deployment", 
   );
   /* And it still requires every other key. */
   assert.throws(
-    () => readHostedConfig(without(FIXTURE_LOCAL_ENV, "GITHUB_CLIENT_SECRET"), local),
+    () => readHostedConfig(without(FIXTURE_LOCAL_ENV, "AUTH0_CLIENT_SECRET"), local),
     HostedConfigError,
   );
   /* The loopback environment is refused outright by the default mode. */
@@ -1671,44 +1675,62 @@ test("the relaxed mode is loopback-only and cannot describe a real deployment", 
   }
 });
 
-test("a weak or misspelled GitHub credential is refused", () => {
+test("a weak or misspelled Auth0 credential is refused", () => {
   for (const patch of [
-    { GITHUB_CLIENT_ID: "short" },
-    { GITHUB_CLIENT_ID: "has space here" },
-    { GITHUB_CLIENT_SECRET: "tooshort" },
-    { GITHUB_CLIENT_SECRET: "has whitespace in it here" },
-    { GITHUB_CLIENT_SECRET: FIXTURE_ENV.GITHUB_CLIENT_ID },
+    { AUTH0_CLIENT_ID: "short" },
+    { AUTH0_CLIENT_ID: "has space here" },
+    { AUTH0_CLIENT_SECRET: "tooshort" },
+    { AUTH0_CLIENT_SECRET: "has whitespace in it here" },
+    { AUTH0_CLIENT_SECRET: FIXTURE_ENV.AUTH0_CLIENT_ID },
   ]) {
     assert.throws(() => readHostedConfig({ ...FIXTURE_ENV, ...patch }), HostedConfigError);
   }
 });
 
+test("a domain that is not a bare host is refused", () => {
+  for (const domain of [
+    "https://tenant.example.com",
+    "tenant.example.com/",
+    "tenant.example.com/path",
+    "tenant.example.com:8443",
+    "TENANT.example.com",
+    "tenant",
+    "",
+  ]) {
+    assert.throws(
+      () => readHostedConfig({ ...FIXTURE_ENV, AUTH0_DOMAIN: domain }),
+      (error) => error instanceof HostedConfigError && error.key === "AUTH0_DOMAIN",
+      `domain ${JSON.stringify(domain)}`,
+    );
+  }
+});
+
 test("the client secret is readable on purpose and unprintable by accident", () => {
-  const secret = FIXTURE_ENV.GITHUB_CLIENT_SECRET;
+  const secret = FIXTURE_ENV.AUTH0_CLIENT_SECRET;
   const config = readHostedConfig(FIXTURE_ENV);
 
   /* Reachable exactly one way: by calling a verb, at the one call site that
      performs the code exchange. */
-  assert.equal(config.github.readClientSecret(), secret);
+  assert.equal(config.auth0.readClientSecret(), secret);
 
   const renderings = [
     JSON.stringify(config),
-    JSON.stringify(config.github),
+    JSON.stringify(config.auth0),
     JSON.stringify({ config }),
     inspect(config, { depth: null }),
-    inspect(config.github, { depth: null }),
+    inspect(config.auth0, { depth: null }),
     /* The combination a getter could not survive: an explicit deep dump that
        opts out of custom inspection and invokes accessors. A method has no
        value for it to print. */
     inspect(config, { customInspect: false, showHidden: true, getters: true, depth: 6 }),
-    inspect(config.github, { customInspect: false, showHidden: true, getters: true, depth: 6 }),
+    inspect(config.auth0, { customInspect: false, showHidden: true, getters: true, depth: 6 }),
     formatHostedConfig(config),
-    String(config.github),
-    `${config.github}`,
-    Object.keys(config.github).join(","),
-    JSON.stringify({ ...config.github }),
-    JSON.stringify(Object.getOwnPropertyDescriptors(config.github)),
-    JSON.stringify(structuredClone({ ...config.github })),
+    String(config.auth0),
+    `${config.auth0}`,
+    Object.keys(config.auth0).join(","),
+    JSON.stringify({ ...config.auth0 }),
+    JSON.stringify(Object.getOwnPropertyDescriptors(config.auth0)),
+    JSON.stringify(structuredClone({ ...config.auth0 })),
   ];
   for (const rendering of renderings) {
     assert.ok(!rendering.includes(secret), `secret leaked into: ${rendering.slice(0, 160)}`);
@@ -1719,7 +1741,7 @@ test("the client secret is readable on purpose and unprintable by accident", () 
      being reread, so it names the key and never the value. */
   const thrown = (() => {
     try {
-      readHostedConfig({ ...FIXTURE_ENV, GITHUB_CLIENT_SECRET: "shorty" });
+      readHostedConfig({ ...FIXTURE_ENV, AUTH0_CLIENT_SECRET: "shorty" });
       return null;
     } catch (error) {
       return error;
@@ -1740,8 +1762,9 @@ test("the log line names every field an operator needs to read", () => {
       ` render=${FIXTURE_RENDER_ORIGIN}` +
       " publish=disabled" +
       " publicMailboxDomains=refused" +
-      ` githubClientId=${FIXTURE_ENV.GITHUB_CLIENT_ID}` +
-      ` githubClientSecret=${REDACTED}`,
+      ` auth0Domain=${FIXTURE_ENV.AUTH0_DOMAIN}` +
+      ` auth0ClientId=${FIXTURE_ENV.AUTH0_CLIENT_ID}` +
+      ` auth0ClientSecret=${REDACTED}`,
   );
   assert.match(
     formatHostedConfig(readHostedConfig({ ...FIXTURE_ENV, HOSTED_PUBLISH_ENABLED: "true" })),

@@ -115,7 +115,7 @@ test("an empty string is not a supplied prerequisite", () => {
  * ------------------------------------------------------------------ */
 
 test("a client secret in this runner's environment fails the gate", () => {
-  const result = evaluatePreflight(completeEnv({ GITHUB_CLIENT_SECRET: "not-a-real-secret" }));
+  const result = evaluatePreflight(completeEnv({ AUTH0_CLIENT_SECRET: "not-a-real-secret" }));
   assert.equal(result.ok, false);
   assert.equal(gate(result, "G0").status, "failed");
 });
@@ -148,7 +148,7 @@ test("an origin carrying a path is not an origin", () => {
 test("the callback must be the app origin's exact frozen path", () => {
   for (const callback of [
     `${APP}${CALLBACK_PATH}/`,
-    `${APP}/api/hosted/auth/github/callback2`,
+    `${APP}/api/hosted/auth/callback2`,
     `${APP}/callback`,
     `https://*.example.com${CALLBACK_PATH}`,
     `https://other.example.net${CALLBACK_PATH}`,

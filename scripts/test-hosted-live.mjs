@@ -34,7 +34,7 @@
  * recorded by hand in the dated evidence report. This runner marks each of them
  * `pending` in its manifest; nothing here can move one to `pass`.
  *
- * Secrets: `GITHUB_CLIENT_SECRET` belongs in the deployed site's environment and
+ * Secrets: `AUTH0_CLIENT_SECRET` belongs in the deployed site's environment and
  * nowhere else. This runner refuses to start if it can see one, refuses any
  * supplied value that looks like a credential, and writes no supplied value into
  * its manifest except non-secret identifiers -- the OAuth client id is recorded
@@ -60,7 +60,7 @@ const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 
 /** The callback path C1 freezes. A registration at any other path is not this service. */
-export const CALLBACK_PATH = "/api/hosted/auth/github/callback";
+export const CALLBACK_PATH = "/api/hosted/auth/callback";
 
 /** The single word an operator writes to say the empty-scope registration was verified. */
 export const NO_SCOPES = "none";
@@ -77,7 +77,7 @@ const PROBE_TIMEOUT_MS = 20_000;
  *
  * The list is prefixes rather than a general entropy test on purpose: a false
  * positive here is a refusal an operator cannot work around, and every one of
- * these is unambiguous. `GITHUB_CLIENT_SECRET` is checked separately by name,
+ * these is unambiguous. `AUTH0_CLIENT_SECRET` is checked separately by name,
  * because its value has no distinguishing prefix at all.
  */
 const CREDENTIAL_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "nfp_"];
@@ -441,13 +441,13 @@ export function evaluatePreflight(env) {
   const items = [];
   const facts = {};
 
-  if (typeof env.GITHUB_CLIENT_SECRET === "string" && env.GITHUB_CLIENT_SECRET !== "") {
+  if (typeof env.AUTH0_CLIENT_SECRET === "string" && env.AUTH0_CLIENT_SECRET !== "") {
     items.push(
       item(
         "G0",
         "the OAuth client secret is installed server-side only",
         "failed",
-        "GITHUB_CLIENT_SECRET is set in this runner's environment; it belongs in the deployed site and nowhere else",
+        "AUTH0_CLIENT_SECRET is set in this runner's environment; it belongs in the deployed site and nowhere else",
       ),
     );
   } else {

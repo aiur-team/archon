@@ -60,7 +60,7 @@ import { AuthStore, TRANSIENT_TTL_SECONDS } from "./auth-store.mjs";
 import { HOSTED_LIMITS } from "./contracts.mjs";
 import { constantTimeEqual, sha256Base64Url } from "./secrets.mjs";
 
-/** C1: the browser session cookie. Seven days, opaque, `HttpOnly`. */
+/** C1: the browser session cookie. 24 hours, opaque, `HttpOnly`. */
 export const SESSION_COOKIE = "__Host-archon_session";
 
 /** The single-use OAuth-state binding. Distinct name, distinct lifetime. */
@@ -82,8 +82,15 @@ export const BINDING_COOKIE = "__Host-archon_publish";
 /** The header a browser presents its session-bound CSRF token in. */
 export const CSRF_HEADER = "x-archon-csrf";
 
-/** C1's session lifetime, in seconds, for the cookie's own `Max-Age`. */
-export const SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
+/**
+ * C1 (v2)'s session lifetime, in seconds, for the cookie's own `Max-Age`.
+ *
+ * The cookie mirror of `SESSION_TTL_SECONDS` in `auth-store.mjs`: 24 hours. The
+ * store is the authority - it refuses a record older than its own TTL even if
+ * the cookie physically survives - but the two are one decision and must stay
+ * equal, so the browser is not left holding a cookie the server will not honour.
+ */
+export const SESSION_COOKIE_MAX_AGE = 24 * 60 * 60;
 
 /** Domain separation for the CSRF derivation, so the digest has one meaning. */
 const CSRF_CONTEXT = "archon-hosted-csrf-v1:";
@@ -164,19 +171,47 @@ export function clearCookie(name) {
 }
 
 /**
+ * The first path segments a collaboration slug may not be.
+ *
+ * A one-segment slug that spelled one of these would name a route the product
+ * already owns - the sign-in page, the invitation page, the publish and hosted
+ * document namespaces, the API, or the two underscore-prefixed asset trees - and
+ * a sign-in that landed a visitor on one of those by way of the destination
+ * grammar would be a redirect into machinery rather than into a document.
+ * `_assets` and `_render` cannot match the slug shape at all - it forbids `_` -
+ * but they are named here so the reserved set is the whole list a reader expects
+ * rather than the subset the character class happens to leave reachable.
+ */
+export const RESERVED_FIRST_SEGMENTS = Object.freeze([
+  "login",
+  "invite",
+  "publish",
+  "docs",
+  "api",
+  "_assets",
+  "_render",
+]);
+
+/** A collaboration document slug: one segment of `[a-z0-9-]`, trailing slash. */
+const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
+
+/**
  * The internal destinations a callback may return a browser to.
  *
- * An allowlist of two exact shapes, matched against the raw string with no
+ * An allowlist of three exact shapes, matched against the raw string with no
  * decoding, no normalisation and no `new URL` anywhere near it. That is what
  * makes the whole family of redirect-injection spellings uninteresting rather
  * than individually defended: `//evil.example`, `/\evil.example`,
  * `https://evil.example`, `/docs/%2e%2e/admin`, `/publish/authorize?next=...`
- * and a backslash-separated variant all fail to be one of two literals.
+ * and a backslash-separated variant all fail to be one of the three.
  *
- * The legacy root login's `safeNext` is deliberately not reused. Its grammar
- * accepts any same-site path, which is the right rule for a site with many
- * pages and the wrong one here, where a callback has exactly two places it is
- * ever meant to land.
+ * The three shapes are `/publish/authorize`, `/docs/<32 hex>`, and a single
+ * collaboration document slug `^/[a-z0-9-]{1,64}/$` whose one segment is not a
+ * reserved route name. The slug is matched on the raw string too: a `%2e%2e`, a
+ * second segment, an absent trailing slash, or an uppercase letter all fail the
+ * one pattern rather than being decoded into something that then has to be
+ * defended. The legacy root login's `safeNext`, which accepted any same-site
+ * path, is still not reused: a callback lands in exactly these places.
  */
 export function validateDestination(value) {
   if (typeof value !== "string") throw new AuthRequestError("unknown destination");
@@ -184,6 +219,8 @@ export function validateDestination(value) {
   if (new RegExp(`^${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}[0-9a-f]{${HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH}}$`).test(value)) {
     return value;
   }
+  const slug = COLLABORATION_SLUG.exec(value);
+  if (slug !== null && !RESERVED_FIRST_SEGMENTS.includes(slug[1])) return value;
   throw new AuthRequestError("unknown destination");
 }
 

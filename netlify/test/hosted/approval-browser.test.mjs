@@ -26,7 +26,7 @@
  * writes, the clock is hand-driven, and GitHub is a stand-in on this same
  * loopback origin - the start route's redirect out is rewritten to it, it
  * answers the way a consenting provider does, and the real callback route's
- * token exchange is answered by the same `githubProvider` fixture the auth
+ * token exchange is answered by the same Auth0 provider seam and local JWKS
  * suite uses. The browser aborts every request that is not loopback, so a
  * fixture that stopped standing in fails loudly instead of reaching the
  * internet. No credential and no network beyond loopback.
@@ -56,14 +56,14 @@ import { LOCAL_TEST, readHostedConfig } from "../../lib/hosted/config.mjs";
 import { validatePublication } from "../../lib/hosted/contracts.mjs";
 import { withErrorBoundary } from "../../lib/hosted/http.mjs";
 import { createPublicationStore, PUBLICATION_KEY_PREFIX } from "../../lib/hosted/publication-store.mjs";
-import { createStartRoute } from "../../functions/hosted-auth-github-start.mjs";
-import { createCallbackRoute } from "../../functions/hosted-auth-github-callback.mjs";
+import { createStartRoute } from "../../functions/hosted-auth-start.mjs";
+import { createCallbackRoute } from "../../functions/hosted-auth-callback.mjs";
 import { SESSION_COOKIE_MAX_AGE, serializeCookie } from "../../lib/hosted/identity.mjs";
 import { createSessionRoute } from "../../functions/hosted-session.mjs";
 import { createBindRoute } from "../../functions/hosted-publications-bind.mjs";
 import { createReviewRoute } from "../../functions/hosted-publications-review.mjs";
 import { createDecisionRoute } from "../../functions/hosted-publications-decision.mjs";
-import { MemoryBlobStore, fixedClock, githubProvider, memoryAuthStore } from "./fixtures/auth.mjs";
+import { MemoryBlobStore, fixedClock, localKeySet, memoryAuthStore, signIdToken } from "./fixtures/auth.mjs";
 import { FIXTURE_NOW, FIXTURE_RECORD_BROWSER_SECRET, RECORDS } from "./fixtures/publications.mjs";
 import { createClock, createProviderDouble, sequentialRandomBytes } from "./helpers/publication-store.mjs";
 
@@ -156,8 +156,14 @@ const PROVIDER_PATH = "/fixture-provider/authorize";
  */
 const BECOME_PATH = "/fixture-provider/become";
 
+/** The Auth0 application this matrix serves the flow under. */
+const AUTH0_DOMAIN = "tenant.example.com";
+const AUTH0_CLIENT_ID = "exampleAuth0ClientId0000000000000";
+const AUTH0_CLIENT_SECRET = "fixture-client-secret-value";
+const AUTH0_ISSUER = `https://${AUTH0_DOMAIN}/`;
+
 /** The real endpoint the start route redirects to, and this matrix intercepts. */
-const GITHUB_AUTHORIZE_PREFIX = "https://github.com/login/oauth/authorize";
+const AUTH0_AUTHORIZE_PREFIX = `https://${AUTH0_DOMAIN}/authorize`;
 
 /** A title an agent chose, carrying everything a naive renderer would execute. */
 const HOSTILE_TITLE = 'Q3 <img src=x onerror="window.__pwned=1"> & "review" — <script>';
@@ -225,13 +231,26 @@ async function startDeployment(record) {
      drive the "use a different GitHub account" path through the real start and
      callback routes rather than around them. */
   const account = { current: ACCOUNT };
-  const fetchImpl = githubProvider({
-    user: () =>
-      new Response(JSON.stringify({ id: account.current.id, login: account.current.login }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
+  /* The nonce the start route minted, captured off the authorize URL when the
+     browser is redirected out to the fixture provider, so the ID token the token
+     endpoint returns can echo it the way a real tenant does. */
+  const pendingAuth = { nonce: null };
+  const fetchImpl = async () => {
+    const idToken = await signIdToken(
+      { sub: account.current.providerUserId, nickname: account.current.login },
+      { issuer: AUTH0_ISSUER, audience: AUTH0_CLIENT_ID, nonce: pendingAuth.nonce ?? undefined },
+    );
+    return new Response(
+      JSON.stringify({
+        id_token: idToken,
+        access_token: "fixture-provider-access-token",
+        token_type: "Bearer",
+        scope: "openid profile email",
+        expires_in: 86400,
       }),
-  });
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
 
   const html = await readFile(join(PUBLIC, "publish/authorize.html"), "utf8");
   const script = await readFile(join(PUBLIC, "publish/authorize.js"), "utf8");
@@ -279,8 +298,11 @@ async function startDeployment(record) {
        redirected here, and this answers it the way a consenting provider does. */
     if (url.pathname === PROVIDER_PATH) {
       const state = url.searchParams.get("state") ?? "";
+      /* Capture the nonce the start route just minted, so the token endpoint can
+         return an ID token that echoes it - exactly what a real tenant does. */
+      pendingAuth.nonce = url.searchParams.get("nonce");
       outgoing.writeHead(302, {
-        location: `${dependencies.origin}/api/hosted/auth/github/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
+        location: `${dependencies.origin}/api/hosted/auth/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
         "cache-control": "private, no-store",
       });
       outgoing.end();
@@ -327,7 +349,7 @@ async function startDeployment(record) {
     for (const [name, value] of response.headers) {
       if (name.toLowerCase() !== "set-cookie") headers[name] = value;
     }
-    if (typeof headers.location === "string" && headers.location.startsWith(GITHUB_AUTHORIZE_PREFIX)) {
+    if (typeof headers.location === "string" && headers.location.startsWith(AUTH0_AUTHORIZE_PREFIX)) {
       headers.location = `${dependencies.origin}${PROVIDER_PATH}?${new URL(headers.location).searchParams}`;
     }
     /* `Set-Cookie` is the one header that must stay a list: joining two of them
@@ -364,8 +386,9 @@ async function startDeployment(record) {
     {
       HOSTED_APP_ORIGIN: origin,
       HOSTED_RENDER_ORIGIN: "http://127.0.0.1:1",
-      GITHUB_CLIENT_ID: "Iv1.fixture0client",
-      GITHUB_CLIENT_SECRET: "fixture-client-secret-value",
+      AUTH0_DOMAIN: AUTH0_DOMAIN,
+      AUTH0_CLIENT_ID: AUTH0_CLIENT_ID,
+      AUTH0_CLIENT_SECRET: AUTH0_CLIENT_SECRET,
       HOSTED_PUBLISH_ENABLED: "true",
     },
     { mode: LOCAL_TEST },
@@ -382,10 +405,10 @@ async function startDeployment(record) {
   dependencies = { origin, config, store, publications };
 
   routes.set("/api/hosted/session", withErrorBoundary(createSessionRoute({ store })));
-  routes.set("/api/hosted/auth/github/start", withErrorBoundary(createStartRoute({ store, config })));
+  routes.set("/api/hosted/auth/start", withErrorBoundary(createStartRoute({ store, config })));
   routes.set(
-    "/api/hosted/auth/github/callback",
-    withErrorBoundary(createCallbackRoute({ store, config, fetchImpl })),
+    "/api/hosted/auth/callback",
+    withErrorBoundary(createCallbackRoute({ store, config, fetchImpl, getKeySet: localKeySet })),
   );
   routes.set("/api/hosted/publications/bind", createBindRoute(() => dependencies));
   routes.set("/api/hosted/publications/:id/review", createReviewRoute(() => dependencies));
