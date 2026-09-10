@@ -71,6 +71,25 @@ jobs:
       - name: hosted contract tests
         run: node --test hosted/test/contracts.test.mjs
 
+      # The hosted auth tree. Every one of these runs against injected
+      # dependencies -- an in-memory store with the real conditional-write
+      # semantics, a hand-driven clock and a fake provider -- so the whole of
+      # AHU-003 is verified with no GitHub credential, no network and no
+      # operator secret. A missing secret therefore cannot skip any of it.
+      #
+      # These live in `hosted/test/` rather than beside their sources because
+      # `hosted/lib/` and `hosted/functions/` are deploy directories: the module
+      # gate above refuses a file there that imports `node:test` or reaches into
+      # `hosted/test/`, and Netlify would publish `hosted/functions/*.test.mjs`
+      # as a live route. Same four suites, one directory across.
+      - name: hosted auth tests
+        run: |
+          node --test \
+            hosted/test/identity.test.mjs \
+            hosted/test/auth-store.test.mjs \
+            hosted/test/github-oauth.test.mjs \
+            hosted/test/auth-routes.test.mjs
+
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and
       # DOC_OWNERS, the wrong authorities here), no build command (so a deploy

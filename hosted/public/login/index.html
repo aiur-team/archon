@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in — Archon</title>
+    <!--
+      The trusted sign-in page. It carries no GitHub credential and asks for no
+      password: the only thing it can do is post to this origin's own start
+      route, which is what performs the provider round trip server-side.
+
+      The form is a real form with a real submit button, so it is reachable and
+      operable from the keyboard with no scripting involved. `login.js` does one
+      job — obtain the pre-login CSRF binding, and report the state of that
+      attempt in a live region — and it enables the button only once the binding
+      exists, because a submit before then is a refusal the visitor cannot act on.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 26rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      button {
+        cursor: pointer;
+        font: inherit;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      button[disabled] { cursor: progress; opacity: 0.6; }
+      .status { margin-top: 1rem; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      .account { margin-top: 1.5rem; }
+      .secondary { margin-top: 0.5rem; }
+      noscript p { color: #b3261e; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Sign in to Archon</h1>
+    <p class="lede">
+      Archon identifies you by your GitHub account. It asks for no repository,
+      organisation or email permissions, and never sees your password.
+    </p>
+
+    <noscript>
+      <p>
+        JavaScript is required to sign in. The sign-in button needs a one-time
+        security token that this page fetches from Archon when it loads.
+      </p>
+    </noscript>
+
+    <form id="signin" method="post" action="/api/hosted/auth/github/start">
+      <input type="hidden" name="destination" id="destination" value="/publish/authorize" />
+      <button type="submit" id="submit" disabled>Continue with GitHub</button>
+    </form>
+
+    <p class="status" id="status" role="status" aria-live="polite">Preparing sign-in…</p>
+
+    <div class="account" id="account" hidden>
+      <p id="account-text"></p>
+      <form method="post" action="/api/hosted/auth/github/start" id="switch">
+        <input type="hidden" name="switchAccount" value="true" />
+        <input type="hidden" name="csrfToken" id="csrf" value="" />
+        <input type="hidden" name="destination" id="switch-destination" value="/publish/authorize" />
+        <button type="submit" class="secondary">Use a different GitHub account</button>
+      </form>
+      <p class="lede">
+        This signs you out of Archon and asks GitHub which account to use. It does
+        not sign you out of GitHub.
+      </p>
+    </div>
+
+    <script src="./login.js"></script>
+  </body>
+</html>

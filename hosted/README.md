@@ -5,11 +5,12 @@ repository root. It exists to give an Archon agent a way to hand one
 self-contained HTML document to a person, have that person approve it in their
 own browser, and make the result readable only by them.
 
-This directory currently holds the **service boundary and its contracts**. There
-is no sign-in, no storage and no upload route yet; those are separate tickets.
-The shell at `public/index.html` says so in as many words, because a placeholder
-that implied otherwise would be a production surface making a claim nothing
-behind it can keep.
+This directory holds the **service boundary and its contracts**, and the
+**identity-only GitHub sign-in** built on top of them. There is no publication
+storage and no upload route yet; those are separate tickets. The shell at
+`public/index.html` says so in as many words, because a placeholder that implied
+otherwise would be a production surface making a claim nothing behind it can
+keep.
 
 ## Why it is separate from `netlify/`
 
@@ -32,7 +33,7 @@ the build if it ever does. Nothing about the root deployment or
 | `netlify.toml` | Deployment configuration. No edge function, no build command, no environment values. |
 | `public/` | Static app shell, served as committed. |
 | `lib/` | Server modules. Deployed. |
-| `functions/` | Routed Netlify functions under `/api/hosted/*`. Does not exist yet. |
+| `functions/` | Routed Netlify functions under `/api/hosted/*`. |
 | `test/` | Tests and fixtures. Never reachable from a deployed module. |
 
 ## Rules for code in this tree
@@ -135,6 +136,216 @@ Two things are worth knowing before you consume these:
   AHU-004 is welcome to mint codes in the recommended alphabet; a shared
   validator that demanded it would silently amend the contract for every sibling.
 
+### `lib/secrets.mjs`
+
+The four cryptographic primitives everything else is built from: `randomToken()`
+(256 bits, base64url), `hashToken()` (the SHA-256 hex a record is keyed by),
+`sha256Base64Url()` (PKCE and the CSRF derivation) and `constantTimeEqual()`.
+
+Two properties the rest of the tree assumes. **A secret is never a storage key** —
+every record is filed under the digest of the token the browser holds, so a dump
+of the store yields no usable credential. And **comparisons do not leak length** —
+`constantTimeEqual` digests both sides to a fixed 32 bytes first, so it accepts
+mismatched inputs that `crypto.timingSafeEqual` would refuse outright, and the
+length check that would have preceded it is not a length oracle.
+
+### `lib/auth-errors.mjs`
+
+The typed errors, all extending `HostedContractError`, so a handler catches one
+family and every one of them already carries a wire code, an HTTP status and a
+`.toWire()` envelope.
+
+| Error | Code | Meaning |
+| --- | --- | --- |
+| `AuthUnavailableError` | `unavailable` | The backing state or the provider could not be reached. Carries `reason: "storage" \| "provider"`. |
+| `SessionRequiredError` | `session_required` | No usable session on a request that needs one. |
+| `CsrfFailedError` | `csrf_failed` | The browser-only binding was absent, stale or wrong. |
+| `ForbiddenOriginError` | `forbidden` | The request did not come from the configured origin. |
+| `AuthRequestError` | `invalid_request` | Malformed request, or a provider round trip the visitor should restart. |
+
+**`AuthUnavailableError` is the distinction AHU-007 and the private-read ticket
+need.** "Nobody is signed in" and "we could not find out" must not be the same
+value: a storage outage that read as signed-out would be a fail-open, and the
+visible symptom is a service that looks like it is working. No error here carries
+a `cause`, because a store or provider exception's message can contain a URL with
+a token in it; `reason` is a word from a closed set instead.
+
+### `lib/auth-store.mjs`
+
+The `archon-hosted-v1` namespaces AHU-003 owns, and nothing else. Publication
+state is AHU-004's and this module cannot reach it.
+
+```
+sessions/<sha256(sessionToken)>   browser session, seven-day absolute expiry
+auth/oauth/<sha256(state)>        one OAuth transaction, fifteen minutes
+auth/login/<sha256(token)>        one pre-login CSRF binding, fifteen minutes
+auth/binding/<sha256(token)>      one pending publication binding, fifteen minutes
+```
+
+| Export | Purpose |
+| --- | --- |
+| `AuthStore` | The adapter, over an injected store object and an injected clock. |
+| `openAuthStore({storeFactory?, now?})` | The production adapter: site-scoped, `consistency: "strong"`. |
+| `HOSTED_STORE_NAME`, `SESSION_PREFIX`, `TRANSIENT_PREFIX`, `TRANSIENT_KINDS` | The namespaces. |
+| `SESSION_TTL_SECONDS`, `TRANSIENT_TTL_SECONDS` | Seven days; fifteen minutes. |
+
+Four things are load-bearing:
+
+- **Every read is strongly consistent.** An eventually consistent read of a
+  session record is a revocation that has not happened yet: logout returns
+  success and a copied cookie keeps working from a stale replica.
+- **The store is site-scoped, never deploy-scoped.** A deploy-scoped store is a
+  different store per deploy, so a revocation written against one deploy would
+  be invisible to another — a revoked token that keeps working.
+- **Single use is a compare-and-set, not a delete.** An unconditional delete is
+  not single use: two callbacks with the same state both read a live record,
+  both proceed, and the second delete succeeds against nothing.
+  `consumeTransient` writes the record back marked consumed with
+  `onlyIfMatch: <etag>` and treats `modified: false` as "somebody else won".
+- **A revocation is never reported without being observed.** A guarded write
+  that throws is *ambiguous* — a timed-out request may still have applied — so
+  the record is read back. Dead means success; live means an outage, and an
+  outage is an `AuthUnavailableError` rather than a claim of success.
+
+Nothing schedules a cleanup. Expiry is enforced on every lookup, so physical
+records outliving their lifetimes is the normal case rather than an anomaly; see
+**Operator maintenance** below.
+
+### `lib/github-oauth.mjs`
+
+| Export | Purpose |
+| --- | --- |
+| `exchangeCodeForIdentity({code, codeVerifier, config}, {fetchImpl?, timeoutMs?})` | Redeem a code and return a validated `HostedPrincipal`. |
+| `buildAuthorizeUrl({clientId, redirectUri, state, codeChallenge, selectAccount?})` | The provider URL. |
+| `createPkcePair()` | An S256 verifier and challenge. |
+| `callbackUri(appOrigin)` / `CALLBACK_PATH` | The exact registered callback. |
+| `GITHUB_AUTHORIZE_URL`, `GITHUB_TOKEN_URL`, `GITHUB_USER_URL` | Fixed endpoints. |
+
+- **No access token is ever returned.** The exchange and the `/user` call happen
+  inside one function, so there is no exported value a caller could persist or
+  log. `refresh_token` and the expiry fields modern OAuth app responses carry are
+  read past and discarded, never persisted as a capability nobody asked for.
+- **No `scope` parameter is emitted at all**, which is not the same as `scope=`
+  and the consent screen shows the difference. A token response reporting *any*
+  granted scope is refused rather than used.
+- **The numeric ID is the identity.** A login can be renamed and reused and an
+  email is optional and absent for most accounts; `id` must arrive as a safe
+  positive integer, so a provider field spelled `"1010"` or `1.5` cannot become
+  an account. `login` is display only; `email` is neither requested nor read.
+- **Both calls are bounded.** A timeout is `AuthUnavailableError` with
+  `reason: "provider"`; a 5xx is an outage and a 4xx is not.
+
+### `lib/identity.mjs`
+
+The C1 boundary. Downstream tickets should ask it two questions and nothing else.
+
+| Export | Purpose |
+| --- | --- |
+| `identifyHosted(request, {store})` | The principal, `null`, or **throws** `AuthUnavailableError`. |
+| `requireBrowserMutation(request, {store, config, presentedCsrf?})` | `{principal, sessionToken}` or a typed refusal. |
+| `requireExactOrigin(request, config)` | Exact string equality against `config.appOrigin`. |
+| `deriveCsrfToken(sessionToken)` | The browser-only, session-bound CSRF token. |
+| `validateDestination(value)` | The two internal destinations, and only those. |
+| `parseCookies`, `readCookie`, `serializeCookie`, `clearCookie` | The cookie boundary. |
+| `SESSION_COOKIE`, `OAUTH_COOKIE`, `LOGIN_COOKIE`, `BINDING_COOKIE`, `CSRF_HEADER` | Names. |
+| `createPendingBinding`, `readPendingBinding`, `clearPendingBinding` | The AHU-007 seam, below. |
+
+**The CSRF token is derived, not stored:**
+`SHA-256("archon-hosted-csrf-v1:" + sessionToken)`, base64url. It is bound to one
+session by construction, it dies exactly when the session dies, and it is
+one-way — a token that leaked into a page or an artifact does not yield the
+session cookie. That is what makes it safe to hand to JavaScript while the
+session cookie stays `HttpOnly`.
+
+**`validateDestination` is an allowlist of two literals**, matched against the
+raw string with no decoding and no `new URL`. That is why the whole family of
+redirect-injection spellings — `//host`, `/\host`, `https://host`, `%2F`
+separators, an unknown internal path — is uninteresting rather than individually
+defended. The legacy root login's `safeNext` is deliberately *not* reused: its
+"any same-site path" grammar is right for a site with many pages and wrong here.
+
+## The four routes
+
+| Route | Method | Behaviour |
+| --- | --- | --- |
+| `/api/hosted/session` | `GET` | `{v:1, authenticated:false}` (and issues the pre-login binding) or `{v:1, authenticated:true, accountId, login, csrfToken}`. |
+| `/api/hosted/auth/github/start` | `POST` | Begins a browser-bound authorization; `303` to GitHub. |
+| `/api/hosted/auth/github/callback` | `GET` | Consumes state once, rotates the session, `303` to the stored destination. |
+| `/api/hosted/auth/logout` | `POST` | Revokes server-side, then clears the cookie. |
+
+`GET` never approves anything and never logs anybody out: logout answers `GET`
+with a `405` that touches no record.
+
+**Cookies.** Four distinct `__Host-` names, all `Secure; HttpOnly; SameSite=Lax;
+Path=/` with no `Domain`. The prefix is browser-enforced rather than
+server-promised, and the `Domain` part is the one that matters: a cookie with a
+`Domain` is writable by every sibling subdomain, including a stray preview
+deployment.
+
+| Cookie | Lifetime | Consumed |
+| --- | --- | --- |
+| `__Host-archon_session` | 7 days | On logout and on callback rotation. |
+| `__Host-archon_oauth` | 15 minutes | Once, by the callback. |
+| `__Host-archon_login` | 15 minutes | Once, by a start. |
+| `__Host-archon_publish` | 15 minutes | **Survives an account switch**; cleared on a decision or at expiry. |
+
+**Why the pre-login binding is presence rather than a double submit.** C1 freezes
+the signed-out session body to `{v:1, authenticated:false}` and freezes every
+transient cookie as `HttpOnly`, so there is no conformant channel for handing a
+token to the static sign-in page for it to echo back — the body may not carry it
+and JavaScript may not read the cookie. The binding rests on two independent
+properties instead: `SameSite=Lax` means a cross-site POST carries no
+`__Host-archon_login` at all, and the `Origin` header must equal the one
+configured origin exactly. It is single-use through the same compare-and-set as
+the OAuth state, so a captured binding cannot be replayed and a retry is a new
+transaction rather than a replayed one.
+
+**Why callback failures redirect.** The callback is reached by a top-level
+navigation, so a JSON envelope rendered as text is not an actionable retry path.
+Every failure lands on `/login/?status=<word>` with `word` from the closed set
+`denied | expired | unavailable`, which the sign-in page announces. The
+distinctions a visitor can act on survive; everything about *why* the
+transaction was rejected stays on the server, so the landing page cannot be used
+to tell a bad state from a bad code.
+
+## The AHU-007 seam
+
+AHU-007 owns the pending-approval UI and its HTTP. It consumes this ticket's
+identity, CSRF and transient-binding surface, and nothing else. The binding
+helpers have this exact signature, and it is frozen here so AHU-007 can merge
+against a real producer:
+
+```js
+import {
+  BINDING_COOKIE,          // "__Host-archon_publish"
+  createPendingBinding,
+  readPendingBinding,
+  clearPendingBinding,
+} from "../lib/identity.mjs";
+
+// operation: opaque, 32-256 base64url characters. Bound and returned unchanged.
+await createPendingBinding(store, { operation });
+//   -> Readonly<{ setCookie: string, expiresAt: string }>
+
+await readPendingBinding(store, request);
+//   -> Readonly<{ operation: string, expiresAt: string }> | null   (does NOT consume)
+
+await clearPendingBinding(store, request);
+//   -> Readonly<{ cleared: boolean, setCookie: string }>           (revokes, then clears)
+```
+
+**The operation is opaque here.** AHU-003 validates that it is a bounded
+base64url token, binds it to this browser and hands it back unchanged; it never
+parses it, never reads an owner out of it and never changes one. Reading does not
+consume, because C1 requires the binding to survive an account switch — a visitor
+who realises they are signed in as the wrong account must be able to switch and
+still land on the same pending approval.
+
+Immutable fixtures for all of this live in `test/fixtures/auth.mjs`:
+`MemoryBlobStore` implements the exact two store methods `AuthStore` uses with
+the real conditional-write semantics, `githubProvider` is a narrow fake for the
+two fixed endpoints, and `fixedClock` is a clock a test moves by hand.
+
 ### `lib/config.mjs`
 
 | Export | Purpose |
@@ -193,6 +404,69 @@ npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
 node scripts/check-hosted-modules.mjs
 node --test scripts/check-hosted-modules.test.mjs
 node --test hosted/test/contracts.test.mjs
+node --test \
+  hosted/test/identity.test.mjs \
+  hosted/test/auth-store.test.mjs \
+  hosted/test/github-oauth.test.mjs \
+  hosted/test/auth-routes.test.mjs
 ```
 
-All four run in `.github/workflows/check.yml`.
+All of them run in `.github/workflows/check.yml`, and
+`scripts/check-test-inventory.mjs` fails the build if a test file exists that no
+run step names.
+
+The auth suites run entirely against injected dependencies — an in-memory store
+with the real conditional-write semantics, a hand-driven clock and a fake
+provider — so **a missing secret cannot skip any of them**. Nothing here reads a
+home directory, contacts GitHub or needs an operator credential.
+
+The tests live in `test/` rather than beside their sources because `lib/` and
+`functions/` are deploy directories: the module gate refuses a file there that
+imports `node:test` or reaches into `test/`, and Netlify would publish
+`functions/*.test.mjs` as a live route.
+
+## Operator setup
+
+### The OAuth app
+
+Register a **dedicated** OAuth app for this deployment. Not a shared one, and not
+one that has ever been granted a scope — the token exchange refuses any response
+reporting a granted scope, so a reused client ID from an app with `repo` fails
+closed rather than quietly exercising a permission the consent screen never
+showed the visitor.
+
+1. Create an OAuth app (not a GitHub App, and not a device-flow client).
+2. Set the **Authorization callback URL** to exactly
+   `https://<HOSTED_APP_ORIGIN host>/api/hosted/auth/github/callback`. GitHub now
+   supports multiple redirect URIs, which makes an exact setting material rather
+   than advisory: an extra entry is an extra place a code can be delivered.
+3. Request **no scopes** and do not enable any email or organisation permission.
+   The authorize URL emits no `scope` parameter at all.
+4. Put the client ID and secret into the Netlify site environment as
+   `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`. Never in `netlify.toml`, and
+   never in git.
+
+The callback is derived from `HOSTED_APP_ORIGIN`, never from a request `Host`
+header and never from a marketing hostname, so a misconfigured origin is a
+refused deploy rather than a callback pointing somewhere else.
+
+### Operator maintenance
+
+Session and transient records are **expired on lookup**, not by a cleanup job,
+and this ticket schedules nothing. Expired and consumed records therefore remain
+physically present in `archon-hosted-v1` until an operator removes them; they
+authenticate nobody, because every read checks expiry against server time.
+
+Retention is bounded by the lifetimes above: nothing under `auth/` is meaningful
+after fifteen minutes and nothing under `sessions/` after seven days. Deleting
+records older than those windows is safe at any time and is the whole of the
+maintenance this ticket asks for. Do not assume the store offers a TTL or a
+conditional delete — this design does not depend on either.
+
+### Live acceptance is still owed
+
+Everything above is verified deterministically. **Live GitHub sign-in has not
+been verified**, and cannot be until an operator supplies the OAuth registration
+and two controlled accounts. That session must check the scopes GitHub actually
+displays, the exact callback behaviour, and owner identity after an account
+switch. Fixtures are not a deployed acceptance result.
