@@ -286,6 +286,27 @@ jobs:
           # `hosted/lib/contracts.mjs` before it starts a browser.
           node scripts/test-hosted-renderer.mjs
 
+      # AHU-010's clean-consumer proof. Every other gate above runs inside this
+      # checkout, where `templates/base/`, `templates/skeleton/` and
+      # `skills/archon-doc/` are all on disk and the builder's own `repoRoot()`
+      # walk finds them -- so a source-checkout assumption passes all of them
+      # and fails for the first person who runs `npm install`. This runner packs
+      # the real tarball, installs it into a temporary directory outside the
+      # repository, and drives the installed `docbuild` and `archon-publish`
+      # exactly as the packaged skill tells a new user to.
+      #
+      # It is a step of its own rather than a line in `unit tests` because it is
+      # the only gate that needs `npm pack` and a network install, and a failure
+      # here means something different from a failing unit test: the code is
+      # fine and the *package* is not.
+      #
+      # Its publisher half runs against a local protocol fixture on loopback. It
+      # proves packaging, not service behaviour: nobody signs in, no account
+      # exists, and every token and code it uses is invented. AHU-013 owns the
+      # live claim.
+      - name: the published package works for a clean consumer
+        run: node scripts/test-publish-package.mjs
+
       # P4-K's hosted oracle creates and deletes a real Netlify site and needs
       # operator credentials no build has. It is named here so the test
       # inventory gate above sees it wired, and it runs only when an operator

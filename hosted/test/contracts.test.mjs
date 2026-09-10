@@ -653,14 +653,24 @@ test("stored HTML must be a non-empty document, well-formed and free of NUL", ()
     field: "publication.html",
   });
 
-  const notADocument = "<p>fragment</p>";
-  rejects(
-    () =>
-      validatePublication(
-        replacing(complete, { descriptor: descriptorFor(notADocument), html: notADocument }),
-      ),
-    { field: "publication.html" },
-  );
+  /* A fragment is the artifact shape, not a defect. `docbuild` emits no
+     doctype and no `<html>` element -- `renderer/public/renderer.js` supplies
+     the document element and drops the stored bytes into a sandboxed `srcdoc`
+     body -- so a rule that required one refused every artifact the builder can
+     make, and refused it after an owner had already approved the descriptor. */
+  const fragment = "<p>fragment</p>";
+  validatePublication(replacing(complete, { descriptor: descriptorFor(fragment), html: fragment }));
+
+  /* What the rule is actually for: bytes that are not markup at all. */
+  for (const notMarkup of ["just some words", '{"title":"not html"}', "a < b and c > d"]) {
+    rejects(
+      () =>
+        validatePublication(
+          replacing(complete, { descriptor: descriptorFor(notMarkup), html: notMarkup }),
+        ),
+      { field: "publication.html" },
+    );
+  }
 
   const withNul = FIXTURE_HTML.replace("Fixture document", "Fixture\u0000document");
   rejects(

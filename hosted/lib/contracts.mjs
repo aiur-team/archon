@@ -52,6 +52,24 @@ const NUL = "\u0000";
 const BYTE_ORDER_MARK = "\uFEFF";
 
 /**
+ * The sniff that separates an HTML artifact from bytes that are not markup.
+ *
+ * One start tag, not a document element. An artifact is a *fragment*:
+ * `docbuild`'s `layout.html` opens at `<meta name="doc-id">` and emits no
+ * doctype and no `<html>` element, because `renderer/public/renderer.js`
+ * supplies the document element itself and places the stored bytes inside a
+ * sandboxed `srcdoc` body. Requiring `<html>` here rejected every artifact the
+ * builder can produce, and rejected it *after* an owner had approved the
+ * descriptor \u2014 the worst point in the flow to discover a disagreement about
+ * shape. What the rule is for is refusing a PDF, a JSON dump or a page of
+ * notes, and one start tag still refuses all three.
+ *
+ * `templates/docbuild/src/publish.ts` applies the identical rule locally,
+ * before anything is sent, so the two never disagree about the same bytes.
+ */
+const HTML_MARKUP = /<[a-z][a-z0-9-]*[\s>/]/i;
+
+/**
  * Characters that must never appear in text a human reads to make a decision.
  *
  * `Cc`/`Cf` are the control and format categories, `Zl`/`Zp` the line and
@@ -648,7 +666,7 @@ function requireArtifactHtml(html, descriptor, field) {
   );
 
   const body = html.startsWith(BYTE_ORDER_MARK) ? html.slice(1) : html;
-  if (!/<html[\s>]/i.test(body)) throw invalid(field, "must contain an HTML document element");
+  if (!HTML_MARKUP.test(body)) throw invalid(field, "must be HTML");
 
   if (bytes !== descriptor.contentBytes) {
     throw new HostedContractError(

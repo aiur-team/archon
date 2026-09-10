@@ -202,6 +202,26 @@ const UNSAFE_DISPLAY_GLOBAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 /** C3 timestamps are exactly what `Date#toISOString` produces, milliseconds included. */
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+/**
+ * The sniff that separates an HTML artifact from bytes that are not markup.
+ *
+ * One start tag, not a document element. `docbuild` composes an artifact as a
+ * *fragment* — its own `layout.html` begins at `<meta name="doc-id">` and never
+ * emits `<html>`, `<head>` or a doctype — because the hosted renderer supplies
+ * the document element itself and drops the artifact into a sandboxed `srcdoc`
+ * body. Requiring `<html>` here therefore refused every artifact this package
+ * can build, which is a refusal no user could act on: the file was correct and
+ * the check was wrong. What the check is actually for is catching a person who
+ * pointed `--file` at a PDF, a JSON dump or their notes, and one start tag
+ * still catches all three.
+ *
+ * `hosted/lib/contracts.mjs` applies the same rule to the uploaded body. The
+ * two have to agree: a client-side refusal is an actionable local error, and
+ * the same bytes refused only by the server would be a failed upload after a
+ * person had already approved it.
+ */
+const HTML_MARKUP = /<[a-z][a-z0-9-]*[\s>/]/i;
+
 /** U+0000 and U+FEFF, spelled as escapes so this file holds no control characters. */
 const NUL = "\u0000";
 const BYTE_ORDER_MARK = "\uFEFF";
@@ -502,8 +522,8 @@ export function readArtifact(inputPath: string): Artifact {
     throw localError(`the artifact at ${path} contains a NUL character`, "invalid_input");
   }
   const body = html.startsWith(BYTE_ORDER_MARK) ? html.slice(1) : html;
-  if (!/<html[\s>]/i.test(body)) {
-    throw localError(`the artifact at ${path} is not an HTML document`, "invalid_input");
+  if (!HTML_MARKUP.test(body)) {
+    throw localError(`the artifact at ${path} is not HTML`, "invalid_input");
   }
 
   return Object.freeze({

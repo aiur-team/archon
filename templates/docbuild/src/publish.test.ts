@@ -651,10 +651,13 @@ test("start refuses input that is missing, oversized or not HTML", async (t: Tes
   assert.equal(missing.code, 22);
   assert.equal(onlyObject(missing.stdout)["code"], "input_unreadable");
 
-  const notHtml = join(space.root, "plain.txt");
-  writeFileSync(notHtml, "just words\n");
-  const plain = await startVia({ ...space, file: notHtml }, service.origin);
-  assert.equal(plain.code, 22);
+  for (const notMarkup of ["just words\n", '{"title":"not html"}\n', "a < b and c > d\n"]) {
+    const notHtml = join(space.root, "plain.txt");
+    writeFileSync(notHtml, notMarkup);
+    const plain = await startVia({ ...space, file: notHtml }, service.origin);
+    assert.equal(plain.code, 22, `${JSON.stringify(notMarkup)} is not HTML and must be refused`);
+    assert.equal(onlyObject(plain.stdout)["code"], "invalid_input");
+  }
 
   const huge = join(space.root, "huge.html");
   writeFileSync(huge, `<html>${"x".repeat(PUBLISH_CONTRACT.HTML_MAX_BYTES)}</html>`);
@@ -664,6 +667,26 @@ test("start refuses input that is missing, oversized or not HTML", async (t: Tes
 
   await service.close();
   assert.equal(service.calls.start, 0, "nothing may reach the network before local validation passes");
+});
+
+test("start accepts the fragment docbuild actually emits", async (t: TestContext) => {
+  /* `templates/base/layout.html` opens at `<meta name="doc-id">`: an artifact
+     carries no doctype and no `<html>` element, because the hosted renderer
+     supplies the document element and places these bytes in a sandboxed
+     `srcdoc` body. A rule that required a document element here refused every
+     artifact this package can build. */
+  const fragment = '<meta name="doc-id" content="a41c07">\n<title>Doc</title>\n<main>body</main>\n';
+  const space = workspace(t, fragment);
+  const service = await fixture(t, {
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+  });
+  const serviceOrigin = service.origin;
+
+  const started = await startVia(space, serviceOrigin);
+  await service.close();
+
+  assert.equal(started.code, 10, started.stderr);
+  assert.equal(service.calls.start, 1, "a fragment artifact must reach the service");
 });
 
 /* ------------------------------------------------------------------ */
