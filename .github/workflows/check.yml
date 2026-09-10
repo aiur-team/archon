@@ -458,8 +458,8 @@ jobs:
 
           /* Every environment block, inventoried. This rule came from the
              deleted hosted configuration, where it kept a C6 key out of git;
-             merging the deployments would otherwise have dropped it, and a
-             GITHUB_CLIENT_SECRET committed here would pass every other gate.
+             merging the deployments would otherwise have dropped it, and an
+             AUTH0_CLIENT_SECRET committed here would pass every other gate.
              Values set in netlify.toml are also build-scoped rather than
              available to a function at runtime, so a secret here would be a
              secret in git that did not even work. */
