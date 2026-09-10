@@ -417,7 +417,7 @@ test("a met gate stops holding its acceptance lines shut", () => {
 test("a blocked run prints the gate each open acceptance line waits on", async () => {
   const { err } = await run([], {});
   assert.match(err, /^BLOCKED {2}L5 .*: waits on G2, G3, G4, G5$/m);
-  assert.match(err, /^BLOCKED {2}L12 .*: waits on G7$/m);
+  assert.match(err, /^BLOCKED {2}L18 .*: waits on G7$/m);
 });
 
 test("the manifest records the unmet gates per guarantee", () => {
@@ -427,9 +427,79 @@ test("the manifest records the unmet gates per guarantee", () => {
     now: "2026-09-10T00:00:00.000Z",
     mode: "preflight",
   });
-  const l7 = manifest.guarantees.find((entry) => entry.id === "L7");
-  assert.deepEqual(l7.waitingOn, ["G2", "G4"]);
-  assert.match(l7.detail, /waits on G2, G4/);
+  const l8 = manifest.guarantees.find((entry) => entry.id === "L8");
+  assert.deepEqual(l8.waitingOn, ["G2", "G4", "G5"]);
+  assert.match(l8.detail, /waits on G2, G4, G5/);
+});
+
+test("every acceptance line names the sub-assertions folded into it", () => {
+  for (const guarantee of LIVE_GUARANTEES) {
+    assert.ok(Array.isArray(guarantee.covers), `${guarantee.id} folds its sub-assertions into nothing`);
+    assert.ok(guarantee.covers.length > 0, `${guarantee.id} names no sub-assertion`);
+    for (const entry of guarantee.covers) {
+      assert.equal(typeof entry, "string");
+      assert.ok(entry.trim().length > 10, `${guarantee.id} carries a sub-assertion too short to check against`);
+    }
+  }
+});
+
+/* The one-for-one rule the ticket's live bullets impose. Each of these phrases
+   belongs to a distinct live assertion of #176 that a twelve-row table left with
+   no row and no gate: a run that recorded every row as passing would otherwise
+   have closed the capstone with a third of it never attempted. The test is
+   deliberately a text search over the whole table -- it does not care which row
+   holds a phrase, only that no assertion is silently absent. */
+test("every live assertion the ticket names has a row that claims it", () => {
+  const table = LIVE_GUARANTEES.map((guarantee) => [guarantee.what, ...guarantee.covers].join(" ")).join(" ").toLowerCase();
+  const required = [
+    "numeric id",
+    "descriptor in the completed record",
+    "denied approval",
+    "expired approval",
+    "oversized",
+    "original local html",
+    "hostile fixture",
+    "account origin",
+    "failed-renderer",
+    "self-navigation",
+    "parallel identical uploads",
+    "cancel racing an upload",
+    "receipt window",
+    "receipt expiry",
+    "public blobs url",
+    "static output",
+    "test markers",
+    "recorded privately",
+    "keyboard alone",
+    "sign-out",
+    "accessible title",
+    "screen reader",
+    "fallback fonts",
+    "account class",
+    "enterprise-managed restriction",
+  ];
+  for (const phrase of required) {
+    assert.ok(table.includes(phrase), `no acceptance line claims the ticket's "${phrase}" assertion`);
+  }
+});
+
+test("acceptance line ids are unique and contiguous", () => {
+  const ids = LIVE_GUARANTEES.map((guarantee) => guarantee.id);
+  assert.equal(new Set(ids).size, ids.length, "an acceptance line id is used twice");
+  assert.deepEqual(ids, LIVE_GUARANTEES.map((_, index) => `L${index + 1}`));
+});
+
+test("the manifest carries each guarantee's sub-assertion checklist", () => {
+  const manifest = buildManifest({
+    preflight: evaluatePreflight({}),
+    probes: [],
+    now: "2026-09-10T00:00:00.000Z",
+    mode: "preflight",
+  });
+  for (const guarantee of manifest.guarantees) {
+    const source = LIVE_GUARANTEES.find((entry) => entry.id === guarantee.id);
+    assert.deepEqual(guarantee.covers, source.covers, `${guarantee.id} lost its checklist in the manifest`);
+  }
 });
 
 test("with nothing supplied the run is BLOCKED and exits non-zero", async () => {

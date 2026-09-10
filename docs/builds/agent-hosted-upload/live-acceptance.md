@@ -94,7 +94,8 @@ being asserted and must not include a browser profile's account chrome.
 
 **A log line is not evidence of what a person saw.** "render sent" does not prove
 the artifact rendered, and a 403 in a log does not prove the second account saw a
-not-found view. L6 and L7 are decided from actual rendered browser output.
+not-found view. L7, L8, L13 and L17 are decided from actual rendered browser
+output.
 
 **Bounded volume.** Keep to the operation count in the accepted envelope. No load
 test, no unrelated account, no customer document.
@@ -105,21 +106,29 @@ Each item names what to do, what decides it, and what to record. Record `pass`,
 `fail` or `blocked` for every one — there is no fourth answer, and an item nobody
 got to is `blocked`.
 
+The table is #176's live assertions one for one. Several of those assertions are
+one person's session at a browser rather than three separate runs, so a row may
+fold more than one; where it does, the **sub-assertions are listed in the row and
+carried in the runner's `covers` field**, and each of them needs its own recorded
+outcome inside that row's result. A row is `pass` only when every line under it
+is.
+
 Every item also waits on specific §1 gate items, and a blocked run prints that
 mapping per line so an operator can read which prerequisite releases which
-acceptance guarantee. The runner is the authority for it; this table is the same
-mapping in prose.
+acceptance guarantee. The runner is the authority for it.
 
 | Guarantee | Waits on | Released by |
 | --- | --- | --- |
-| L1, L2, L3, L8, L11 | G2, G6 | both deployments at a frozen revision |
+| L1, L2, L3, L15 | G2, G6 | both deployments at a frozen revision |
 | L4 | G2, G3, G4 | the OAuth application and the two test identities |
-| L5 | G2, G3, G4, G5 | all of the above plus a published release |
-| L6 | G2, G4, G5 | the deployments, an identity and the released package |
-| L7 | G2, G4 | the deployments and a second test identity |
-| L9 | G2, G5 | the deployments and the released package |
-| L10 | G2, G7 | the deployments and the accepted pilot envelope |
-| L12 | G7 | the named retention owner |
+| L5, L6 | G2, G3, G4, G5 | all of the above plus a published release |
+| L7, L8, L12, L17 | G2, G4, G5 | the deployments, an identity and the released package |
+| L9, L13 | G2, G4, G5, G6 | the above at a frozen deployed revision |
+| L10 | G2, G5, G6 | the deployments at a frozen revision and the released package |
+| L11 | G2, G5 | the deployments and the released package |
+| L14 | G2, G7 | the deployments and the accepted pilot envelope |
+| L16 | G2, G6, G7 | the deployments plus the accepted envelope and retention owner |
+| L18 | G7 | the named retention owner |
 
 ### L1 — deployed session endpoint (probe)
 
@@ -142,7 +151,7 @@ Decided by the probe. Record the manifest entry.
 `…/content` reveal nothing to a signed-out reader: no document body, no title, the
 private header set on each response. Decided by the probe against a random id that
 cannot exist, which is the only id a runner may request without touching a real
-record. The owner/other-account half of isolation is L7.
+record. The owner/other-account half of isolation is L8.
 
 ### L4 — real GitHub sign-in (human)
 
@@ -161,10 +170,10 @@ Record, without collecting any token:
   replay of the same callback URL is refused (state is single-use);
 - that the resulting session cookie is `__Host-archon_session` with `Secure`,
   `HttpOnly`, `SameSite=Lax`, `Path=/` and no `Domain` (read from devtools; do
-  not copy the value anywhere).
+  not copy the value anywhere);
+- that a `GET` of the approval URL alone never approves and never logs out.
 
-Then perform the real approve action and, separately, verify that a `GET` of the
-approval URL alone never approves.
+Then perform the real approve action.
 
 ### L5 — installed release drives a real publish (human + agent, AE1)
 
@@ -184,42 +193,99 @@ In a clean directory with no repository access:
 
 Record the tested GitHub account class. Do not claim managed-enterprise
 compatibility unless a separately authorized managed-account test actually passed.
+If an organization restriction or an enterprise-managed account blocks the flow,
+that is an **observed limitation** recorded with the local artifact fallback that
+still works — never a reason to ask anyone to weaken an IT control.
 
-### L6 — the owner reads the artifact (human)
+### L6 — the completed record matches the real identity and the source (human)
+
+From the completed record and the receipt, with evidence kept content-minimal:
+
+- the persisted account key is `gh_<decimal GitHub id>` and derives from the real
+  numeric identity — a login or an address is not an ownership key, and a rename
+  of the test account must not change it;
+- the descriptor stored in the completed record is the one the client sent;
+- the recorded owner is the account that actually signed in;
+- the stored HTML digest equals both the receipt's `contentSha256` and the digest
+  of the local source bytes.
+
+### L7 — the owner reads the artifact (human)
 
 Signed in as the first account, open `<app>/docs/<id>`. Record from the rendered
 browser output: the trusted shell's title and owner identity, the artifact
 rendering inside the renderer frame, working fragment navigation within the
 artifact, and that the artifact never replaces or resizes the trusted regions.
 Record the network evidence that the content came from the same-origin content
-route with `Content-Disposition: attachment` and `private, no-store` — and that no
-public Blobs URL, CDN copy or redirect bearer appears anywhere in the transfer.
+route with `Content-Disposition: attachment`, `private, no-store` and `nosniff`.
 
-### L7 — a second real account is denied (human)
+### L8 — signed-out and a second real account are denied (human)
 
 In a second isolated browser profile signed in as the second test account, open
 the same `<app>/docs/<id>`. Record the rendered not-found view and that it is
 indistinguishable from the view for an id that never existed. Record that the
 metadata and content routes return no document body and no marker of the document
-they refused.
+they refused. Repeat signed out and record that the view is the same one.
 
-### L8 — real conditional-write race (human)
+### L9 — nothing private is reachable outside the owner route (human)
 
-Drive two concurrent decisions against one pending publication against the
-deployed storage — the same operation from two windows, or two approve requests
-issued together. Exactly one must win; the loser must be refused without
-corrupting the record, and the completed record must be internally consistent
-afterwards. This must exercise real Netlify conditional writes. A fixture ETag map
-does not close L8.
+With the document published, look for it everywhere it must not be:
 
-### L9 — lost upload response recovers the same receipt (human)
+- no public Blobs URL, CDN copy, redirect bearer or downloadable asset path
+  appears anywhere in the owner's transfer;
+- neither deployment's published static output contains any private byte — check
+  the renderer site in particular, which must hold only operator-owned code;
+- the content route replayed without the session returns nothing.
+
+### L10 — real conditional-write race (human)
+
+Against the deployed storage, under the bounded operation count:
+
+- issue two **parallel identical uploads** for one pending publication: exactly
+  one wins, one durable document exists, and the loser is refused cleanly;
+- race a **cancel against an upload**: one decision wins and the record is not
+  left half-decided;
+- issue two approvals together: exactly one wins.
+
+Afterwards the completed record's owner and bytes must be unchanged. This must
+exercise real Netlify conditional writes; a fixture ETag map does not close L10.
+
+### L11 — lost and ambiguous responses recover the same receipt (human)
 
 Interrupt the upload **response** at a client-side proxy or interception layer
 while the service commits — do not stop the service. Re-run the client with the
 same private request file and record that it recovers the same receipt: same
-document id, same content digest, no second document created.
+document id, same content digest, no second document created. Repeat the recovery
+**after the upload deadline but within the receipt window**. Then record that the
+owner read still works after the receipt has expired — or, if the bounded live
+schedule does not reach that point, schedule the follow-up observation and keep
+this assertion explicitly open rather than recording it as passed.
 
-### L10 — publish-disabled transition (human)
+### L12 — failed attempts leave no accessible partial record (human)
+
+Drive each failure case and record that nothing readable is left behind: a
+**denied** approval, an **expired** approval, and uploads that are **invalid**,
+**oversized** and **descriptor-mismatched**. After every one, confirm the original
+local HTML is still available to the user — a refused publication must not cost
+them their document.
+
+### L13 — the hostile fixture stays contained in the deployed renderer (human)
+
+Publish the authorized hostile fixture from AHU-012 and open it as the owner.
+Record from real browser output and the network log:
+
+- the exact source and origin handshake — `archon:ready` from the renderer frame,
+  `archon:render` only to the configured renderer origin and that exact window;
+- the artifact cannot reach the account origin or mutate the trusted shell;
+- no session token, CSRF token, document id or account identity appears in any
+  message;
+- the deployed CSP and frame headers are the generated ones;
+- the failed-renderer state is shown honestly when the renderer cannot load.
+
+Record the C4 limitation as stated: the sandbox prevents account-origin access,
+**not** every self-navigation or every exfiltration path a malicious document
+could take. Do not write a network-proof or end-to-end-encryption claim.
+
+### L14 — publish-disabled transition (human)
 
 With the operator's authority, set `HOSTED_PUBLISH_ENABLED=false` on the deployed
 site and redeploy per `hosted/OPERATIONS.md` §4. Record that new start and upload
@@ -227,21 +293,42 @@ requests are refused with 503, that existing private reads still work, and that 
 completed receipt still recovers. Restore the previous value and record the
 restoration.
 
-### L11 — rate rules are accepted and effective (human)
+### L15 — rate rules are accepted and effective (human)
 
 Record the deploy log accepting **both** per-IP rules, and the effective deployed
 configuration for the public start route and the agent status route. Record what
 the platform actually enforced — this is a delayed best-effort mitigation, not a
-hard quota, and the record must not claim otherwise.
+hard quota, and the record must not claim otherwise. Do not generate an
+unapproved load test to obtain this.
 
-### L12 — cleanup and retention disposition (human)
+### L16 — log redaction and the private operation count (human)
 
-Name every resource the acceptance run created before removing anything. C2
-retains completed documents and there is **no delete API**; do not invent one.
-Either remove the named test records through the approved paused-maintenance
-operator process of `hosted/OPERATIONS.md` §7 after verifying the exact targets,
-or record their intentional retention against the named retention owner. Record
-which of the two happened for each resource.
+Plant unique test markers in the run's titles and operation identifiers, then
+search the deployed logs for them. Record that the markers are findable and that
+**no** session token, agent secret, verification fragment, client secret or cookie
+value appears anywhere alongside them. Record the count and identifiers of the
+operations this run owns **privately**, held for L18 — they identify exactly what
+may later be disposed of, and they do not belong in the public report.
+
+### L17 — the browser experience is accessible (human)
+
+From real rendered output, not from markup inspection alone:
+
+- the approval is completed by **keyboard alone**, with visible focus;
+- reader sign-out is reachable and actually revokes the session;
+- the renderer frame has an accessible title, and a failure state is announced to
+  a screen reader rather than being a silent blank frame;
+- the artifact's theme and its fallback fonts are readable, and the loading and
+  error states are visible.
+
+### L18 — cleanup and retention disposition (human)
+
+Name every resource the acceptance run created — from L16's private list — before
+removing anything. C2 retains completed documents and there is **no delete API**;
+do not invent one. Either remove the named test records through the approved
+paused-maintenance operator process of `hosted/OPERATIONS.md` §7 after verifying
+the exact targets, or record their intentional retention against the named
+retention owner. Record which of the two happened for each resource.
 
 ## 4. Recording the result
 
@@ -252,10 +339,11 @@ containing:
 - the frozen facts: package version and integrity, install source, source
   revision, both deploy identifiers, both origins and their registrable sites, the
   OAuth client id digest, and the account labels;
-- one row per guarantee L1–L12 with `pass`, `fail` or `blocked`, the evidence it
+- one row per guarantee L1–L18 with `pass`, `fail` or `blocked`, the evidence it
   was decided from, and — for a blocked one — the gate items it is still waiting
-  on, copied from the runner's `waits on` lines;
-- the cleanup/retention disposition from L12;
+  on, copied from the runner's `waits on` lines. A row that folds several of the
+  ticket's assertions records an outcome for each line of its `covers` list;
+- the cleanup/retention disposition from L18;
 - anything the run could not observe, stated as such.
 
 Commit the machine-written manifest alongside it if one was produced. Keep both

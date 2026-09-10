@@ -135,20 +135,231 @@ const CLIENT_ID = /^[A-Za-z0-9._-]{8,128}$/;
  * runner reports them as `pending` -- it has no way to observe them, and a
  * runner that could mark them `pass` would be the simulated live success the
  * ticket forbids.
+ *
+ * The table is the ticket's live assertions one for one. `covers` exists
+ * because several of those assertions belong to one sitting at a browser -- the
+ * hostile fixture's handshake, its blocked account-origin access and its
+ * message contents are one session, not three -- and a row that folded them
+ * silently would let an operator record twelve passes while a third of the
+ * ticket went unattempted. Every folded assertion is named here, so `covers` is
+ * the checklist the operator works through inside a row and the runbook section
+ * for that row repeats it in procedure form.
  */
 export const LIVE_GUARANTEES = Object.freeze([
-  { id: "L1", by: "probe", waits: ["G2", "G6"], what: "deployed session endpoint answers anonymously with the hosted header set" },
-  { id: "L2", by: "probe", waits: ["G2", "G6"], what: "deployed renderer serves the generated header set and sets no cookie" },
-  { id: "L3", by: "probe", waits: ["G2", "G6"], what: "deployed viewer and metadata routes reveal nothing to a signed-out reader" },
-  { id: "L4", by: "runbook", waits: ["G2", "G3", "G4"], what: "real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes" },
-  { id: "L5", by: "runbook", waits: ["G2", "G3", "G4", "G5"], what: "installed released package and packaged skill drive a real publish (AE1)" },
-  { id: "L6", by: "runbook", waits: ["G2", "G4", "G5"], what: "owner reads the artifact through the deployed renderer in a real browser" },
-  { id: "L7", by: "runbook", waits: ["G2", "G4"], what: "a second real account is denied the same document" },
-  { id: "L8", by: "runbook", waits: ["G2", "G6"], what: "real conditional-write race behaviour against deployed storage" },
-  { id: "L9", by: "runbook", waits: ["G2", "G5"], what: "lost upload response recovers the same receipt" },
-  { id: "L10", by: "runbook", waits: ["G2", "G7"], what: "publish-disabled transition refuses new work while private reads survive" },
-  { id: "L11", by: "runbook", waits: ["G2", "G6"], what: "both per-IP rate rules accepted by the deploy and effective" },
-  { id: "L12", by: "runbook", waits: ["G7"], what: "cleanup or intentional retention disposition of every generated record" },
+  {
+    id: "L1",
+    by: "probe",
+    waits: ["G2", "G6"],
+    what: "deployed session endpoint answers anonymously with the hosted header set",
+    covers: [
+      "an anonymous GET is answered {v:1,authenticated:false} with no Set-Cookie",
+      "every header of the shipped hosted policy is present with its exact value",
+    ],
+  },
+  {
+    id: "L2",
+    by: "probe",
+    waits: ["G2", "G6"],
+    what: "deployed renderer serves the generated header set and sets no cookie",
+    covers: [
+      "the generated header set, including frame-ancestors of the app origin, survives the deploy",
+      "the cookie-free origin sets no cookie",
+    ],
+  },
+  {
+    id: "L3",
+    by: "probe",
+    waits: ["G2", "G6"],
+    what: "deployed viewer and metadata routes reveal nothing to a signed-out reader",
+    covers: [
+      "viewer, metadata and content routes return no document body and no title",
+      "the private header set is on each response",
+    ],
+  },
+  {
+    id: "L4",
+    by: "runbook",
+    waits: ["G2", "G3", "G4"],
+    what: "real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes",
+    covers: [
+      "the pairing code and descriptor shown before sign-in match what the client sent",
+      "authorization goes to GitHub's fixed endpoint with the dedicated client id, a state and an S256 challenge",
+      "the scopes GitHub's consent screen says it is granting are none",
+      "the callback lands on the exact frozen path and a replay of it is refused",
+      "the session cookie carries __Host- prefix, Secure, HttpOnly, SameSite=Lax, Path=/ and no Domain",
+      "a GET of the approval URL never approves and never logs out",
+    ],
+  },
+  {
+    id: "L5",
+    by: "runbook",
+    waits: ["G2", "G3", "G4", "G5"],
+    what: "installed released package and packaged skill drive a real publish (AE1)",
+    covers: [
+      "the exact release installs in a clean directory from a source needing no repository access",
+      "the shipped skill installs and reads by its supported instructions",
+      "Claude, following only that skill, builds, starts, checkpoints and resumes the publication",
+      "a separate client invocation observes the durable receipt",
+      "the retained HTML is offline-readable with working section navigation and theme rendering",
+      "the tested GitHub account class is recorded and no managed-enterprise claim is made without a separate authorized test",
+      "an organization or enterprise-managed restriction is recorded as an observed limitation with the local artifact fallback",
+    ],
+  },
+  {
+    id: "L6",
+    by: "runbook",
+    waits: ["G2", "G3", "G4", "G5"],
+    what: "the completed record matches the real GitHub identity and the source bytes",
+    covers: [
+      "the persisted account key derives from the real GitHub numeric id, not a login or an address",
+      "the descriptor in the completed record matches what the client sent",
+      "the recorded owner matches the account that signed in",
+      "the stored HTML digest matches both the receipt and the local source bytes",
+    ],
+  },
+  {
+    id: "L7",
+    by: "runbook",
+    waits: ["G2", "G4", "G5"],
+    what: "owner reads the artifact through the deployed renderer in a real browser",
+    covers: [
+      "the trusted shell shows the title and owner identity and the artifact renders inside the renderer frame",
+      "fragment navigation works inside the artifact and the renderer never replaces it",
+      "the artifact never replaces or resizes the trusted regions",
+      "content arrives same-origin as an attachment with private no-store and nosniff",
+    ],
+  },
+  {
+    id: "L8",
+    by: "runbook",
+    waits: ["G2", "G4", "G5"],
+    what: "signed-out and a second real account are denied the same document",
+    covers: [
+      "the second account's viewer response is indistinguishable from one for an id that never existed",
+      "metadata and content routes leak no title, no bytes and no marker of the document they refused",
+      "the signed-out view is the same not-found view",
+    ],
+  },
+  {
+    id: "L9",
+    by: "runbook",
+    waits: ["G2", "G4", "G5", "G6"],
+    what: "no private artifact is reachable outside the owner-authorized route",
+    covers: [
+      "no public Blobs URL, CDN copy, redirect bearer or downloadable asset path appears in the transfer",
+      "neither deployment's static output contains any private byte",
+      "the content route without the session returns nothing",
+    ],
+  },
+  {
+    id: "L10",
+    by: "runbook",
+    waits: ["G2", "G5", "G6"],
+    what: "real conditional-write race behaviour against deployed storage",
+    covers: [
+      "two parallel identical uploads leave exactly one winner and one durable document",
+      "a cancel racing an upload resolves to one decision without corrupting the record",
+      "two concurrent approvals of one pending publication leave exactly one winner",
+      "the completed record's owner and bytes never change afterwards",
+      "the race runs against real Netlify conditional writes, never a fixture ETag map",
+    ],
+  },
+  {
+    id: "L11",
+    by: "runbook",
+    waits: ["G2", "G5"],
+    what: "ambiguous and lost responses recover the identical receipt",
+    covers: [
+      "the upload response is dropped at a client-side interception layer while the service commits",
+      "the same private request file recovers the same document id and digest with no second document",
+      "recovery still works after the upload deadline but within the receipt window",
+      "the owner read survives receipt expiry, or that observation is scheduled and this assertion stays open",
+    ],
+  },
+  {
+    id: "L12",
+    by: "runbook",
+    waits: ["G2", "G4", "G5"],
+    what: "denied, expired and invalid attempts leave no accessible partial record",
+    covers: [
+      "a denied approval leaves nothing readable",
+      "an expired approval leaves nothing readable",
+      "invalid, oversized and descriptor-mismatched uploads leave nothing readable",
+      "the original local HTML remains available after every one of those failures",
+    ],
+  },
+  {
+    id: "L13",
+    by: "runbook",
+    waits: ["G2", "G4", "G5", "G6"],
+    what: "the authorized hostile fixture stays contained in the deployed renderer",
+    covers: [
+      "the exact source and origin handshake holds: ready then render, configured origins and the parent window only",
+      "the artifact cannot reach the account origin or mutate the trusted shell",
+      "no session token, CSRF token, document id or account identity appears in any message",
+      "the deployed CSP and frame headers are the generated ones",
+      "the failed-renderer state is shown honestly rather than as a blank frame",
+      "the C4 self-navigation and exfiltration limitation is recorded, with no network-proof claim",
+    ],
+  },
+  {
+    id: "L14",
+    by: "runbook",
+    waits: ["G2", "G7"],
+    what: "publish-disabled transition refuses new work while private reads survive",
+    covers: [
+      "new start and upload requests are refused with 503",
+      "an existing private owner read still works",
+      "a completed receipt still recovers",
+      "the agreed setting is restored and the restoration is recorded",
+    ],
+  },
+  {
+    id: "L15",
+    by: "runbook",
+    waits: ["G2", "G6"],
+    what: "both per-IP rate rules accepted by the deploy and effective",
+    covers: [
+      "the deploy log accepts both rules",
+      "the effective deployed configuration covers the public start route and the agent status route",
+      "what the platform enforced is recorded as delayed best-effort, never as a hard global or account quota",
+      "no unapproved load test is run to obtain it",
+    ],
+  },
+  {
+    id: "L16",
+    by: "runbook",
+    waits: ["G2", "G6", "G7"],
+    what: "logs redact secrets and the owned test operations are counted privately",
+    covers: [
+      "planted test markers are searched for in the deployed logs",
+      "no session token, agent secret, verification fragment, client secret or cookie value appears in them",
+      "the count and identifiers of the operations this run owns are recorded privately, not in the public report",
+    ],
+  },
+  {
+    id: "L17",
+    by: "runbook",
+    waits: ["G2", "G4", "G5"],
+    what: "the browser experience is accessible in real rendered output",
+    covers: [
+      "the approval is completed by keyboard alone",
+      "reader sign-out is reachable and revokes the session",
+      "the renderer frame has an accessible title and failure states are announced to a screen reader",
+      "the artifact theme and its fallback fonts are readable, and loading and error states are visible",
+    ],
+  },
+  {
+    id: "L18",
+    by: "runbook",
+    waits: ["G7"],
+    what: "cleanup or intentional retention disposition of every generated record",
+    covers: [
+      "every resource the run created is named before anything is removed",
+      "each is either removed through the approved paused-maintenance process or recorded as intentionally retained",
+      "no delete API is invented for the purpose",
+    ],
+  },
 ]);
 
 /**
@@ -162,10 +373,11 @@ export const LIVE_GUARANTEES = Object.freeze([
  */
 export function guaranteesWaitingOn(preflight) {
   const unmet = new Set(preflight.items.filter((entry) => entry.status !== "met").map((entry) => entry.id));
-  return LIVE_GUARANTEES.map(({ id, by, waits, what }) => ({
+  return LIVE_GUARANTEES.map(({ id, by, waits, what, covers }) => ({
     id,
     by,
     what,
+    covers,
     waiting: waits.filter((gate) => unmet.has(gate)),
   }));
 }
@@ -575,7 +787,8 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
 /**
  * The sanitized evidence manifest.
  *
- * Every guarantee appears with a status. A `runbook` guarantee is `pending`
+ * Every guarantee appears with its `covers` checklist and a status. A
+ * `runbook` guarantee is `pending`
  * whatever else happened, because this runner has no way to observe one and a
  * manifest that reported otherwise would be the simulated live success the
  * ticket forbids.
@@ -592,13 +805,14 @@ export function buildManifest({ preflight, probes = [], now, mode }) {
       items: preflight.items.map(({ id, gate, status, detail }) => ({ id, gate, status, detail })),
     },
     facts: preflight.facts,
-    guarantees: guaranteesWaitingOn(preflight).map(({ id, by, what, waiting }) => {
+    guarantees: guaranteesWaitingOn(preflight).map(({ id, by, what, covers, waiting }) => {
       const observed = by === "probe" ? byId.get(id) : undefined;
       const status = by === "runbook" ? "pending" : observed ? observed.status : "blocked";
       return {
         id,
         by,
         what,
+        covers,
         status,
         waitingOn: waiting,
         detail: observed ? observed.detail : waiting.length > 0 ? `waits on ${waiting.join(", ")}` : "not observed",

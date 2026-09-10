@@ -21,17 +21,40 @@ that will close it is [`../live-acceptance.md`](../live-acceptance.md).
 
 ## Preflight gate
 
+The transcript below is this branch's head, `0946c9a` + this rework, verbatim
+(stdout then stderr, which is the order the runner writes them):
+
 ```
 $ node scripts/test-hosted-live.mjs
 PASS  G0 the OAuth client secret is installed server-side only
-BLOCKED  G1 every operator prerequisite is supplied: not supplied: HOSTED_LIVE_APP_ORIGIN, …
-BLOCKED  G2 two HTTPS origins on two different registrable sites
-BLOCKED  G3 dedicated OAuth application with the exact callback and empty scope
-BLOCKED  G4 two approved test identities in isolated browser profiles
-BLOCKED  G5 an externally installable release of the publisher package
-BLOCKED  G6 frozen source revision, deploy revisions and a passing AHU-012 at that revision
-BLOCKED  G7 an accepted pilot envelope and a named retention owner
+BLOCKED  G1 every operator prerequisite is supplied: not supplied: HOSTED_LIVE_APP_ORIGIN, HOSTED_LIVE_RENDER_ORIGIN, HOSTED_LIVE_OAUTH_CLIENT_ID, HOSTED_LIVE_OAUTH_CALLBACK, HOSTED_LIVE_OAUTH_SCOPES, HOSTED_LIVE_ACCOUNTS, HOSTED_LIVE_PACKAGE, HOSTED_LIVE_PACKAGE_INTEGRITY, HOSTED_LIVE_PACKAGE_SOURCE, HOSTED_LIVE_SOURCE_REVISION, HOSTED_LIVE_APP_DEPLOY, HOSTED_LIVE_RENDER_DEPLOY, HOSTED_LIVE_BUDGET_APPROVAL, HOSTED_LIVE_RETENTION_OWNER, HOSTED_LIVE_AHU012_REVISION
+BLOCKED  G2 two HTTPS origins on two different registrable sites: both origins must be supplied as exact HTTPS origins with no path, port-only host or wildcard
+BLOCKED  G3 dedicated OAuth application with the exact callback and empty scope: not supplied
+BLOCKED  G4 two approved test identities in isolated browser profiles: supply exactly two comma-separated labels
+BLOCKED  G5 an externally installable release of the publisher package: not supplied
+BLOCKED  G6 frozen source revision, deploy revisions and a passing AHU-012 at that revision: not supplied
+BLOCKED  G7 an accepted pilot envelope and a named retention owner: not supplied
+BLOCKED  L1 deployed session endpoint answers anonymously with the hosted header set: waits on G2, G6
+BLOCKED  L2 deployed renderer serves the generated header set and sets no cookie: waits on G2, G6
+BLOCKED  L3 deployed viewer and metadata routes reveal nothing to a signed-out reader: waits on G2, G6
+BLOCKED  L4 real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes: waits on G2, G3, G4
+BLOCKED  L5 installed released package and packaged skill drive a real publish (AE1): waits on G2, G3, G4, G5
+BLOCKED  L6 the completed record matches the real GitHub identity and the source bytes: waits on G2, G3, G4, G5
+BLOCKED  L7 owner reads the artifact through the deployed renderer in a real browser: waits on G2, G4, G5
+BLOCKED  L8 signed-out and a second real account are denied the same document: waits on G2, G4, G5
+BLOCKED  L9 no private artifact is reachable outside the owner-authorized route: waits on G2, G4, G5, G6
+BLOCKED  L10 real conditional-write race behaviour against deployed storage: waits on G2, G5, G6
+BLOCKED  L11 ambiguous and lost responses recover the identical receipt: waits on G2, G5
+BLOCKED  L12 denied, expired and invalid attempts leave no accessible partial record: waits on G2, G4, G5
+BLOCKED  L13 the authorized hostile fixture stays contained in the deployed renderer: waits on G2, G4, G5, G6
+BLOCKED  L14 publish-disabled transition refuses new work while private reads survive: waits on G2, G7
+BLOCKED  L15 both per-IP rate rules accepted by the deploy and effective: waits on G2, G6
+BLOCKED  L16 logs redact secrets and the owned test operations are counted privately: waits on G2, G6, G7
+BLOCKED  L17 the browser experience is accessible in real rendered output: waits on G2, G4, G5
+BLOCKED  L18 cleanup or intentional retention disposition of every generated record: waits on G7
 FAIL  live acceptance is BLOCKED: 7 gate items unmet
+$ echo $?
+1
 ```
 
 `G0` passes for the only reason it can here: there is no client secret in this
@@ -68,19 +91,34 @@ retention owner.
 | L3 | Deployed viewer and metadata routes reveal nothing to a signed-out reader | blocked | G2, G6 | no deployment |
 | L4 | Real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes | blocked | G2, G3, G4 | no OAuth application, no origin to register a callback against |
 | L5 | Installed released package and packaged skill drive a real publish (AE1) | blocked | G2, G3, G4, G5 | package not published; no service to publish to |
-| L6 | Owner reads the artifact through the deployed renderer in a real browser | blocked | G2, G4, G5 | no deployment |
-| L7 | A second real account is denied the same document | blocked | G2, G4 | no deployment, no approved test identities |
-| L8 | Real conditional-write race behaviour against deployed storage | blocked | G2, G6 | no deployed storage |
-| L9 | Lost upload response recovers the same receipt | blocked | G2, G5 | no deployment |
-| L10 | Publish-disabled transition refuses new work while private reads survive | blocked | G2, G7 | no deployment |
-| L11 | Both per-IP rate rules accepted by the deploy and effective | blocked | G2, G6 | no deploy log exists |
-| L12 | Cleanup or intentional retention disposition of every generated record | blocked | G7 | nothing was created, so there is nothing to dispose of |
+| L6 | The completed record matches the real GitHub identity and the source bytes | blocked | G2, G3, G4, G5 | no completed record exists, and no real GitHub identity has signed in |
+| L7 | Owner reads the artifact through the deployed renderer in a real browser | blocked | G2, G4, G5 | no deployment |
+| L8 | Signed-out and a second real account are denied the same document | blocked | G2, G4, G5 | no deployment, no approved test identities |
+| L9 | No private artifact is reachable outside the owner-authorized route | blocked | G2, G4, G5, G6 | nothing is published and no static site output exists to inspect |
+| L10 | Real conditional-write race behaviour against deployed storage | blocked | G2, G5, G6 | no deployed storage |
+| L11 | Ambiguous and lost responses recover the identical receipt | blocked | G2, G5 | no deployment |
+| L12 | Denied, expired and invalid attempts leave no accessible partial record | blocked | G2, G4, G5 | no publication can be started, so none can fail |
+| L13 | The authorized hostile fixture stays contained in the deployed renderer | blocked | G2, G4, G5, G6 | no deployed renderer to load the fixture through |
+| L14 | Publish-disabled transition refuses new work while private reads survive | blocked | G2, G7 | no deployment |
+| L15 | Both per-IP rate rules accepted by the deploy and effective | blocked | G2, G6 | no deploy log exists |
+| L16 | Logs redact secrets and the owned test operations are counted privately | blocked | G2, G6, G7 | no deployed logs, and no operations were performed to count |
+| L17 | The browser experience is accessible in real rendered output | blocked | G2, G4, G5 | nothing was rendered in a browser |
+| L18 | Cleanup or intentional retention disposition of every generated record | blocked | G7 | nothing was created, so there is nothing to dispose of |
+
+The table is #176's live assertions one for one. Where one row folds several of
+them — L5's account class and the enterprise-managed limitation, L10's three
+races, L13's handshake, containment, message contents and failure state — the
+sub-assertions are named in the runner's `covers` field and in the matching
+runbook section, and each needs its own recorded outcome inside that row. An
+operator working this table cannot record a `pass` for a row while one of its
+lines went unattempted.
 
 ## What the local evidence does and does not cover
 
 AHU-012's integrated gate is green on this revision: the `check` workflow
-concluded `success` on `837dab4`, which runs `scripts/test-hosted-integration.mjs`
-along with every other gate in the repository. That is the strongest statement
+concluded `success` on `837dab4` (run `34489740605`), which runs
+`scripts/test-hosted-integration.mjs` along with every other gate in the
+repository. That is the strongest statement
 available today, and its limits are stated in
 [`ahu-012-local-integration.md`](ahu-012-local-integration.md): it composes the
 real handlers, the real packaged CLI and a real browser against a deterministic
@@ -101,7 +139,7 @@ the same revision is the record, not a local re-run.
   authorisation, and it cannot report a `pass` for any human-decided guarantee.
 - `scripts/test-hosted-live.test.mjs` — one planted violation per rule the gate
   enforces, with an injected `fetch` so no probe leaves the runner.
-- [`../live-acceptance.md`](../live-acceptance.md) — the procedure for L1–L12,
+- [`../live-acceptance.md`](../live-acceptance.md) — the procedure for L1–L18,
   the evidence-sanitisation rules, and the cleanup/retention disposition.
 - CI wiring that fails if the runner ever reports a live result without
   prerequisites, which is the state every build runs in.
@@ -109,6 +147,14 @@ the same revision is the record, not a local re-run.
   waits on, the runner prints the unmet ones per line on a blocked run, and the
   manifest carries them as `waitingOn`. A blocked capstone is only actionable if
   the operator can read which prerequisite releases which guarantee.
+- One acceptance line per live assertion #176 names. The table grew from twelve
+  rows to eighteen; the assertions that previously had no row at all were the
+  numeric-identity and record-matching checks, the failure cases that must leave
+  no partial record, the hostile fixture through the deployed renderer, the
+  static-output and public-URL exposure check, log redaction with the private
+  operation count, and the accessibility assertions. Folded sub-assertions are
+  named rather than implied, so a recorded set of passes cannot close the
+  capstone with part of it never attempted.
 
 ## Mutation proof of the new gate
 
@@ -118,9 +164,12 @@ mutation is reverted and the suite re-run green after every one.
 
 ```
 $ git worktree add --detach .worktrees/pr-176-<unique> HEAD
-$ python3 - <<'…'   # for each mutation: patch, node --test, revert, node --test
-$ node --test --test-timeout=30000 scripts/test-hosted-live.test.mjs
+$ npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
+$ python3 -u mutate.py   # for each mutation: patch, node --test, revert, node --test
+$ node --test --test-reporter=tap --test-timeout=30000 scripts/test-hosted-live.test.mjs
 ```
+
+The suite is 42 tests and is green before and after every mutation below.
 
 | Guarded condition removed | Test that failed |
 | --- | --- |
@@ -141,6 +190,9 @@ $ node --test --test-timeout=30000 scripts/test-hosted-live.test.mjs
 | blocked run prints the waiting lines | a blocked run prints the gate each open acceptance line waits on |
 | manifest records `waitingOn` | the manifest records the unmet gates per guarantee |
 | a guarantee's `waits` names a real gate item | every guarantee waits on gate items the preflight actually reports |
+| a guarantee's `covers` checklist | every acceptance line names the sub-assertions folded into it |
+| a ticket assertion dropped from the table | every live assertion the ticket names has a row that claims it |
+| the manifest carries `covers` | the manifest carries each guarantee's sub-assertion checklist |
 
 One row is defended twice: the runbook-`pending` rule is expressed both in the
 probe-only lookup and in the status expression, and removing either alone changes
