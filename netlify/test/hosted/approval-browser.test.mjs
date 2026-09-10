@@ -97,11 +97,26 @@ const CSP =
   "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; " +
   "frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com";
 
-/** The account the fixture provider signs in, and the id C1 derives for it. */
-const ACCOUNT = { id: 1010, login: "alpha-example", accountId: "gh_1010" };
+/**
+ * The account the fixture provider signs in, and the account identifier C1 v2
+ * derives for it: `a0_` plus the first 32 hex characters of SHA-256 of the
+ * subject `github|<id>`. Written as literals so a changed derivation is a
+ * failure here rather than a silently renamed owner.
+ */
+const ACCOUNT = {
+  id: 1010,
+  login: "alpha-example",
+  accountId: "a0_3777bcebd9749d2c4d90673f61930f78",
+  providerUserId: "github|1010",
+};
 
-/** A second account, for the switch. A different numeric id is a different owner. */
-const OTHER_ACCOUNT = { id: 2020, login: "beta-example", accountId: "gh_2020" };
+/** A second account, for the switch. A different subject is a different owner. */
+const OTHER_ACCOUNT = {
+  id: 2020,
+  login: "beta-example",
+  accountId: "a0_405ea0c0e5480a822c0141755db17f80",
+  providerUserId: "github|2020",
+};
 
 /**
  * The deploy configuration this matrix serves the page under.
@@ -275,9 +290,11 @@ async function startDeployment(record) {
     if (url.pathname === BECOME_PATH) {
       const { token } = await store.createSession({
         accountId: OTHER_ACCOUNT.accountId,
-        provider: "github.com",
-        providerUserId: String(OTHER_ACCOUNT.id),
+        provider: "auth0",
+        providerUserId: OTHER_ACCOUNT.providerUserId,
         login: OTHER_ACCOUNT.login,
+        email: null,
+        emailVerified: false,
       });
       outgoing.writeHead(204, {
         "set-cookie": serializeCookie("__Host-archon_session", token, {
@@ -829,7 +846,8 @@ async function runMatrix(chromium) {
   /* -------- 8. a completed operation reads as published, not as an error ---- */
   await withCase(seedRecord({
     state: "complete",
-    ownerAccountId: `gh_${ACCOUNT.id}`,
+    ownerAccountId: ACCOUNT.accountId,
+    ownerEmail: null,
     uploadExpiresAt: RECORDS.complete.uploadExpiresAt,
     completedAt: RECORDS.complete.completedAt,
     receiptExpiresAt: RECORDS.complete.receiptExpiresAt,

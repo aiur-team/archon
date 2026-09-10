@@ -30,6 +30,7 @@ import { inspect } from "node:util";
 
 import {
   decodeArtifactBytes,
+  deriveAccountId,
   encodeArtifactBytes,
   ERROR_CODES,
   HOSTED_LIMITS,
@@ -76,10 +77,15 @@ import {
   FIXTURE_LOCAL_APP_ORIGIN,
   FIXTURE_LOCAL_ENV,
   FIXTURE_LOCAL_RENDER_ORIGIN,
+  FIXTURE_ANONYMOUS_PRINCIPAL,
+  FIXTURE_EMAIL,
   FIXTURE_LOGIN,
   FIXTURE_OTHER_ACCOUNT_ID,
+  FIXTURE_OTHER_PRINCIPAL,
+  FIXTURE_OTHER_PROVIDER_USER_ID,
   FIXTURE_OWNER_ACCOUNT_ID,
   FIXTURE_PRINCIPAL,
+  LEGACY_GITHUB_PRINCIPAL,
   FIXTURE_PRIVATE_SUFFIX_APP_ORIGIN,
   FIXTURE_PRIVATE_SUFFIX_RENDER_ORIGIN,
   FIXTURE_PROVIDER_USER_ID,
@@ -250,8 +256,13 @@ test("the wire constants siblings hard-code are pinned here", () => {
   assert.equal(HOSTED_LIMITS.ARTIFACT_FORMAT, "html");
   assert.equal(HOSTED_LIMITS.DOCUMENT_PATH_PREFIX, "/docs/");
   assert.equal(HOSTED_LIMITS.AUTHORIZE_PATH, "/publish/authorize");
-  assert.equal(HOSTED_LIMITS.ACCOUNT_ID_PREFIX, "gh_");
-  assert.equal(HOSTED_LIMITS.IDENTITY_PROVIDER, "github.com");
+  assert.equal(HOSTED_LIMITS.ACCOUNT_ID_PREFIX, "a0_");
+  assert.equal(HOSTED_LIMITS.IDENTITY_PROVIDER, "auth0");
+  assert.equal(HOSTED_LIMITS.SUBJECT_MAX_LENGTH, 256);
+  /* Not a tunable. Shortening it widens the space in which two subjects share
+     one ownership key; lengthening it renames every stored owner. */
+  assert.equal(HOSTED_LIMITS.ACCOUNT_ID_HASH_HEX_LENGTH, 32);
+  assert.equal(HOSTED_LIMITS.EMAIL_MAX_LENGTH, 254);
   assert.equal(HOSTED_LIMITS.POLL_INTERVAL_SECONDS, 5);
   assert.equal(HOSTED_LIMITS.HTML_MAX_BYTES, 2097152);
   assert.deepEqual(RENDER_MESSAGE_TYPES, { READY: "archon:ready", RENDER: "archon:render" });
@@ -297,33 +308,164 @@ test("a principal is accepted and returned frozen", () => {
   assert.ok(Object.isFrozen(principal));
 });
 
-test("a principal whose account id does not encode its provider id is rejected", () => {
-  /* The whole identity model is that `accountId` *is* the numeric id behind a
-     prefix. A record where the two disagree names two different subjects. */
+test("the worked v2 derivation is the derivation, hash and all", () => {
+  /* Asserted as literals rather than recomputed. Every other check in this file
+     compares the derivation to itself, which a changed truncation length or a
+     changed digest would satisfy just as happily; this is the one place a new
+     derivation has to disagree with a published number. */
+  assert.equal(
+    deriveAccountId("google-oauth2|103547991597142817347"),
+    "a0_7c1cdf721e2c5509e6dc26516af0bd28",
+  );
+  assert.equal(deriveAccountId("github|1010"), "a0_3777bcebd9749d2c4d90673f61930f78");
+  const worked = validatePrincipal({
+    accountId: "a0_7c1cdf721e2c5509e6dc26516af0bd28",
+    provider: "auth0",
+    providerUserId: "google-oauth2|103547991597142817347",
+    login: "Ann Example",
+    email: "ann@example.com",
+    emailVerified: true,
+  });
+  assert.equal(worked.accountId, "a0_7c1cdf721e2c5509e6dc26516af0bd28");
+  assert.equal(worked.accountId.length, 35);
+});
+
+test("two providers reaching one person are two accounts, not one", () => {
+  const google = validatePrincipal(FIXTURE_PRINCIPAL);
+  const github = validatePrincipal(FIXTURE_OTHER_PRINCIPAL);
+  /* The settled decision, asserted rather than described: the shared address
+     links nothing, because ownership follows `accountId` alone. */
+  assert.equal(google.email, github.email);
+  assert.notEqual(google.accountId, github.accountId);
+  assert.equal(google.accountId, deriveAccountId(FIXTURE_PROVIDER_USER_ID));
+  assert.equal(github.accountId, deriveAccountId(FIXTURE_OTHER_PROVIDER_USER_ID));
+});
+
+test("a principal whose account id is not the digest of its own subject is rejected", () => {
+  /* The whole identity model is that `accountId` *is* the digest of the subject.
+     A record where the two disagree names two different subjects, and a
+     well-formed `a0_` value that nobody derived is a caller-chosen owner. */
   rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { accountId: FIXTURE_OTHER_ACCOUNT_ID })), {
     field: "principal.accountId",
   });
-  rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { providerUserId: "10000043" })), {
+  rejects(
+    () => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { providerUserId: FIXTURE_OTHER_PROVIDER_USER_ID })),
+    { field: "principal.accountId" },
+  );
+  /* Off by one hex character, and still the right shape and length. */
+  const digest = FIXTURE_OWNER_ACCOUNT_ID.slice(3);
+  const flipped = `a0_${digest[0] === "0" ? "1" : "0"}${digest.slice(1)}`;
+  rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { accountId: flipped })), {
     field: "principal.accountId",
   });
+  /* Truncated to half the width. The shape rule catches this one; the point of
+     asserting it is that shortening the derivation cannot pass quietly. */
+  rejects(
+    () => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { accountId: `a0_${digest.slice(0, 16)}` })),
+    { field: "principal.accountId" },
+  );
 });
 
-test("a principal must name the one supported provider and a real login", () => {
-  for (const provider of ["gitlab.com", "github", "", null]) {
+test("a v1 GitHub principal no longer validates, as a principal or as a session", () => {
+  rejects(() => validatePrincipal(LEGACY_GITHUB_PRINCIPAL), { field: "principal" });
+  rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { accountId: "gh_10000042" })), {
+    field: "principal.accountId",
+  });
+  rejects(
+    () => validateSessionResponse(replacing(SIGNED_IN_SESSION, { accountId: "gh_10000042" })),
+    { field: "session.accountId" },
+  );
+});
+
+test("a principal must name the one supported provider and a display login", () => {
+  for (const provider of ["github.com", "gitlab.com", "auth0.com", "", null]) {
     rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { provider })), {
       field: "principal.provider",
     });
   }
-  for (const login of ["user@example.com", "-leading", "has space", "a".repeat(40), "", 42]) {
+  /* `login` is display text now, so a space and a leading hyphen are both legal
+     names. What is still refused is an address in the display position. */
+  for (const login of ["Ann Example", "-leading"]) {
+    assert.equal(validatePrincipal(replacing(FIXTURE_PRINCIPAL, { login })).login, login);
+  }
+  for (const login of ["user@example.com", "a".repeat(40), "", " padded", "a\u200Bb", 42]) {
     rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { login })), {
       field: "principal.login",
     });
   }
-  for (const providerUserId of ["0123", "abc", "", 42]) {
+});
+
+test("a subject is a raw <connection>|<id>, and an email is not one", () => {
+  for (const providerUserId of [
+    "user@example.com",
+    "1010",
+    "github",
+    "|1010",
+    "GitHub|1010",
+    "github|",
+    ` github|1010`,
+    `github|${"9".repeat(250)}`,
+    "",
+    42,
+  ]) {
     rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { providerUserId })), {
       field: "principal.providerUserId",
     });
   }
+  /* Exactly at the bound, and one character past it. */
+  const atLimit = `github|${"9".repeat(HOSTED_LIMITS.SUBJECT_MAX_LENGTH - 7)}`;
+  assert.equal(atLimit.length, HOSTED_LIMITS.SUBJECT_MAX_LENGTH);
+  const principal = validatePrincipal({
+    ...FIXTURE_PRINCIPAL,
+    providerUserId: atLimit,
+    accountId: deriveAccountId(atLimit),
+  });
+  assert.equal(principal.providerUserId, atLimit);
+});
+
+test("emailVerified is a strict boolean, and true requires an address", () => {
+  for (const emailVerified of ["true", "false", 1, 0, null, undefined]) {
+    rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { emailVerified })), {
+      field: "principal.emailVerified",
+    });
+  }
+  rejects(() => validatePrincipal(without(FIXTURE_PRINCIPAL, "emailVerified")), {
+    field: "principal",
+  });
+  /* A verified flag with nothing to verify is the shape that would grant domain
+     access on the strength of an address that is not there. */
+  rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { email: null })), {
+    field: "principal.email",
+  });
+  /* The other direction is the ordinary case for a connection that publishes no
+     address at all. */
+  const quiet = validatePrincipal(FIXTURE_ANONYMOUS_PRINCIPAL);
+  assert.equal(quiet.email, null);
+  assert.equal(quiet.emailVerified, false);
+});
+
+test("a stored email is already normalized, and is never normalized here", () => {
+  for (const email of [
+    "Ann@Example.com",
+    " ann@example.com",
+    "ann@example.com ",
+    "ann@localhost",
+    "ann@@example.com",
+    "@example.com",
+    "ann@",
+    "ann example@example.com",
+    "ann@exa mple.com",
+    "änn@example.com",
+    `${"a".repeat(65)}@example.com`,
+    `ann@${"a".repeat(250)}.com`,
+    "",
+    42,
+  ]) {
+    rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { email })), {
+      field: "principal.email",
+    });
+  }
+  assert.equal(validatePrincipal(FIXTURE_PRINCIPAL).email, FIXTURE_EMAIL);
 });
 
 test("the two session bodies are disjoint, so a signed-out reply carries no account", () => {
@@ -331,13 +473,15 @@ test("the two session bodies are disjoint, so a signed-out reply carries no acco
   const signedIn = validateSessionResponse(SIGNED_IN_SESSION);
   assert.equal(signedIn.accountId, FIXTURE_OWNER_ACCOUNT_ID);
   assert.equal(signedIn.login, FIXTURE_LOGIN);
+  assert.equal(signedIn.email, FIXTURE_EMAIL);
+  assert.equal(signedIn.emailVerified, true);
 
   /* A signed-out body may not smuggle account fields, and a signed-in one may
      not omit them. */
   rejects(() =>
     validateSessionResponse(replacing(SIGNED_OUT_SESSION, { accountId: FIXTURE_OWNER_ACCOUNT_ID })),
   );
-  for (const key of ["accountId", "login", "csrfToken"]) {
+  for (const key of ["accountId", "login", "email", "emailVerified", "csrfToken"]) {
     rejects(() => validateSessionResponse(without(SIGNED_IN_SESSION, key)));
   }
   for (const csrfToken of ["short", "has space in it and is long enough", "", 42]) {
@@ -348,6 +492,25 @@ test("the two session bodies are disjoint, so a signed-out reply carries no acco
   rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { authenticated: "yes" })), {
     field: "session.authenticated",
   });
+});
+
+test("the session body reports verification with the principal's own rules", () => {
+  for (const emailVerified of ["true", 1, null]) {
+    rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { emailVerified })), {
+      field: "session.emailVerified",
+    });
+  }
+  rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { email: null })), {
+    field: "session.email",
+  });
+  rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { email: "Ann@Example.com" })), {
+    field: "session.email",
+  });
+  const quiet = validateSessionResponse(
+    replacing(SIGNED_IN_SESSION, { email: null, emailVerified: false }),
+  );
+  assert.equal(quiet.email, null);
+  assert.equal(quiet.emailVerified, false);
 });
 
 /* ------------------------------------------------------------------ */
@@ -566,8 +729,11 @@ test("there is exactly one fixture for every contract state, and each validates"
 });
 
 test("a complete record without its owner, bytes or timestamps is rejected", () => {
+  /* `ownerEmail` travels with the owner key: dropping the owner drops the
+     address too, which is the record a caller would actually write. */
   for (const key of ["ownerAccountId", "html", "completedAt", "receiptExpiresAt"]) {
-    rejects(() => validatePublication(replacing(PUBLICATION_FIXTURES.complete, { [key]: null })), {
+    const patch = key === "ownerAccountId" ? { ownerAccountId: null, ownerEmail: null } : { [key]: null };
+    rejects(() => validatePublication(replacing(PUBLICATION_FIXTURES.complete, patch)), {
       field: `publication.${key}`,
     });
   }
@@ -588,7 +754,8 @@ test("an approved record carrying HTML or a receipt is rejected", () => {
     rejects(() => validatePublication(replacing(PUBLICATION_FIXTURES.approved, patch)));
   }
   for (const key of ["ownerAccountId", "uploadExpiresAt"]) {
-    rejects(() => validatePublication(replacing(PUBLICATION_FIXTURES.approved, { [key]: null })), {
+    const patch = key === "ownerAccountId" ? { ownerAccountId: null, ownerEmail: null } : { [key]: null };
+    rejects(() => validatePublication(replacing(PUBLICATION_FIXTURES.approved, patch)), {
       field: `publication.${key}`,
     });
   }
@@ -755,20 +922,23 @@ test("the pairing code is display text, and the recommended grammar is advice", 
   }
 });
 
-test("an owner is a provider-scoped numeric id, never a username or an email", () => {
+test("an owner is a derived account id, never a username, an email or a v1 key", () => {
   const { approved } = PUBLICATION_FIXTURES;
-  /* `xy_123456` and a bare `1234567890` both survive the digit rule once the
-     first three characters are sliced off, so the provider prefix is the only
-     thing that rejects them. */
+  const digest = FIXTURE_OWNER_ACCOUNT_ID.slice(3);
+  /* `xy_<digest>` survives the hex rule once the first three characters are
+     sliced off, so the prefix is the only thing that rejects it - and a bare
+     digest with no prefix at all is the same case from the other side. */
   for (const ownerAccountId of [
     "octocat",
-    "gh_",
-    "gh_0123",
-    "gh_abc",
+    "a0_",
+    "a0_10000042",
+    `a0_${digest.toUpperCase()}`,
+    `a0_${digest.slice(0, 16)}`,
+    `a0_${digest}ff`,
     "user@example.com",
-    "gh_-1",
-    "xy_123456",
-    "1234567890",
+    "gh_10000042",
+    `xy_${digest}`,
+    digest,
     42,
   ]) {
     rejects(() => validatePublication(replacing(approved, { ownerAccountId })), {
@@ -818,12 +988,33 @@ test("no lifetime on a record may run backwards", () => {
   );
 });
 
+test("a stored owner email travels with the owner key and nothing else", () => {
+  const { pending, approved } = PUBLICATION_FIXTURES;
+  /* Both null is the ordinary unowned record. */
+  assert.equal(validatePublication(pending).ownerEmail, null);
+  /* An owner with no verified address is legal; an address with no owner is not,
+     because there is then nothing the address is recovery metadata *for*. */
+  assert.equal(validatePublication(replacing(approved, { ownerEmail: null })).ownerEmail, null);
+  rejects(() => validatePublication(replacing(pending, { ownerEmail: FIXTURE_EMAIL })), {
+    field: "publication.ownerEmail",
+  });
+  /* Absent rather than null: `requireExactKeys` still governs the record, so a
+     writer cannot leave the field off an owned record. */
+  rejects(() => validatePublication(without(approved, "ownerEmail")), { field: "publication" });
+  for (const ownerEmail of ["Ann@Example.com", "ann@localhost", "", 42, undefined]) {
+    rejects(() => validatePublication(replacing(approved, { ownerEmail })), {
+      field: "publication.ownerEmail",
+    });
+  }
+  assert.equal(validatePublication(approved).ownerEmail, FIXTURE_EMAIL);
+});
+
 test("an unknown field on a stored record is rejected", () => {
   const error = rejects(
-    () => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { ownerEmail: "a@example.com" })),
+    () => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { ownerLogin: "somebody" })),
     { field: "publication" },
   );
-  assert.match(error.message, /unknown field\(s\): ownerEmail/);
+  assert.match(error.message, /unknown field\(s\): ownerLogin/);
 });
 
 /* ------------------------------------------------------------------ */

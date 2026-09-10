@@ -350,6 +350,9 @@ export async function createPublication(descriptor, dependencies) {
       createdAt,
       pendingExpiresAt,
       ownerAccountId: null,
+      /* No owner yet, and therefore no owner email. Both are set once, by the
+         approval below, from the session that authorized it. */
+      ownerEmail: null,
       uploadExpiresAt: null,
       completedAt: null,
       receiptExpiresAt: null,
@@ -471,6 +474,18 @@ export async function reviewPublication({ publicationId, browserBinding, princip
 }
 
 /**
+ * The recovery address to stamp beside an owner key, or `null`.
+ *
+ * Only a verified address is stored. An unverified one identifies nobody - it is
+ * a string the account holder typed - and recording it would offer an operator a
+ * match that is not evidence of anything. `null` is the honest answer for an
+ * approver whose identity carries no verified address.
+ */
+function ownerEmailOf(approver) {
+  return approver.emailVerified ? approver.email : null;
+}
+
+/**
  * Approve or deny, fixing the owner by compare-and-set.
  *
  * `displayedAccountId` is the account the page told the human they were acting
@@ -523,9 +538,15 @@ export async function decidePublication(
             ...record,
             state: "approved",
             ownerAccountId: approver.accountId,
+            ownerEmail: ownerEmailOf(approver),
             uploadExpiresAt: isoAfter(nowMs, HOSTED_LIMITS.UPLOAD_TTL_SECONDS),
           }
-        : { ...record, state: "denied", ownerAccountId: approver.accountId },
+        : {
+            ...record,
+            state: "denied",
+            ownerAccountId: approver.accountId,
+            ownerEmail: ownerEmailOf(approver),
+          },
     );
 
     /* `observed` means the stored record is exactly this decision, without the

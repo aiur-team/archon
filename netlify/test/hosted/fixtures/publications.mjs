@@ -21,10 +21,13 @@ import {
   FIXTURE_BROWSER_SECRET_HASH,
   FIXTURE_BROWSER_SECRET_PREIMAGE,
   FIXTURE_HTML,
+  FIXTURE_ANONYMOUS_PRINCIPAL,
   FIXTURE_OTHER_ACCOUNT_ID,
+  FIXTURE_OTHER_PRINCIPAL,
   FIXTURE_OWNER_ACCOUNT_ID,
   FIXTURE_PRINCIPAL,
   FIXTURE_PUBLICATION_ID,
+  FIXTURE_UNVERIFIED_PRINCIPAL,
   PUBLICATION_FIXTURES,
   VALID_DESCRIPTOR,
 } from "../contract-fixtures.mjs";
@@ -61,13 +64,23 @@ export const PUBLISHING_ENV = Object.freeze({
   HOSTED_PUBLISH_ENABLED: "true",
 });
 
-/** The second account, as a full principal, for every owner-mismatch case. */
-export const OTHER_PRINCIPAL = Object.freeze({
-  accountId: FIXTURE_OTHER_ACCOUNT_ID,
-  provider: HOSTED_LIMITS.IDENTITY_PROVIDER,
-  providerUserId: FIXTURE_OTHER_ACCOUNT_ID.slice(HOSTED_LIMITS.ACCOUNT_ID_PREFIX.length),
-  login: "archon-other-user",
-});
+/**
+ * The second account, as a full principal, for every owner-mismatch case.
+ *
+ * Re-exported from the contract fixtures rather than assembled here. Under C1 v2
+ * `accountId` is a one-way digest of the subject, so a principal cannot be
+ * reconstructed from an account identifier at all - the subject has to come from
+ * the producer that derived the identifier from it.
+ */
+export const OTHER_PRINCIPAL = FIXTURE_OTHER_PRINCIPAL;
+
+/**
+ * An approver whose address the tenant has not verified, and one with no address
+ * at all. Both must leave `ownerEmail` null, and only the first can tell an
+ * unconditional stamp from a verified one.
+ */
+export const UNVERIFIED_PRINCIPAL = FIXTURE_UNVERIFIED_PRINCIPAL;
+export const NO_EMAIL_PRINCIPAL = FIXTURE_ANONYMOUS_PRINCIPAL;
 
 /** The store key the fixture records live at. */
 export const FIXTURE_KEY = `${PUBLICATION_KEY_PREFIX}${FIXTURE_PUBLICATION_ID}`;
