@@ -61,10 +61,15 @@ test("a malformed principal cannot become a session", async () => {
   const { store } = memoryAuthStore();
   for (const bad of [
     { ...PRINCIPAL_ALPHA, accountId: "alpha-example" },
-    { ...PRINCIPAL_ALPHA, accountId: "gh_2020" },
-    { ...PRINCIPAL_ALPHA, providerUserId: "01010", accountId: "gh_01010" },
-    { ...PRINCIPAL_ALPHA, provider: "gitlab.com" },
+    { ...PRINCIPAL_ALPHA, accountId: PRINCIPAL_BETA.accountId },
+    { ...PRINCIPAL_ALPHA, providerUserId: PRINCIPAL_BETA.providerUserId },
+    /* A v1 principal: the old prefix, the bare numeric subject, and the old
+       provider constant. None of the three can pass now. */
+    { accountId: "gh_1010", provider: "github.com", providerUserId: "1010", login: "alpha-example" },
+    { ...PRINCIPAL_ALPHA, provider: "github.com" },
     { ...PRINCIPAL_ALPHA, login: "alpha@example.com" },
+    { ...PRINCIPAL_ALPHA, emailVerified: "false" },
+    { ...PRINCIPAL_ALPHA, email: "Alpha@Example.com", emailVerified: true },
   ]) {
     await assert.rejects(() => store.createSession(bad), { code: "invalid_request" });
   }
@@ -75,8 +80,9 @@ test("two accounts sharing a login are two sessions", async () => {
   const alpha = await store.createSession(PRINCIPAL_ALPHA);
   const beta = await store.createSession(PRINCIPAL_BETA);
   assert.equal(PRINCIPAL_ALPHA.login, PRINCIPAL_BETA.login);
-  assert.equal((await store.readSession(alpha.token)).principal.accountId, "gh_1010");
-  assert.equal((await store.readSession(beta.token)).principal.accountId, "gh_2020");
+  assert.equal((await store.readSession(alpha.token)).principal.accountId, PRINCIPAL_ALPHA.accountId);
+  assert.equal((await store.readSession(beta.token)).principal.accountId, PRINCIPAL_BETA.accountId);
+  assert.notEqual(PRINCIPAL_ALPHA.accountId, PRINCIPAL_BETA.accountId);
 });
 
 test("an unknown, expired or revoked session is null", async () => {

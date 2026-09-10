@@ -149,7 +149,7 @@ test("identifyHosted returns the principal behind a live session", async () => {
   const { store, token } = await signedIn();
   const principal = await identifyHosted(browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } }), { store });
   assert.deepEqual(principal, PRINCIPAL_ALPHA);
-  assert.equal(principal.accountId, "gh_1010");
+  assert.equal(principal.accountId, "a0_3777bcebd9749d2c4d90673f61930f78");
 });
 
 test("identifyHosted returns null for absent, expired and revoked sessions", async () => {

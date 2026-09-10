@@ -47,8 +47,10 @@ import {
   FIXTURE_RECORD_AGENT_SECRET,
   FIXTURE_RECORD_BROWSER_SECRET,
   FIXTURE_RESULT,
+  NO_EMAIL_PRINCIPAL,
   OTHER_PRINCIPAL,
   RECORDS,
+  UNVERIFIED_PRINCIPAL,
   VALID_DESCRIPTOR,
 } from "./fixtures/publications.mjs";
 import {
@@ -163,6 +165,7 @@ test("starting stores a pending record and returns each secret exactly once", as
   assert.equal(record.state, "pending");
   assert.equal(record.id, started.publicationId);
   assert.equal(record.ownerAccountId, null);
+  assert.equal(record.ownerEmail, null, "no owner means no recovery address");
   assert.equal(record.html, null);
 
   /* Only digests are stored, and the two capabilities are independent. */
@@ -352,12 +355,37 @@ test("approving fixes the owner from the session and opens the upload window", a
   const record = stored();
   assert.equal(record.state, "approved");
   assert.equal(record.ownerAccountId, FIXTURE_PRINCIPAL.accountId);
+  /* Recovery metadata, stamped in the same write as the owner key: the approver
+     had a verified address, so the record keeps it. */
+  assert.equal(record.ownerEmail, FIXTURE_PRINCIPAL.email);
   assert.equal(
     Date.parse(record.uploadExpiresAt) - clock.now(),
     HOSTED_LIMITS.UPLOAD_TTL_SECONDS * 1000,
   );
   assert.equal(decided.state, "approved");
   assertCarriesNoSecret(decided);
+});
+
+test("an approver with no verified address stamps an owner and no recovery email", async () => {
+  /* An unverified address identifies nobody, so it is not written. The owner key
+     is still fixed - `ownerEmail` is recovery metadata and never an access
+     decision, so its absence must cost the approver nothing. */
+  for (const approver of [UNVERIFIED_PRINCIPAL, NO_EMAIL_PRINCIPAL]) {
+    const { publications, stored } = harness({ seed: "pending" });
+    await publications.decidePublication({
+      publicationId: FIXTURE_PUBLICATION_ID,
+      browserBinding: BINDING,
+      principal: approver,
+      decision: "approve",
+      displayedAccountId: approver.accountId,
+    });
+    const record = stored();
+    assert.equal(record.ownerAccountId, approver.accountId);
+    assert.equal(record.ownerEmail, null, "an unverified address is not recovery evidence");
+  }
+  /* The first of the two carries an address. Without it, a stamp that ignored
+     `emailVerified` would be indistinguishable from one that honoured it. */
+  assert.notEqual(UNVERIFIED_PRINCIPAL.email, null);
 });
 
 test("a decision refuses a binding that was not produced by the server verifier", async () => {
@@ -477,6 +505,7 @@ test("denying fixes the owner and closes the operation without an upload window"
   const record = stored();
   assert.equal(record.state, "denied");
   assert.equal(record.ownerAccountId, FIXTURE_PRINCIPAL.accountId);
+  assert.equal(record.ownerEmail, FIXTURE_PRINCIPAL.email);
   assert.equal(record.uploadExpiresAt, null, "a denial opens no upload window");
   assert.equal(record.html, null);
   assert.equal(decided.state, "denied");

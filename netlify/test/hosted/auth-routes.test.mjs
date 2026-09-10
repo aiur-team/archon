@@ -205,9 +205,19 @@ test("the signed-in session body names the account and carries no secret materia
     browserRequest("/api/hosted/session", { cookies: { [SESSION_COOKIE]: token } }),
   );
   const body = await response.json();
-  assert.deepEqual(Object.keys(body).sort(), ["accountId", "authenticated", "csrfToken", "login", "v"]);
-  assert.equal(body.accountId, "gh_1010");
+  assert.deepEqual(Object.keys(body).sort(), [
+    "accountId",
+    "authenticated",
+    "csrfToken",
+    "email",
+    "emailVerified",
+    "login",
+    "v",
+  ]);
+  assert.equal(body.accountId, PRINCIPAL_ALPHA.accountId);
   assert.equal(body.login, "alpha-example");
+  assert.equal(body.email, null);
+  assert.equal(body.emailVerified, false);
   assert.equal(body.csrfToken, deriveCsrfToken(token));
 
   const rendered = JSON.stringify(body);

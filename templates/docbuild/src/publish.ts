@@ -79,8 +79,8 @@ export const PUBLISH_CONTRACT = Object.freeze({
   /** Lowercase-hex field widths. */
   SHA256_HEX_LENGTH: 64,
   PUBLICATION_ID_HEX_LENGTH: 32,
-  /** C1: `ownerAccountId` is a GitHub numeric ID behind a provider prefix. */
-  ACCOUNT_ID_PREFIX: "gh_",
+  /** C1 v2: `ownerAccountId` is a truncated subject digest behind this prefix. */
+  ACCOUNT_ID_PREFIX: "a0_",
   /** C1/C4: the two app paths a contract record may address. */
   AUTHORIZE_PATH: "/publish/authorize",
   DOCUMENT_PATH_PREFIX: "/docs/",
@@ -233,8 +233,12 @@ const HTML_MARKUP = /<!doctype\s+html|<\/[a-z][a-z0-9-]*\s*>|<[a-z][a-z0-9-]*(\s
 const NUL = "\u0000";
 const BYTE_ORDER_MARK = "\uFEFF";
 
-/** C1: `gh_` followed by a GitHub numeric account ID. */
-const ACCOUNT_ID = /^gh_[1-9][0-9]{0,19}$/;
+/**
+ * C1 v2: `a0_` followed by the first 32 lowercase hex characters of SHA-256 of
+ * the identity subject. A client validates only the shape - it never sees the
+ * subject, so it has nothing to recompute the digest from.
+ */
+const ACCOUNT_ID = /^a0_[0-9a-f]{32}$/;
 
 /** The only hosts a loopback-only local-test configuration may name. */
 export const LOOPBACK_HOSTS = Object.freeze(["localhost", "127.0.0.1", "[::1]"]);

@@ -33,6 +33,11 @@
  * the only thing that becomes an ownership key. `login` is carried for display
  * and nothing else, and `email` is neither requested nor read.
  *
+ * The numeric ID reaches the contract as the C1 v2 subject `github|<id>`, and
+ * the ownership key is the digest `deriveAccountId` computes from it. This
+ * adapter therefore produces exactly the principal shape ACN-005's Auth0
+ * exchange will produce, which is why it can be replaced rather than unpicked.
+ *
  * ## Timeouts
  *
  * Both provider calls are bounded. An unbounded `fetch` against a provider
@@ -43,7 +48,7 @@
  */
 
 import { AuthRequestError, AuthUnavailableError } from "./auth-errors.mjs";
-import { HOSTED_LIMITS, validatePrincipal } from "./contracts.mjs";
+import { HOSTED_LIMITS, deriveAccountId, validatePrincipal } from "./contracts.mjs";
 import { randomToken, sha256Base64Url } from "./secrets.mjs";
 
 /** The fixed provider endpoints. Not configurable, by design. */
@@ -170,7 +175,7 @@ async function providerJson(url, init, fetchImpl, timeoutMs) {
  *
  * @param {{code: string, codeVerifier: string, config: object}} params
  * @param {{fetchImpl?: typeof fetch, timeoutMs?: number}} [options]
- * @returns {Promise<Readonly<{accountId: string, provider: string, providerUserId: string, login: string}>>}
+ * @returns {Promise<Readonly<{accountId: string, provider: string, providerUserId: string, login: string, email: string | null, emailVerified: boolean}>>}
  */
 export async function exchangeCodeForIdentity(
   { code, codeVerifier, config },
@@ -248,14 +253,25 @@ export async function exchangeCodeForIdentity(
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 1) throw new AuthRequestError();
 
   try {
-    /* `email` is neither requested nor read: it is optional on `/user`, absent
+    /* The numeric id is spelled as a C1 v2 subject, `github|<id>`, and the
+       ownership key is derived from it by the contracts module rather than
+       assembled here. ACN-005 replaces this adapter with the real Auth0 code
+       exchange; until then this is what lets one principal shape be produced by
+       the identity path that exists.
+
+       `email` is neither requested nor read: it is optional on `/user`, absent
        for most accounts, and is not an ownership key here. An account with no
-       public email signs in exactly like any other. */
+       address is `email: null` and `emailVerified: false`, which is a legal
+       principal and grants no domain access - never a claimed verification this
+       adapter cannot substantiate. */
+    const providerUserId = `github|${id}`;
     return validatePrincipal({
-      accountId: `${HOSTED_LIMITS.ACCOUNT_ID_PREFIX}${id}`,
+      accountId: deriveAccountId(providerUserId),
       provider: HOSTED_LIMITS.IDENTITY_PROVIDER,
-      providerUserId: String(id),
+      providerUserId,
       login: user.login,
+      email: null,
+      emailVerified: false,
     });
   } catch {
     throw new AuthRequestError();

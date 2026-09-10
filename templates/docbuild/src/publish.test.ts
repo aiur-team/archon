@@ -140,7 +140,7 @@ function completeBody(origin: string, html = HTML): Record<string, unknown> {
     result: {
       documentId: PUBLICATION_ID,
       url: `${origin}${PUBLISH_CONTRACT.DOCUMENT_PATH_PREFIX}${PUBLICATION_ID}`,
-      ownerAccountId: "gh_4242",
+      ownerAccountId: "a0_544f653ee5809566d36b495075e710a7",
       contentSha256: createHash("sha256").update(bytes).digest("hex"),
       contentBytes: bytes.byteLength,
     },
@@ -632,7 +632,15 @@ test("an unowned account id or an unknown error code is refused", () => {
   const origin = "https://docs.example.com";
   const complete = completeBody(origin);
   const receipt = complete["result"] as Record<string, unknown>;
-  for (const owner of ["4242", "gh_0", "gh_abc", "google_1", "gh_"]) {
+  for (const owner of [
+    "544f653ee5809566d36b495075e710a7",
+    "gh_4242",
+    "a0_4242",
+    "a0_544F653EE5809566D36B495075E710A7",
+    "a0_544f653ee5809566d36b495075e710",
+    "google_1",
+    "a0_",
+  ]) {
     assert.throws(
       () => validateStatusEnvelope({ ...complete, result: { ...receipt, ownerAccountId: owner } }, origin),
       /ownerAccountId is malformed/,
@@ -897,7 +905,7 @@ test("resume uploads the approved bytes in a separate process and reports the re
   assert.equal(payload["state"], "complete");
   const receipt = payload["result"] as Record<string, unknown>;
   assert.equal(receipt["url"], `${serviceOrigin}/docs/${PUBLICATION_ID}`);
-  assert.equal(receipt["ownerAccountId"], "gh_4242");
+  assert.equal(receipt["ownerAccountId"], "a0_544f653ee5809566d36b495075e710a7");
   const upload = service.seen.artifact[0];
   assert.equal(upload?.contentType, PUBLISH_CONTRACT.ARTIFACT_MEDIA_TYPE);
   assert.equal(upload?.body.toString("utf8"), HTML);

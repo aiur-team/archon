@@ -89,18 +89,90 @@ export const VALID_DESCRIPTOR = Object.freeze(descriptorFor(FIXTURE_HTML));
 /* identities and secrets (synthetic)                                  */
 /* ------------------------------------------------------------------ */
 
-/** A synthetic GitHub numeric ID. Not a real account. */
-export const FIXTURE_PROVIDER_USER_ID = "10000042";
-export const FIXTURE_OWNER_ACCOUNT_ID = `gh_${FIXTURE_PROVIDER_USER_ID}`;
-/** A second synthetic identity, for the "other account is denied" cases. */
-export const FIXTURE_OTHER_ACCOUNT_ID = "gh_10000043";
+/**
+ * The C1 v2 account identifier for a subject, derived here rather than imported.
+ *
+ * Deliberately a second implementation of the rule, not a call into
+ * `deriveAccountId`: a fixture that asked production for the answer would agree
+ * with any derivation, including a broken one. Written out from the contract
+ * text - SHA-256 of the UTF-8 subject, first 32 hex characters, behind `a0_` -
+ * it disagrees the moment production stops matching it, and `contracts.test.mjs`
+ * additionally pins one worked example as a literal.
+ */
+export function accountIdForSubject(subject) {
+  return `a0_${sha256(subject).slice(0, 32)}`;
+}
+
+/**
+ * A synthetic Google identity. Not a real account, and not a real address: the
+ * subject is the plan's worked example and `example.com` belongs to nobody.
+ */
+export const FIXTURE_PROVIDER_USER_ID = "google-oauth2|103547991597142817347";
+export const FIXTURE_OWNER_ACCOUNT_ID = accountIdForSubject(FIXTURE_PROVIDER_USER_ID);
 export const FIXTURE_LOGIN = "archon-fixture-user";
+export const FIXTURE_EMAIL = "archon-fixture-user@example.com";
+
+/**
+ * A second synthetic identity, for the "other account is denied" cases. It is a
+ * GitHub-connection subject carrying the *same* address as the Google one above,
+ * which is the settled decision stated as data: two providers reaching one
+ * person are two identities with two ownership keys, and are not linked.
+ */
+export const FIXTURE_OTHER_PROVIDER_USER_ID = "github|10000043";
+export const FIXTURE_OTHER_ACCOUNT_ID = accountIdForSubject(FIXTURE_OTHER_PROVIDER_USER_ID);
 
 export const FIXTURE_PRINCIPAL = Object.freeze({
   accountId: FIXTURE_OWNER_ACCOUNT_ID,
-  provider: "github.com",
+  provider: "auth0",
   providerUserId: FIXTURE_PROVIDER_USER_ID,
   login: FIXTURE_LOGIN,
+  email: FIXTURE_EMAIL,
+  emailVerified: true,
+});
+
+/** The same person's other identity. Same address, different ownership key. */
+export const FIXTURE_OTHER_PRINCIPAL = Object.freeze({
+  accountId: FIXTURE_OTHER_ACCOUNT_ID,
+  provider: "auth0",
+  providerUserId: FIXTURE_OTHER_PROVIDER_USER_ID,
+  login: "archon-other-user",
+  email: FIXTURE_EMAIL,
+  emailVerified: true,
+});
+
+/** An identity whose connection publishes no address at all. Still valid. */
+export const FIXTURE_ANONYMOUS_PRINCIPAL = Object.freeze({
+  accountId: accountIdForSubject("github|10000044"),
+  provider: "auth0",
+  providerUserId: "github|10000044",
+  login: "archon-quiet-user",
+  email: null,
+  emailVerified: false,
+});
+
+/**
+ * An identity that reported an address the tenant has not verified.
+ *
+ * The address is present and legal; only the flag says it means nothing. This is
+ * the fixture that separates "no address" from "an address nobody vouched for",
+ * which are the same record to any code that reads `email` without reading
+ * `emailVerified`.
+ */
+export const FIXTURE_UNVERIFIED_PRINCIPAL = Object.freeze({
+  accountId: accountIdForSubject("github|10000045"),
+  provider: "auth0",
+  providerUserId: "github|10000045",
+  login: "archon-unverified-user",
+  email: "archon-unverified-user@example.com",
+  emailVerified: false,
+});
+
+/** A v1 principal, kept so the tests can prove it no longer validates. */
+export const LEGACY_GITHUB_PRINCIPAL = Object.freeze({
+  accountId: "gh_10000042",
+  provider: "github.com",
+  providerUserId: "10000042",
+  login: "archon-fixture-user",
 });
 
 /** Published preimages: hashing these proves the field shape, not a capability. */
@@ -188,6 +260,7 @@ const PUBLICATION_BASE = {
   createdAt: CREATED_AT,
   pendingExpiresAt: PENDING_EXPIRES_AT,
   ownerAccountId: null,
+  ownerEmail: null,
   uploadExpiresAt: null,
   completedAt: null,
   receiptExpiresAt: null,
@@ -207,12 +280,14 @@ export const PUBLICATION_FIXTURES = Object.freeze({
     ...PUBLICATION_BASE,
     state: "approved",
     ownerAccountId: FIXTURE_OWNER_ACCOUNT_ID,
+    ownerEmail: FIXTURE_EMAIL,
     uploadExpiresAt: UPLOAD_EXPIRES_AT,
   }),
   complete: Object.freeze({
     ...PUBLICATION_BASE,
     state: "complete",
     ownerAccountId: FIXTURE_OWNER_ACCOUNT_ID,
+    ownerEmail: FIXTURE_EMAIL,
     uploadExpiresAt: UPLOAD_EXPIRES_AT,
     completedAt: COMPLETED_AT,
     receiptExpiresAt: RECEIPT_EXPIRES_AT,
@@ -222,6 +297,7 @@ export const PUBLICATION_FIXTURES = Object.freeze({
     ...PUBLICATION_BASE,
     state: "denied",
     ownerAccountId: FIXTURE_OWNER_ACCOUNT_ID,
+    ownerEmail: FIXTURE_EMAIL,
     uploadExpiresAt: null,
   }),
   cancelled: Object.freeze({ ...PUBLICATION_BASE, state: "cancelled" }),
@@ -283,6 +359,8 @@ export const SIGNED_IN_SESSION = Object.freeze({
   authenticated: true,
   accountId: FIXTURE_OWNER_ACCOUNT_ID,
   login: FIXTURE_LOGIN,
+  email: FIXTURE_EMAIL,
+  emailVerified: true,
   csrfToken: FIXTURE_CSRF_TOKEN,
 });
 
