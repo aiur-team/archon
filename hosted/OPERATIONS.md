@@ -150,12 +150,11 @@ stands today:
 - **New uploads are refused too**, including for a publication that was already
   approved. The check is inside `completePublication`, the library function any
   upload has to go through to commit bytes, so a route cannot commit them by
-  forgetting to ask. **The `PUT /api/hosted/publications/<id>/artifact` route
-  itself is not landed yet** — no handler for it exists under `hosted/functions/`
-  as of this writing, and `completePublication` has no production caller. The
-  guard is in place ahead of the route so that the route arrives already gated;
-  once it lands it will answer the same `503`. Together these two are the whole
-  tap — with the flag off, no new bytes reach the store.
+  forgetting to ask. `PUT /api/hosted/publications/<id>/artifact` is that route,
+  and it answers the same `503`. It also checks the flag itself before reading
+  the body, which only makes the refusal cheaper — the answer with that pre-check
+  removed is still `503`, from `completePublication`. Together these two are the
+  whole tap — with the flag off, no new bytes reach the store.
 - **Status and receipt recovery keep working.** `POST
   /api/hosted/publications/<id>/status` deliberately does not consult the flag.
   An agent that already published can still recover its receipt for the
@@ -202,10 +201,12 @@ tells you the change has landed.
    outside, and because the upload path is gated on the same flag *inside
    `completePublication`* — the function any future artifact route must call —
    there is no window to wait out: once the deploy carrying the change is live,
-   no new bytes can be committed, whatever was approved beforehand. Until the
-   artifact route lands there is no upload path to probe separately; the gate's
-   coverage of it is proven by `scripts/test-hosted-operations.mjs`, which calls
-   `completePublication` directly.
+   no new bytes can be committed, whatever was approved beforehand. Probing the
+   upload path separately needs an approved publication, which needs a human
+   approval you cannot get while starts are refused — so the start probe is the
+   one to run. The gate's coverage of the upload is proven instead by
+   `scripts/test-hosted-operations.mjs`, which calls `completePublication`
+   directly, and by the route's own suite.
 
 ### Immediate stop
 

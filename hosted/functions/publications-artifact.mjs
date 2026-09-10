@@ -129,7 +129,13 @@ export async function handleArtifact(request, resolveDependencies) {
     if (rejected !== null) return errorResponse(rejected);
 
     /* Recovery of an existing receipt is not a new publication, so it is the one
-       path a disabled deployment still serves. A new completion is not. */
+       path a disabled deployment still serves. A new completion is not.
+
+       Like the state gate above, this is advisory: `completePublication` checks
+       the same flag from below its own already-complete branch, so removing this
+       block would change when the 503 arrives and nothing about which requests
+       get one. It is here so a disabled deployment does not spend 2 MiB finding
+       out. */
     if (preflight.state !== "complete" && dependencies.publishEnabled !== true) {
       return errorResponse(
         new HostedContractError(

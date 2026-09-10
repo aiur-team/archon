@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import { HOSTED_LIMITS, validateResult, validateWireError } from "../lib/contracts.mjs";
+import { completePublication } from "../lib/publications.mjs";
 import { createPublicationStore } from "../lib/publication-store.mjs";
 import { readArtifactBody } from "../lib/artifact-body.mjs";
 import artifactHandler, {
@@ -225,10 +226,37 @@ test("an approved publication past its upload deadline is 410, not a late comple
 /* publishing-disabled semantics                                       */
 /* ------------------------------------------------------------------ */
 
-test("a disabled deployment refuses a new completion", async () => {
+test("a disabled deployment refuses a new completion, before the body", async () => {
   const { resolve, writes } = harness({ seed: "approved", publishEnabled: false });
-  await assertError(await handleArtifact(upload(FIXTURE_HTML), resolve), 503, "publishing_disabled");
+  const request = upload(FIXTURE_HTML);
+  await assertError(await handleArtifact(request, resolve), 503, "publishing_disabled");
   assert.deepEqual(writes(), []);
+  assert.equal(request.bodyUsed, false, "a disabled deployment does not spend the body first");
+});
+
+test("the disabled answer is the adapter's, not the route's own opinion", async () => {
+  /* The route's pre-check is an optimisation over `completePublication`'s own
+     flag check, so the two must agree on the answer. Calling the adapter with
+     the same disabled dependency set and a body the route never read proves the
+     503 survives the route being wrong about it. */
+  const { resolve } = harness({ seed: "approved", publishEnabled: false });
+  await assert.rejects(
+    completePublication(
+      {
+        publicationId: FIXTURE_PUBLICATION_ID,
+        agentSecret: FIXTURE_RECORD_AGENT_SECRET,
+        html: FIXTURE_HTML,
+        contentSha256: VALID_DESCRIPTOR.contentSha256,
+        contentBytes: VALID_DESCRIPTOR.contentBytes,
+      },
+      resolve(),
+    ),
+    (error) => {
+      assert.equal(error.code, "publishing_disabled");
+      assert.equal(error.status, 503);
+      return true;
+    },
+  );
 });
 
 test("a disabled deployment still recovers the receipt of a completed publication", async () => {

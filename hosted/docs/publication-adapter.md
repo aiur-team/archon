@@ -45,27 +45,24 @@ A dependency set is:
 | `store` | a `createPublicationStore({ getStore })` adapter |
 | `appOrigin` | the configured app origin; receipts and the approval URL are built on it |
 | `production` | `false` only for the loopback-only local-test mode |
-| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; `createPublication` is the only operation that reads it (see below) |
+| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; read by `createPublication` and `completePublication`, and by nothing else (see below) |
 | `now` | `() => epochMilliseconds`, defaulting to `Date.now` |
 | `randomBytes` | `(size) => Uint8Array`, defaulting to `node:crypto` |
 
-`publishEnabled` gating only `createPublication` is a decision, not an omission.
-No adapter operation other than `createPublication` reads the flag, so an
-already-started publication can still be approved, cancelled and polled after
-publishing is switched off, and a receipt for an already-published document
-survives the switch. There is deliberately no second flag check inside
-`completePublication`: the compare-and-set is about state, ownership, digest and
-deadline, and an operator switch is none of those.
+`publishEnabled` gating exactly two operations is a decision, not an omission.
+`createPublication` refuses a new start; `completePublication` refuses a new
+upload, from below its already-complete branch, so the two together are the whole
+tap while an earned receipt still comes back. Nothing else reads the flag:
+approval, cancellation, polling and owner reads all keep working with publishing
+off, because none of them writes new bytes. An operator who needs the harder stop
+takes the deployment down.
 
-The artifact route is where the flag's stop is actually enforced for an upload.
-`PUT .../artifact` refuses a *new* completion with `publishing_disabled` while
-the flag is off, and still serves receipt recovery for a publication that has
-already completed — the C3 upload contract this deployment publishes. That gate
-lives in the handler rather than the adapter precisely so it stays an operator
-policy about accepting new bytes, not a new terminal state the record has to
-model. An operator who needs the harder stop still takes the deployment down;
-the difference the flag makes is that an approval granted before the switch does
-not become a stored document after it.
+Both checks live in this module rather than in a route for the same reason: a
+handler cannot start a publication or commit bytes by forgetting to ask. `PUT
+.../artifact` does refuse a disabled upload before it reads the body, but that is
+the same kind of advisory pre-check as its state gate — it can only make the
+refusal cheaper, never different, and deleting it would change when the `503`
+arrives and nothing else.
 
 `publicationDependencies({ env, getStore, mode })` builds the first four from
 `readHostedConfig`. It does not open the store — `createPublicationStore` opens
