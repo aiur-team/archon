@@ -13,9 +13,14 @@
       and `validateStartResponse` refuses a start response whose URL is anything
       else. A directory with an `index.html` is served at `/publish/authorize/`
       and reaches the no-slash form only through a redirect, so the one path the
-      contract names would never be the path that actually served the page. A
-      flat `.html` asset is served at exactly `/publish/authorize` with Netlify's
-      default pretty URLs, which is what the contract asks for.
+      contract names would never be the path that actually served the page.
+
+      A flat `.html` asset does not reach it by itself either: serving one at its
+      extensionless path is Netlify *post-processing*, which this deployment
+      turns off with `[build.processing] skip_processing = true`. So
+      `netlify.toml` carries an explicit `200` rewrite from `/publish/authorize`
+      to this file, and `test/approval-browser.test.mjs` asserts it is still
+      there. The contract path is stated rather than inferred.
 
       ## What this page is not allowed to be
 
