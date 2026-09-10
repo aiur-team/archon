@@ -533,7 +533,7 @@ are build-scoped rather than available to a function at runtime.
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `HOSTED_APP_ORIGIN` | yes | The trusted application origin. Exact, lowercase, no trailing slash, no trailing dot. |
-| `HOSTED_RENDER_ORIGIN` | yes | The cookie-free static renderer origin. Must be a **different registrable site**. |
+| `HOSTED_RENDER_ORIGIN` | yes | The cookie-free static renderer origin. Must be a **different registrable site**. That deployment lives in `renderer/`. |
 | `GITHUB_CLIENT_ID` | yes | OAuth app client ID. |
 | `GITHUB_CLIENT_SECRET` | yes | OAuth app client secret. Never logged, never formatted, never committed. |
 | `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`. Anything else is a fault; unset means disabled. |

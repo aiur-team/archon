@@ -58,4 +58,16 @@ export async function handleStatus(request, resolveDependencies) {
 export default (request) =>
   handleStatus(request, () => publicationDependencies({ env: process.env, getStore }));
 
-export const config = { path: "/api/hosted/publications/:publicationId/status" };
+export const config = {
+  path: "/api/hosted/publications/:publicationId/status",
+  /* C6: three times the start allowance, because this route is the one a
+     waiting agent polls. C3 advertises a five-second interval, so a single
+     well-behaved operation spends twelve requests a minute here; thirty leaves
+     room for a retry and for a second operation from the same machine while
+     still bounding a bearer-guessing loop. Like the start rule this is delayed
+     best-effort mitigation and not an authorisation check -- `statusPublication`
+     verifies the agent bearer on every request regardless, and receipt recovery
+     stays available while publishing is disabled. See the start route for why
+     the fields are literal integers. */
+  rateLimit: { windowLimit: 30, windowSize: 60, aggregateBy: ["ip", "domain"] },
+};
