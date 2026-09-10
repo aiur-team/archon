@@ -72,7 +72,7 @@ const TRANSCRIPT = /^PASS {2}hosted owner viewer matrix \(chromium [\w.]+; (\d+)
  * the only thing CI reads and a worker that returned early after four cases
  * would otherwise print a `PASS` that reads exactly like a full run.
  */
-const EXPECTED_CASES = 73;
+const EXPECTED_CASES = 74;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -1620,6 +1620,25 @@ async function assertViewerGuards() {
     );
     cases += 1;
   }
+
+  /* The readiness listener's call site, read off the source.
+   *
+   * The table above proves the predicate; it says nothing about what the
+   * listener passes to it. That gap is not hypothetical -- a mutation that left
+   * `acceptsReady` untouched and passed `event.origin` as the expected origin
+   * made the comparison vacuous and the whole table still agreed with itself.
+   * So the two arguments are pinned here: the frame's own window, and the
+   * configured origin rather than anything derived from the event. */
+  const callSite = new RegExp(
+    String.raw`acceptsReady\(\s*event,\s*frame === null \? null : frame\.contentWindow,\s*([A-Za-z0-9_.]+)\s*\)`,
+  ).exec(source);
+  assert.notEqual(callSite, null, "viewer.js no longer calls `acceptsReady` in a readable form");
+  assert.equal(
+    callSite[1],
+    "renderOrigin",
+    "the readiness listener checks the event against something other than the configured origin",
+  );
+  cases += 1;
 
   /* The hand-off's target origin, read off the call site.
    *
