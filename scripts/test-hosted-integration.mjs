@@ -113,7 +113,7 @@ const TRANSCRIPT = /^PASS {2}hosted integration matrix \(chromium [\w.]+; (\d+) 
  * caught somewhere forgiving would otherwise print a line that reads like a
  * full run.
  */
-const EXPECTED_CASES = 96;
+const EXPECTED_CASES = 97;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -1339,14 +1339,31 @@ async function approveInBrowser(page, verificationUrl, { account = "first", deci
     userCode: await page.locator("#user-code").innerText(),
     account: await page.locator("#account").innerText(),
   };
+  /* The decision route's own status code, captured off the wire.
+   *
+   * The page's copy is not a safe proxy for it. Every terminal answer -- an
+   * approval, a denial, and a refusal such as `state_conflict` -- leaves the
+   * review card hidden and a sentence in the status line, and the sentences do
+   * not share a vocabulary a test can pattern-match on. Reading the response
+   * the page actually got is the difference between "the person was told
+   * something" and "the person was told it worked". */
+  let decisionStatus = null;
   if (decision !== null) {
+    const seen = [];
+    const watch = (response) => {
+      if (new URL(response.url()).pathname.endsWith("/decision")) seen.push(response.status());
+    };
+    page.on("response", watch);
     await page.locator(decision === "approve" ? "#approve" : "#deny").click();
     await waitFor(
       async () => (await page.locator("#review").isVisible()) === false,
       "the decision to settle",
     );
+    await waitFor(() => seen.length > 0, "the decision response");
+    page.off("response", watch);
+    decisionStatus = seen[seen.length - 1];
   }
-  return { ...review, status: await statusOf(page) };
+  return { ...review, status: await statusOf(page), decisionStatus };
 }
 
 /**
@@ -2153,6 +2170,31 @@ async function uploadAndReceipt(world, browser) {
   assert.deepEqual(await retried.json(), receipt, "the retry returned a different receipt");
   record("upload: an identical retry is the same receipt, not a second document");
 
+  /* 4.6b And a *non*-identical retry is not. The approval covered one document;
+     a second set of bytes arriving under the same publication is a substitution
+     whether it arrives before the first completion or after it, and the answer
+     must be the refusal rather than the receipt the first one earned. */
+  const substituted = await uploadArtifact(
+    world,
+    publication,
+    Buffer.from(`${html}<!-- substituted after completion -->`, "utf8"),
+  );
+  assert.equal(
+    substituted.status,
+    409,
+    `a completed publication accepted other bytes with status ${substituted.status}`,
+  );
+  assert.equal((await substituted.json()).error.code, "descriptor_mismatch");
+  const unchanged = await world.modules.publicationStore
+    .createPublicationStore({ getStore: world.blobs.getStore })
+    .read(publication.publicationId);
+  assert.equal(
+    unchanged.record.descriptor.contentSha256,
+    publication.descriptor.contentSha256,
+    "a refused substitution changed the stored document anyway",
+  );
+  record("upload: a completed publication refuses a retry carrying other bytes");
+
   /* 4.7 Recovery after the upload deadline has passed but inside the
          twenty-four-hour receipt window. The handler is the real one and the
          record is the real one; only the clock is moved past the deadline. */
@@ -2583,9 +2625,11 @@ async function storageAndRaces(world, browser) {
     "approved",
     `an approval whose write answer was lost settled as ${approvedState.state}`,
   );
-  assert.ok(
-    !/could not|failed|conflict|wrong|again/i.test(ambiguousReview.status),
-    `the approval page reported a failure for an approval that succeeded: ${ambiguousReview.status}`,
+  assert.equal(
+    ambiguousReview.decisionStatus,
+    200,
+    "the person was told their approval failed on a publication that is in fact theirs "
+    + `(the decision route answered ${ambiguousReview.decisionStatus}: "${ambiguousReview.status}")`,
   );
   assert.equal(
     blobs.writesTo(approvalKey) - approvalWritesBefore,

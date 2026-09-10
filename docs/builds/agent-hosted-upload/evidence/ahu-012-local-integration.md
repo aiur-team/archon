@@ -24,7 +24,7 @@ Five servers on loopback, plus a browser, plus two child-process clients.
 
 Browser: Chromium, pinned via `playwright@1.55.0`. The exact build is printed in
 the runner's own PASS line, e.g.
-`PASS  hosted integration matrix (chromium 140.0.7339.16; 96 cases)`.
+`PASS  hosted integration matrix (chromium 140.0.7339.16; 97 cases)`.
 
 Once the servers are up, nothing in the matrix contacts a network host.
 `github.com` is the only external name the browser may resolve and it resolves
@@ -108,7 +108,7 @@ gap that more local cases would close.
 
 ## What the run covers
 
-Ninety-six cases across ten matrices, each named in the runner and counted by
+Ninety-seven cases across ten matrices, each named in the runner and counted by
 its supervisor:
 
 1. The whole happy path — clean-installed client, browser approval, a *second*
@@ -119,8 +119,8 @@ its supervisor:
 3. Provider faults — a replayed callback in the same browser and in another, an
    outage, and a grant carrying an unexpected scope.
 4. Upload and receipt — a client-supplied owner, an unapproved upload, altered
-   bytes, a wrong media type, the identical retry, and recovery inside and
-   outside the receipt window.
+   bytes, a wrong media type, the identical retry, a retry carrying *other*
+   bytes after completion, and recovery inside and outside the receipt window.
 5. Owner read and enumeration — the owner's metadata and content, a signed-out
    reader, a second account holding the owner's URL, a missing id, a malformed
    id, `HEAD`, the byte-identical refusal shell, and the rule that legacy
