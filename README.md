@@ -66,7 +66,12 @@ standalone never borrows a repository value.
 
 ## Writing a document
 
-Read `.claude/skills/architecture-doc/SKILL.md`. Its one rule is the one that matters:
+Read `.claude/skills/architecture-doc/SKILL.md` when you are writing a document *in this
+repository*. `skills/archon-doc/SKILL.md` is the portable one: it teaches the same writing rules
+plus the packaged workflow — `npm install`, the skeleton, `docbuild --hosted`, and publishing
+through `archon-publish` with a human approving in a browser — and it is the file the
+`@aiur-team/docbuild` tarball carries at `dist/skills/archon-doc/SKILL.md`. Both share one rule,
+and it is the one that matters:
 
 > **A document is an argument, not a summary.** If a reader can only take one sentence away, decide now
 > what that sentence is. Everything else earns its place by supporting it or by honestly limiting it.
@@ -83,7 +88,8 @@ Read `.claude/skills/architecture-doc/SKILL.md`. Its one rule is the one that ma
 | `netlify/` | The live layer: sign-in, access, comments, suggestions, edits, history, presence |
 | `renderer/` | The isolated static origin that displays one uploaded document's active HTML |
 | `docs/research/` | The platform design. `00-integration-plan.md` is the ruling document |
-| `.claude/skills/architecture-doc/` | How to turn raw research into a document |
+| `.claude/skills/architecture-doc/` | How to turn raw research into a document, in this repository |
+| `skills/archon-doc/` | The same, for someone who installed the package. Shipped in the tarball |
 
 ## Checks
 
@@ -93,6 +99,7 @@ scripts/scrub-check.sh                      # fail if private context reached th
 npm --prefix templates/docbuild run check   # typecheck
 node scripts/check-function-modules.mjs     # fail if a netlify/ module does not load
 node scripts/check-test-inventory.mjs       # fail if a test file is not wired into CI
+node scripts/test-publish-package.mjs       # fail if the packed tarball does not work for a clean consumer
 node scripts/vendor-netlify-lib.mjs         # fail if the deploy tree is not self-contained
 ```
 
