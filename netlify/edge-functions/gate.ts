@@ -4,10 +4,25 @@ import {
   resolveRole,
   validateAccessRow,
 } from "../lib/access.mjs";
+import {
+  applicationOrigin,
+  classifyHost,
+  isApplicationPassThrough,
+  isRenderPrefix,
+  notFoundForeignHost,
+  notFoundRenderer,
+  rendererHeaders,
+  rendererRewriteTarget,
+  withApplicationHeaders,
+} from "../lib/edge-host.mjs";
 
 type GateContext = {
   next(request?: Request): Promise<Response>;
+  rewrite(url: string | URL): Promise<Response>;
 };
+
+/** The two origin keys the gate reads to classify a request host. */
+const HOST_ENV_KEYS = ["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN"] as const;
 
 const PLAIN_TEXT = "text/plain; charset=utf-8";
 const NO_STORE = { "Cache-Control": "private, no-store" };
@@ -198,14 +213,142 @@ function replayResponse(
   });
 }
 
+/**
+ * Read the two host-classification origins through the runtime-native narrow
+ * environment API on Deno, falling back to `process.env` where the gate runs
+ * transpiled on Node for its test harness.
+ */
+function readHostEnv(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  const netlify = (globalThis as { Netlify?: { env?: { get?(key: string): string | undefined } } }).Netlify;
+  const runtime = netlify?.env;
+  const node = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  for (const key of HOST_ENV_KEYS) {
+    try {
+      if (runtime !== undefined && runtime !== null && typeof runtime.get === "function") {
+        env[key] = runtime.get(key);
+        continue;
+      }
+    } catch {
+      // A runtime that throws on read is treated as an unset value below.
+    }
+    try {
+      env[key] = node?.env?.[key];
+    } catch {
+      env[key] = undefined;
+    }
+  }
+  return env;
+}
+
+/**
+ * The renderer host serves exactly the four shell files under an internal
+ * rewrite and refuses everything else. It never calls `identify()`, never
+ * resolves a role, never emits `Set-Cookie` and never emits a body on a
+ * refusal, so an artifact-rendering origin holds no identity authority.
+ */
+async function renderHost(
+  url: URL,
+  context: GateContext,
+  env: Record<string, string | undefined>,
+): Promise<Response> {
+  const target = rendererRewriteTarget(url.pathname, url.search);
+  if (target === null) return notFoundRenderer();
+  const appOrigin = applicationOrigin(env);
+  /* Without a header-safe application origin there is no `frame-ancestors` to
+     name, and serving the shell headerless would leave it framable by anyone.
+     Refuse rather than serve a shell the renderer would then refuse to mount. */
+  if (appOrigin === null) return notFoundRenderer();
+
+  let response: Response;
+  try {
+    response = await context.rewrite(target);
+    if (!(response instanceof Response))
+      return plainResponse(503, ACCESS_UNAVAILABLE);
+  } catch {
+    return plainResponse(503, ACCESS_UNAVAILABLE);
+  }
+  try {
+    const headers = response.headers;
+    if (!(headers instanceof Headers))
+      return plainResponse(503, ACCESS_UNAVAILABLE);
+    for (const [name, value] of rendererHeaders(appOrigin))
+      headers.set(name, value);
+  } catch {
+    return plainResponse(503, ACCESS_UNAVAILABLE);
+  }
+  return response;
+}
+
+/**
+ * The application host serves the collaboration app, the hosted viewer and the
+ * APIs. It refuses the renderer shell prefix, passes the API, assets, sign-in,
+ * viewer, publish and invitation paths through with no session check, and
+ * applies the existing session and access logic to everything else. Every
+ * answer gains the application header set unless it already carries a CSP.
+ */
+async function applicationHost(
+  req: Request,
+  url: URL,
+  context: GateContext,
+): Promise<Response> {
+  /* The renderer shell prefix is never a first-party page on the application
+     origin, so it is a not-found before any session check. */
+  if (isRenderPrefix(url.pathname)) {
+    return withApplicationHeaders(
+      new Response(null, {
+        status: 404,
+        headers: { "Content-Type": PLAIN_TEXT, ...NO_STORE },
+      }),
+    );
+  }
+
+  /* The paths that used to be `excludedPath` in TOML, decided in code now that
+     the gate runs on every path: passed through with no session check. A
+     function response keeps its own headers; a static one gains the set. The
+     gate's own `/api/hosted/session` subrequest is one of these, so it cannot
+     recurse into the session logic. */
+  if (isApplicationPassThrough(url.pathname)) {
+    let passed: Response;
+    try {
+      passed = await context.next();
+      if (!(passed instanceof Response))
+        return plainResponse(503, ACCESS_UNAVAILABLE);
+    } catch {
+      return plainResponse(503, ACCESS_UNAVAILABLE);
+    }
+    return withApplicationHeaders(passed);
+  }
+
+  return withApplicationHeaders(await sessionGate(req, url, context));
+}
+
 export default async function gate(
   req: Request,
   context: GateContext,
 ): Promise<Response | undefined> {
   const url = new URL(req.url);
-  if (url.pathname === "/invite/" || url.pathname.startsWith("/invite/"))
-    return undefined;
+  const env = readHostEnv();
+  const host = classifyHost(url, env);
 
+  /* A deploy preview or any other hostname is refused before any store read,
+     with `X-Robots-Tag: noindex` so it is never indexed. */
+  if (host === "other") return notFoundForeignHost();
+  if (host === "render") return renderHost(url, context, env);
+  return applicationHost(req, url, context);
+}
+
+/**
+ * The application host's session and access gate: the pre-existing edge logic,
+ * unchanged. Identity is validated, the document's `doc-id` meta line is read
+ * from the first bytes of the body, the role is resolved and the response is
+ * replayed only when the role can read.
+ */
+async function sessionGate(
+  req: Request,
+  url: URL,
+  context: GateContext,
+): Promise<Response> {
   let user: unknown;
   try {
     user = await identify(req);

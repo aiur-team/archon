@@ -231,6 +231,16 @@ jobs:
       - name: every test file is wired into CI
         run: node scripts/check-test-inventory.mjs
 
+      # The host-aware edge gate's helper. edge-host.test.mjs drives the full
+      # refusal matrix -- application host, renderer host and a third
+      # deploy-preview host -- against the real gate.ts control flow, transpiled
+      # with the TypeScript the typecheck step above installed, and proves the
+      # renderer and foreign branches never reach the session or identity path.
+      # Named literally so a file that stops being emitted fails loudly, per the
+      # inventory gate above.
+      - name: edge gate host classification tests
+        run: node --test netlify/test/edge-host.test.mjs
+
       - name: unit tests
         run: |
           npm --prefix templates/docbuild run build
