@@ -113,7 +113,7 @@ const TRANSCRIPT = /^PASS {2}hosted integration matrix \(chromium [\w.]+; (\d+) 
  * caught somewhere forgiving would otherwise print a line that reads like a
  * full run.
  */
-const EXPECTED_CASES = 97;
+const EXPECTED_CASES = 99;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -1973,6 +1973,69 @@ async function authBinding(world, browser) {
   assert.equal(byGet.status, 405, `GET on the decision route was answered ${byGet.status}`);
   record("auth: GET cannot reach a decision");
 
+  /* 2.6 The link's own capability. A visitor whose fragment carries anything
+         other than this publication's browser secret is refused at `/bind`,
+         which is the one place the secret is ever presented -- so the browser
+         never reaches the review card and never holds a binding at all. The
+         mutation is one character of the secret, in a fresh context, on the
+         real page's own bootstrap. */
+  const [fragmentId, fragmentSecret] = new URL(publication.verificationUriComplete).hash
+    .slice(1)
+    .split(".");
+  const lastCharacter = fragmentSecret.slice(-1);
+  const mutatedSecret = fragmentSecret.slice(0, -1) + (lastCharacter === "0" ? "1" : "0");
+  const mutatedLink =
+    `${publication.verificationUriComplete.split("#")[0]}#${fragmentId}.${mutatedSecret}`;
+
+  const wrongContext = await openContext(world, browser);
+  const wrongPage = await wrongContext.newPage();
+  const binds = [];
+  wrongPage.on("response", async (response) => {
+    if (!new URL(response.url()).pathname.endsWith("/publications/bind")) return;
+    binds.push({ status: response.status(), body: await response.json().catch(() => null) });
+  });
+  await wrongPage.goto(mutatedLink);
+  await waitFor(
+    async () => (await wrongPage.locator("#status").getAttribute("data-tone")) === "error",
+    "the approval page to refuse a mutated link",
+  );
+  assert.equal(
+    await wrongPage.locator("#review").isVisible(),
+    false,
+    "a mutated link reached the review card",
+  );
+  assert.equal(
+    await wrongPage.locator("#signin").isVisible(),
+    false,
+    "a mutated link was offered a sign-in instead of being refused",
+  );
+  await waitFor(() => binds.length > 0, "the bind answer for a mutated link");
+  assert.equal(binds[0].status, 401, `a mutated browser secret was answered ${binds[0].status}`);
+  assert.equal(binds[0].body?.error?.code, "invalid_capability");
+  record("auth: a link whose browser secret was altered is refused at bind");
+
+  /* 2.7 Possession of a session is not possession of the operation. This
+         context signed in through the same real provider, so it holds a valid
+         session and a valid CSRF token -- and it never opened the link, so it
+         holds no browser binding. Its decision for someone else's publication
+         is refused before the account is even considered. */
+  const unboundPage = await wrongContext.newPage();
+  await signIn(unboundPage, app.origin, { account: "second", destination: "/login/" });
+  const unboundSession = await currentSession(unboundPage);
+  assert.equal(unboundSession.authenticated, true, "the unbound context has no session to test with");
+  const unbound = await browserJson(unboundPage, decisionPath, {
+    method: "POST",
+    body: JSON.stringify({ decision: "approve", displayedAccountId: unboundSession.accountId }),
+    headers: { "content-type": "application/json", "x-archon-csrf": unboundSession.csrfToken },
+  });
+  assert.equal(unbound.status, 403, `a decision from an unbound session was answered ${unbound.status}`);
+  assert.equal(unbound.body?.error?.code, "approval_required");
+  record("auth: a signed-in browser that never opened the link cannot decide the publication");
+
+  await unboundPage.close();
+  await wrongPage.close();
+  await wrongContext.close();
+
   /* Nothing above may have moved the publication off `pending`. */
   const stillPending = await publicationStatus(world, publication);
   assert.equal((await stillPending.json()).state, "pending", "a refused decision changed the state anyway");
@@ -2008,7 +2071,14 @@ async function providerFailures(world, browser) {
   assert.equal(signedIn.authenticated, true, "the sign-in produced no session");
 
   /* Replayed into the browser that made it: the transaction is consumed, so a
-     second arrival is refused rather than minting a second session. */
+     second arrival is refused rather than minting a second session.
+
+     The provider fixture also issues single-use codes, so a refusal on its own
+     does not say who refused. `tokenCalls` is what separates them: the callback
+     handler consumes the OAuth transaction *before* it exchanges the code, so
+     an application that still holds the guard never reaches the provider, and
+     one that lost it does. */
+  const tokenCallsBeforeReplay = provider.state.tokenCalls;
   await page.goto(callbackUrl);
   await page.waitForURL(
     (url) => url.pathname === "/login/" && url.searchParams.get("status") !== null,
@@ -2025,6 +2095,11 @@ async function providerFailures(world, browser) {
   const afterReplay = await currentSession(page);
   assert.equal(afterReplay.authenticated, true);
   assert.equal(afterReplay.accountId, signedIn.accountId);
+  assert.equal(
+    provider.state.tokenCalls,
+    tokenCallsBeforeReplay,
+    "the replayed callback was sent on to the provider instead of being refused by the application",
+  );
   record("auth: replaying a consumed OAuth callback is refused and changes no session");
 
   /* Replayed into a browser that never started it: no binding cookie, so the
