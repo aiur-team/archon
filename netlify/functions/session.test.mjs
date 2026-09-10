@@ -23,6 +23,7 @@ import {
   resolveRole,
 } from "../lib/access.mjs";
 import { StoreError } from "../lib/store.mjs";
+import { LISTED_DOMAIN } from "../test/hosted/fixtures/domain-access.mjs";
 import { createSessionHandler } from "./session.mjs";
 
 const DOC = "abc123";
@@ -52,15 +53,16 @@ function memoryStore(seed = {}) {
   };
 }
 
-function documentRecord() {
+function documentRecord(overrides = {}) {
   return {
-    v: 1,
+    v: 2,
     docId: DOC,
     ownerSub: OWNER,
     ownerEmail: "owner@example.com",
-    orgDefault: "commenter",
+    allowedDomains: [],
     boundAt: "2026-01-01T00:00:00.000Z",
     boundFrom: "env:DOC_OWNERS",
+    ...overrides,
   };
 }
 
@@ -220,4 +222,50 @@ test("the route is declared exactly once, at /api/session", async () => {
   const module = await import("./session.mjs");
   assert.deepEqual(module.config, { path: "/api/session" });
   assert.equal(typeof module.default, "function");
+});
+
+test("a domain reader is reported as viewer, with a read-only capability row (ACN-008)", async () => {
+  // The same `resolveRole()` the edge gate calls, so the role this route reports
+  // and the role the gate enforced for the same request are one decision.
+  const store = memoryStore({
+    [accessDocumentKey(DOC)]: documentRecord({ allowedDomains: [LISTED_DOMAIN] }),
+  });
+  const reader = identity({ email: `ann@${LISTED_DOMAIN}` });
+  const response = await route({ identifyFn: async () => reader, store })(get());
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.role, "viewer");
+  assert.equal(body.shared, true);
+  assert.equal(body.canComment, false, "a domain never yields more than a read");
+  assert.equal(body.canEdit, false);
+  assert.equal(body.canShare, false);
+  assert.equal(body.canSeeMembers, false);
+});
+
+test("clearing the list denies the same session on its next call, with no sign-out (R21)", async () => {
+  const key = accessDocumentKey(DOC);
+  const store = memoryStore({ [key]: documentRecord({ allowedDomains: [LISTED_DOMAIN] }) });
+  const reader = identity({ email: `ann@${LISTED_DOMAIN}` });
+  const handler = route({ identifyFn: async () => reader, store });
+
+  assert.equal((await (await handler(get())).json()).role, "viewer");
+  store.values.set(key, documentRecord({ allowedDomains: [] }));
+  assert.equal((await (await handler(get())).json()).role, "none");
+});
+
+test("a signed-in stranger is none while PUBLIC_DEFAULT_ROLE still says viewer (AE4)", async () => {
+  const had = Object.hasOwn(process.env, "PUBLIC_DEFAULT_ROLE");
+  const saved = process.env.PUBLIC_DEFAULT_ROLE;
+  process.env.PUBLIC_DEFAULT_ROLE = "viewer";
+  try {
+    const store = memoryStore({ [accessDocumentKey(DOC)]: documentRecord() });
+    const stranger = identity({ email: "ann@stranger.example" });
+    const body = await (await route({ identifyFn: async () => stranger, store })(get())).json();
+    assert.equal(body.role, "none");
+    assert.equal(body.canComment, false);
+  } finally {
+    if (had) process.env.PUBLIC_DEFAULT_ROLE = saved;
+    else delete process.env.PUBLIC_DEFAULT_ROLE;
+  }
 });

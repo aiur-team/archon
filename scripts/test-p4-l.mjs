@@ -78,7 +78,7 @@ function session(role, extra = {}) {
 function roster(extra = {}) {
   return {
     doc: DOC,
-    orgDefault: "commenter",
+    allowedDomains: ["listed.example"],
     members: [
       { sub: "owner-1", email: OWNER_EMAIL, name: "", role: "owner" },
       { sub: "member-1", email: EDITOR_EMAIL, name: "Ada Sample", role: "editor" },
@@ -615,7 +615,8 @@ async function p3iMatrix() {
       assert.ok(rendered.members[1].includes("Editor"));
       assert.equal(rendered.invitations.length, 1);
       assert.ok(rendered.invitations[0].includes("Pending until 2030-01-05"));
-      assert.equal(rendered.defaultText, "Organization default: Commenter");
+      assert.equal(rendered.defaultText,
+        "Anyone with a verified address at listed.example can read this document.");
       assert.equal(rendered.status, "");
       /* An editor gets exactly the read-only roster. */
       assert.equal(rendered.ops, 0);
@@ -634,7 +635,8 @@ async function p3iMatrix() {
     /* A roster that fails validation renders no prefix at all. */
     for (const invalid of [
       roster({ doc: "0f0f0f" }),
-      roster({ orgDefault: "editor" }),
+      roster({ allowedDomains: ["Listed.Example"] }),
+      roster({ allowedDomains: ["listed.example", "listed.example"] }),
       roster({ members: [] }),
       roster({ members: [{ sub: "owner-1", email: OWNER_EMAIL, name: "Owner", role: "owner" }] }),
       roster({ invitations: [{ email: INVITE_EMAIL, role: "owner", expiresAt: "2030-01-05T00:00:00.000Z" }] }),
@@ -756,11 +758,17 @@ async function p4lMatrix() {
     await ownerPanel(browser, origin, source, [], async (page) => {
       const state = await probe(page);
       assert.equal(state.hasInvite, true);
-      assert.equal(state.hasDefaultControl, true);
+      /* ACN-008 removed the organisation-default tier and, with it, the select
+         that wrote it. The domain list that replaced it is reported to the owner
+         in the same read-only line everybody else sees; ACN-009 owns the editor
+         for it. A control posting the retired body would fail on every click. */
+      assert.equal(state.hasDefaultControl, false);
       assert.equal(state.rowControls, 3, "two grants and one invitation carry controls");
-      assert.equal(state.defaultText, "", "the read-only default paragraph is replaced for an owner");
-      assert.equal(state.ops, 17, "invite, default, two grants and one invitation carry 17 controls");
-      assert.equal(state.disabled, 4, "every Save button starts disabled");
+      assert.equal(state.defaultText,
+        "Anyone with a verified address at listed.example can read this document.",
+        "the owner reads the same domain-policy line as everybody else");
+      assert.equal(state.ops, 15, "invite, two grants and one invitation carry 15 controls");
+      assert.equal(state.disabled, 3, "every Save button starts disabled");
       const shape = await page.evaluate(([memberRow, invitationRow]) => {
         const owner = document.querySelector("#doc-share-panel .share-members li:nth-of-type(1)");
         const invite = document.querySelector("#doc-share-panel .share-invite");
@@ -774,8 +782,6 @@ async function p4lMatrix() {
           maxlength: invite.querySelector(".share-invite-email").getAttribute("maxlength"),
           inviteRole: options("#doc-share-panel .share-invite-role option"),
           inviteValue: invite.querySelector(".share-invite-role").value,
-          defaultOptions: options("#doc-share-panel .share-default-control option"),
-          defaultValue: document.querySelector("#doc-share-panel .share-default-control").value,
           rowOptions: options(`${memberRow} .share-role option`),
           rowValue: document.querySelector(`${memberRow} .share-role`).value,
           rowLabel: document.querySelector(`${memberRow} .share-op-label`).textContent,
@@ -790,8 +796,6 @@ async function p4lMatrix() {
       assert.equal(shape.maxlength, "254");
       assert.deepEqual(shape.inviteRole, ["commenter:Commenter", "viewer:Viewer", "editor:Editor"]);
       assert.equal(shape.inviteValue, "commenter");
-      assert.deepEqual(shape.defaultOptions, ["commenter:Commenter", "viewer:Viewer", "none:None"]);
-      assert.equal(shape.defaultValue, "commenter");
       assert.deepEqual(shape.rowOptions, ["editor:Editor", "commenter:Commenter", "viewer:Viewer"]);
       assert.equal(shape.rowValue, "editor");
       assert.ok(shape.rowLabel.startsWith(`Role for ${EDITOR_EMAIL}`));
@@ -883,16 +887,6 @@ async function p4lMatrix() {
         path: "/api/access",
         body: { doc: DOC, email: INVITE_EMAIL, role: "commenter" },
       },
-      {
-        label: "organization default",
-        act: async (page) => {
-          await page.selectOption("#doc-share-panel .share-default-control", "none");
-          await click(page, "#doc-share-panel .share-default-save");
-        },
-        method: "PATCH",
-        path: "/api/access",
-        body: { doc: DOC, orgDefault: "none" },
-      },
     ];
     for (const write of writes) {
       await ownerPanel(browser, origin, source, [status(204), json200(roster())], async (page) => {
@@ -911,25 +905,14 @@ async function p4lMatrix() {
 
     /* Save buttons are enabled only by an actual change. */
     await ownerPanel(browser, origin, source, [], async (page) => {
-      const before = await page.evaluate(() => ({
+      const saveState = () => page.evaluate(() => ({
         role: document.querySelector("#doc-share-panel .share-members li:nth-of-type(2) .share-save-role").disabled,
-        org: document.querySelector("#doc-share-panel .share-default-save").disabled,
       }));
-      assert.deepEqual(before, { role: true, org: true });
+      assert.deepEqual(await saveState(), { role: true });
       await page.selectOption(`${MEMBER_ROW} .share-role`, "viewer");
-      await page.selectOption("#doc-share-panel .share-default-control", "viewer");
-      const changed = await page.evaluate(() => ({
-        role: document.querySelector("#doc-share-panel .share-members li:nth-of-type(2) .share-save-role").disabled,
-        org: document.querySelector("#doc-share-panel .share-default-save").disabled,
-      }));
-      assert.deepEqual(changed, { role: false, org: false });
+      assert.deepEqual(await saveState(), { role: false });
       await page.selectOption(`${MEMBER_ROW} .share-role`, "editor");
-      await page.selectOption("#doc-share-panel .share-default-control", "commenter");
-      const restored = await page.evaluate(() => ({
-        role: document.querySelector("#doc-share-panel .share-members li:nth-of-type(2) .share-save-role").disabled,
-        org: document.querySelector("#doc-share-panel .share-default-save").disabled,
-      }));
-      assert.deepEqual(restored, { role: true, org: true });
+      assert.deepEqual(await saveState(), { role: true });
       assert.equal((await calls(page)).length, 1);
     });
 
@@ -1012,7 +995,7 @@ async function p4lMatrix() {
 
     /* A write-time 403 is the same reconciliation, and a fresh owner session
        is the only thing that may restore owner controls. */
-    for (const [refreshed, ops] of [[session("editor"), 0], [session("owner"), 17]]) {
+    for (const [refreshed, ops] of [[session("editor"), 0], [session("owner"), 15]]) {
       await ownerPanel(browser, origin, source, [status(403), json200(refreshed), json200(roster())], async (page) => {
         await click(page, `${MEMBER_ROW} .share-revoke`);
         await waitStatus(page, "Your access changed.");
@@ -1074,7 +1057,7 @@ async function p4lMatrix() {
         const record = await calls(page);
         assert.equal(record.length, 3, `status ${code} must refresh exactly once`);
         assert.equal(record.filter((call) => call.url.includes("/api/session")).length, 0);
-        assert.equal((await probe(page)).ops, 17, "a non-transfer failure keeps owner controls");
+        assert.equal((await probe(page)).ops, 15, "a non-transfer failure keeps owner controls");
       });
     }
 
@@ -1198,7 +1181,7 @@ async function p4lMatrix() {
     /* The production stylesheet carries the states the controls depend on. */
     for (const needle of [
       ".share-op", ".share-op:focus-visible", ".share-op:disabled", ".share-op-label",
-      ".share-invite", ".share-default-form", ".share-row-controls", ".share-transfer-confirm",
+      ".share-invite", ".share-default", ".share-row-controls", ".share-transfer-confirm",
       '.share-pop[aria-busy="true"]', "@media (forced-colors: active)",
       "@media (prefers-reduced-motion: reduce)", "@media print", "@media (max-width: 24rem)",
     ]) {

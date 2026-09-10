@@ -53,7 +53,7 @@ const OWNER_SESSION = {
 const EDITOR_SESSION = { ...OWNER_SESSION, sub: "member-1", email: EDITOR_EMAIL, role: "editor", canShare: false };
 const ROSTER = {
   doc: DOC,
-  orgDefault: "commenter",
+  allowedDomains: ["listed.example"],
   members: [
     { sub: "owner-1", email: OWNER_EMAIL, name: "", role: "owner" },
     { sub: "member-1", email: EDITOR_EMAIL, name: "Ada Sample", role: "editor" },
@@ -339,7 +339,7 @@ async function renderMatrix() {
           controls: panel.querySelectorAll(".share-op").length,
         };
       });
-      assert.equal(geometry.controls, 17, `expected every owner control at ${width}px`);
+      assert.equal(geometry.controls, 15, `expected every owner control at ${width}px`);
       assert.ok(geometry.documentOverflow <= 0, `the document scrolls sideways at ${width}px`);
       assert.ok(geometry.panelOverflow <= 0, `the panel scrolls sideways at ${width}px`);
       assert.ok(geometry.left >= -1 && geometry.right <= geometry.clientWidth + 1,
@@ -362,7 +362,7 @@ async function renderMatrix() {
           "#doc-share-panel button, #doc-share-panel input, #doc-share-panel select"));
         return { total: order.length, enabled: order.map((n, i) => (n.disabled ? -1 : i)).filter((i) => i !== -1) };
       });
-      assert.equal(expected.total, 18, "the owner panel has one close button and seventeen controls");
+      assert.equal(expected.total, 16, "the owner panel has one close button and fifteen controls");
       const seen = [];
       for (let step = 0; step < expected.total + 2; step += 1) {
         await page.keyboard.press("Tab");
@@ -561,7 +561,7 @@ async function renderMatrix() {
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       }));
       assert.deepEqual(state, {
-        ops: 0, forms: 0, selects: 0, defaultText: "Organization default: Commenter", overflow: 0,
+        ops: 0, forms: 0, selects: 0, defaultText: "Anyone with a verified address at listed.example can read this document.", overflow: 0,
       });
       await context.close();
     }

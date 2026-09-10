@@ -37,7 +37,7 @@ exhaustive component reference, built by this template so it cannot drift from t
 | `AUTH0_CLIENT_ID` | The Auth0 application's client ID. |
 | `AUTH0_CLIENT_SECRET` | The Auth0 application's client secret. Never logged and never sent to a caller. |
 | `DOC_OWNERS` | Comma-separated document-owner seeds in `<document>:<email>` form. |
-| `PUBLIC_DEFAULT_ROLE` | Off unless set. The role any signed-in visitor receives when no owner, grant or invitation applies to them. Only `viewer` and `commenter` are valid; anything else — unset, empty, `editor`, `owner`, a typo — grants nothing. Sign-in is open to anyone with a Google or GitHub account, so "any signed-in visitor" means the whole internet: set it only on a deliberately public instance. |
+| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | Off unless set to exactly `true`. Lets a document list a public mailbox provider — `gmail.com` and eleven others — on its domain list. Listing one admits everyone on earth who can sign up for an address, so it is refused by default and the override is site-wide. Any value other than `true` or `false` refuses the whole deployment rather than being read as "on". |
 | `ABLY_API_KEY` | Optional Ably API key for realtime presence and events. |
 | `SLACK_WEBHOOK_URL` | Optional Slack webhook for notifications. |
 | `DOCS_REPO` | Source repository in `<owner>/<repository>` form for repository-backed edits. |
@@ -56,10 +56,12 @@ documents stay unreachable, which is the intended behaviour for a site vendored 
 that has no Auth0 tenant of its own — not a failure to repair. A site that does want sign-in configures its
 own Auth0 application against these same names.
 
-An organisation email suffix used to be a sixth variable, `ORG_EMAIL_DOMAIN`, and it is gone. It decided
-membership for every document on a deployment from one setting, and it matched by address suffix — which
-calls `member@example.com.evil.com` a member of `example.com`. Per-document domain lists replace it,
-evaluated label by label.
+Two variables that used to widen access are gone. `ORG_EMAIL_DOMAIN` decided membership for every document
+on a deployment from one setting, and it matched by address suffix — which calls `member@example.com.evil.com`
+a member of `example.com`. `PUBLIC_DEFAULT_ROLE` handed a read-only role to any other signed-in caller, and
+sign-in is open to anyone with a Google or GitHub account, so that was the whole internet. Per-document
+domain lists replace both, matched by exact full-domain equality against a verified address. Setting either
+variable on a deployment now does nothing at all.
 
 ### Sharing a document
 
@@ -70,11 +72,12 @@ match requires an address the identity provider has **verified**; an unverified 
 identity carrying no address at all (a GitHub account with no public email) can sign in but can never
 satisfy an invitation.
 
-`PUBLIC_DEFAULT_ROLE` is the one setting that widens access to people nobody has named, so it fails closed:
-an unset, empty, whitespace-only or unrecognised value resolves to no access at all, and a writing role is
-rejected outright rather than quietly reduced to a safe one. It never lowers a role somebody already holds,
-never applies to a signed-out visitor, and never overrides a document whose default is the explicit `none`.
-On any instance that is not meant to be world-readable, leave it unset.
+An owner can also list email domains on a document. A signed-in reader whose **verified** address is at a
+listed domain reads it, as a `viewer` and never more: a domain names a class of people, so it may not confer
+a capability that changes the document or its membership. Matching is exact, case-insensitive, full-domain
+equality — `mail.example.com` is not `example.com`, and neither is `example.com.evil.net` — and the decision
+is recomputed on every request, so removing a domain takes effect immediately rather than at the end of a
+session. A document listing no domains admits its owner and the people the owner named, and nobody else.
 
 ## The two modes
 

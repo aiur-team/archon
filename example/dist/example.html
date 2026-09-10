@@ -8519,14 +8519,11 @@ function mountSharePanel(event) {
   /* P4-L write state. Owner authority lives only in these closure fields: it
      is never read back from the DOM, an attribute, or the cached session
      event once a transfer or a write-time 403 has put it in doubt. */
-  let defaultForm = null;
-  let defaultSelect = null;
-  let defaultSave = null;
   let inviteForm = null;
   let inviteEmail = null;
   let inviteRole = null;
   let confirmation = null;
-  let lastOrgDefault = null;
+  let lastDomains = null;
   let mutationMessage = "";
   let busy = false;
   let authorityUnknown = false;
@@ -8822,8 +8819,8 @@ function mountSharePanel(event) {
   }
 
   function validRoster(value) {
-    if (!exactRecord(value, ["doc", "orgDefault", "members", "invitations"])) return false;
-    if (value.doc !== docId || !["commenter", "viewer", "none"].includes(value.orgDefault)) return false;
+    if (!exactRecord(value, ["doc", "allowedDomains", "members", "invitations"])) return false;
+    if (value.doc !== docId || !validDomainList(value.allowedDomains)) return false;
     if (!Array.isArray(value.members) || value.members.length < 1 || value.members.length > 51) return false;
     if (!Array.isArray(value.invitations) || value.invitations.length > 50) return false;
     if ((value.members.length - 1) + value.invitations.length > 50) return false;
@@ -8884,6 +8881,27 @@ function mountSharePanel(event) {
     return at > 0 && at === value.lastIndexOf("@") && at < value.length - 1;
   }
 
+  /**
+   * The document's domain list, as the roster reports it (ACN-008).
+   *
+   * The server stores a normalized, sorted, de-duplicated list of at most twenty
+   * entries, so anything else is a roster this panel did not ask for and will
+   * not render. This is a shape check on a response, never an access decision:
+   * the only authority on who may read the document is `resolveRole()`, and this
+   * runs in a browser the reader controls.
+   */
+  function validDomainList(value) {
+    if (!Array.isArray(value) || value.length > 20) return false;
+    let previous = null;
+    for (const entry of value) {
+      if (typeof entry !== "string" || entry.length === 0 || entry.length > 253) return false;
+      if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(entry)) return false;
+      if (previous !== null && entry <= previous) return false;
+      previous = entry;
+    }
+    return true;
+  }
+
   function roleLabel(role) {
     return role.charAt(0).toUpperCase() + role.slice(1);
   }
@@ -8920,7 +8938,7 @@ function mountSharePanel(event) {
     });
     memberList.replaceChildren(...memberRows);
     invitationList.replaceChildren(...invitationRows);
-    renderOwnerForms(roster.orgDefault, owner);
+    renderOwnerForms(roster.allowedDomains, owner);
     invitationSection.hidden = invitationRows.length === 0;
     status.textContent = mutationMessage;
     latched = null;
@@ -8946,13 +8964,10 @@ function mountSharePanel(event) {
     if (invitationList !== null) invitationList.replaceChildren();
     if (defaultPolicy !== null) defaultPolicy.textContent = "";
     confirmation = null;
-    defaultForm = null;
-    defaultSelect = null;
-    defaultSave = null;
     inviteForm = null;
     inviteEmail = null;
     inviteRole = null;
-    lastOrgDefault = null;
+    lastDomains = null;
     mutationMessage = "";
     busy = false;
     pendingHeadingFocus = false;
@@ -9059,62 +9074,45 @@ function mountSharePanel(event) {
       inviteEmail = null;
       inviteRole = null;
     }
-    if (defaultForm !== null) {
-      defaultForm.remove();
-      defaultForm = null;
-      defaultSelect = null;
-      defaultSave = null;
-    }
     if (panel !== null) {
       for (const group of panel.querySelectorAll(".share-row-controls")) group.remove();
     }
-    if (defaultPolicy !== null && lastOrgDefault !== null) {
-      defaultPolicy.hidden = false;
-      defaultPolicy.textContent = `Organization default: ${DEFAULT_LABELS[lastOrgDefault]}`;
+    if (defaultPolicy !== null && lastDomains !== null) {
+      renderDomainPolicy(lastDomains);
     }
   }
 
-  function renderOwnerForms(orgDefault, owner) {
-    lastOrgDefault = orgDefault;
-    if (defaultForm !== null) {
-      defaultForm.remove();
-      defaultForm = null;
-      defaultSelect = null;
-      defaultSave = null;
-    }
+  /**
+   * The organisation-default control used to sit here, and ACN-008 removed the
+   * tier it wrote. What the panel reports now is the document's own domain list:
+   * a read-only line, for the owner and for everybody else alike.
+   *
+   * It is deliberately not editable yet. The list is the document's access
+   * policy and deserves a real editor -- entries, validation, the reason a
+   * mailbox provider is refused -- which is ACN-009's panel. Shipping a select
+   * that posted the retired body would be a control that fails on every click,
+   * so it is gone rather than left pointing at a route that no longer answers.
+   */
+  function renderOwnerForms(allowedDomains, owner) {
+    lastDomains = allowedDomains;
     if (inviteForm !== null) {
       inviteForm.remove();
       inviteForm = null;
       inviteEmail = null;
       inviteRole = null;
     }
-    if (!owner) {
-      defaultPolicy.hidden = false;
-      defaultPolicy.textContent = `Organization default: ${DEFAULT_LABELS[orgDefault]}`;
-      return;
-    }
-    defaultPolicy.hidden = true;
-    defaultPolicy.textContent = "";
-    defaultForm = createDefaultForm(orgDefault);
+    renderDomainPolicy(allowedDomains);
+    if (!owner) return;
     inviteForm = createInviteForm();
-    panel.insertBefore(defaultForm, memberSection);
     panel.insertBefore(inviteForm, memberSection);
   }
 
-  function createDefaultForm(orgDefault) {
-    const form = fixedElement("div", "share-default-form", null);
-    defaultSelect = roleSelect("share-default-control", ["commenter", "viewer", "none"], orgDefault);
-    defaultSave = opButton("share-default-save", "Save default");
-    defaultSave.disabled = true;
-    defaultSelect.addEventListener("change", () => {
-      defaultSave.disabled = defaultSelect.value === orgDefault;
-    });
-    defaultSave.addEventListener("click", () => {
-      if (defaultSelect.value === orgDefault) return;
-      sendMutation("PATCH", ACCESS_PATH, { doc: docId, orgDefault: defaultSelect.value }, false, noop);
-    });
-    form.append(labelled("Organization default", defaultSelect), defaultSave);
-    return form;
+  function renderDomainPolicy(allowedDomains) {
+    if (defaultPolicy === null) return;
+    defaultPolicy.hidden = false;
+    defaultPolicy.textContent = allowedDomains.length === 0
+      ? "Only the people listed below can read this document."
+      : `Anyone with a verified address at ${allowedDomains.join(", ")} can read this document.`;
   }
 
   function createInviteForm() {
@@ -9475,7 +9473,6 @@ function mountSharePanel(event) {
   const TRANSFER_PATH = "/api/access/transfer";
   const TRANSFER_WARNING = "Transfer ownership to this person? You will become an editor."
     + " If setup stops during transfer, the new owner may need to invite you again.";
-  const DEFAULT_LABELS = { commenter: "Commenter", viewer: "Viewer", none: "No access" };
   const FINAL_SESSION_FIELDS = [
     "sub", "email", "name", "canComment", "canEdit",
     "doc", "role", "shared", "canSuggest", "canAccept", "canShare", "canSeeMembers",
