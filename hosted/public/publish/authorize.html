@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Authorise a publication — Archon</title>
+    <!--
+      The trusted approval page.
+
+      ## Why this is `publish/authorize.html` and not `publish/authorize/index.html`
+
+      C3 freezes the browser URL at `/publish/authorize` with no query string,
+      and `validateStartResponse` refuses a start response whose URL is anything
+      else. A directory with an `index.html` is served at `/publish/authorize/`
+      and reaches the no-slash form only through a redirect, so the one path the
+      contract names would never be the path that actually served the page. A
+      flat `.html` asset is served at exactly `/publish/authorize` with Netlify's
+      default pretty URLs, which is what the contract asks for.
+
+      ## What this page is not allowed to be
+
+      It loads no document-auth, comment, edit or realtime code, renders no
+      preview of the artifact and executes nothing from it. The artifact is
+      arbitrary HTML from an agent; the whole point of the two-origin split is
+      that it is only ever rendered on the separate renderer origin, and never
+      here, where a session cookie exists.
+
+      Everything variable on this page is written with `textContent`. There is no
+      `innerHTML` in `authorize.js`, so an agent-supplied title is text in every
+      state - which is what C2 means when it says the title is escaped as text in
+      all UI.
+
+      ## The inline stylesheet
+
+      The hosted deployment's one static CSP allows `style-src 'unsafe-inline'`
+      and not `'self'`. A separate `authorize.css` would need that policy widened
+      for every page in the tree, which is a real loosening bought for a file
+      split - so the styles are inline here, exactly as they are on the sign-in
+      page.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 34rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+      h2 { font-size: 1.1rem; margin-top: 0; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      .status { margin-top: 1rem; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      .card {
+        border: 1px solid;
+        border-radius: 0.5rem;
+        margin-top: 1.5rem;
+        padding: 1rem 1.25rem;
+      }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0; }
+      dt { font-weight: 600; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.08em; }
+      button {
+        cursor: pointer;
+        font: inherit;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      button[disabled] { cursor: progress; opacity: 0.6; }
+      .decide { display: grid; gap: 0.5rem; margin-top: 1.25rem; }
+      .secondary { margin-top: 0.5rem; }
+      .account { margin-top: 1.5rem; }
+      noscript p { color: #b3261e; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Authorise a publication</h1>
+    <p class="lede">
+      An agent asked to publish one document to Archon under your account. Nothing
+      is published until you approve it here.
+    </p>
+
+    <noscript>
+      <p>
+        JavaScript is required. This page has to exchange the one-time token in
+        your link with Archon before it can show you what is being published.
+      </p>
+    </noscript>
+
+    <p class="status" id="status" role="status" aria-live="polite">Checking this link…</p>
+
+    <!-- The one retry affordance. Shown only for a failure that retrying can
+         actually fix, so a visitor is never offered a button that cannot work. -->
+    <p id="retry-row" hidden><button type="button" id="retry">Try again</button></p>
+
+    <!-- The document under review. Every value is written by `authorize.js`. -->
+    <section class="card" id="review" hidden aria-labelledby="review-heading">
+      <h2 id="review-heading">This document</h2>
+      <dl>
+        <dt>Title</dt>
+        <dd id="title"></dd>
+        <dt>Size</dt>
+        <dd id="size"></dd>
+        <dt>Pairing code</dt>
+        <dd class="code" id="user-code"></dd>
+        <dt>Publish as</dt>
+        <dd id="account"></dd>
+      </dl>
+      <p class="lede" id="pairing-note">
+        Check that the pairing code above is the one your agent printed. Archon
+        cannot tell you which program asked; the code is how you tell.
+      </p>
+
+      <div class="decide">
+        <button type="button" id="approve">Approve and publish as this account</button>
+        <button type="button" id="deny">Deny</button>
+      </div>
+    </section>
+
+    <!-- Sign-in continuation. A real form, so it works from the keyboard. -->
+    <div class="account" id="signin" hidden>
+      <form method="post" action="/api/hosted/auth/github/start">
+        <input type="hidden" name="destination" value="/publish/authorize" />
+        <button type="submit" id="signin-submit">Continue with GitHub</button>
+      </form>
+      <p class="lede">
+        Archon identifies you by your GitHub account. It asks for no repository,
+        organisation or email permissions.
+      </p>
+    </div>
+
+    <!-- Account switching. Kept available beside the decision, because the whole
+         point of showing the account is that a visitor can change it. -->
+    <div class="account" id="switch" hidden>
+      <form method="post" action="/api/hosted/auth/github/start">
+        <input type="hidden" name="switchAccount" value="true" />
+        <input type="hidden" name="csrfToken" id="csrf" value="" />
+        <input type="hidden" name="destination" value="/publish/authorize" />
+        <button type="submit" class="secondary" id="switch-submit">
+          Use a different GitHub account
+        </button>
+      </form>
+      <p class="lede">
+        This signs you out of Archon and asks GitHub which account to use. It does
+        not sign you out of GitHub, and it keeps this pending publication.
+      </p>
+    </div>
+
+    <script src="/publish/authorize.js"></script>
+  </body>
+</html>

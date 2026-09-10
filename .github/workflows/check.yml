@@ -113,6 +113,32 @@ jobs:
           hosted/test/publication-store.test.mjs
           hosted/test/publications.test.mjs
           hosted/test/publications-agent.test.mjs
+          hosted/test/publication-browser-binding.test.mjs
+          hosted/test/publications-browser.test.mjs
+
+      # The approval page is defined in terms of `location.hash`, `history`, a
+      # `__Host-` cookie surviving a real navigation out to a provider and back,
+      # and an agent-chosen title arriving as text. None of those can be
+      # asserted against a hand-written DOM without asserting against an
+      # approximation of one, so this drives a real Chromium against the real
+      # handlers and the real `public/publish/authorize.html`.
+      #
+      # It gets its own step and its own timeout because it installs a pinned
+      # Playwright and one Chromium into a temporary root first -- minutes of
+      # network on a cold runner, which has nothing to do with any individual
+      # assertion. The per-test timeout inside the file overrides the runner
+      # default; the value here has to be at least as large or the runner kills
+      # the process before the case's own budget is reached.
+      #
+      # This step is not decoration. It is what caught the sign-in flow being
+      # dead in every browser: `Referrer-Policy: no-referrer` makes a same-origin
+      # form POST arrive with `Origin: null`, which the exact-origin check
+      # refused. Every route suite in this workflow was green while that was
+      # true, because they all build their requests by hand.
+      - name: hosted approval page browser matrix
+        run: >-
+          node --test --test-timeout=1200000
+          hosted/test/approval-browser.test.mjs
 
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and

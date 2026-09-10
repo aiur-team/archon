@@ -235,7 +235,7 @@ export const PUBLICATION_FIXTURES = Object.freeze({
 export const START_RESPONSE = Object.freeze({
   v: 1,
   publicationId: FIXTURE_PUBLICATION_ID,
-  verificationUriComplete: `${FIXTURE_APP_ORIGIN}/publish/authorize#${FIXTURE_BROWSER_SECRET}`,
+  verificationUriComplete: `${FIXTURE_APP_ORIGIN}/publish/authorize#${FIXTURE_PUBLICATION_ID}.${FIXTURE_BROWSER_SECRET}`,
   userCode: FIXTURE_USER_CODE,
   agentSecret: FIXTURE_AGENT_SECRET,
   expiresAt: PENDING_EXPIRES_AT,

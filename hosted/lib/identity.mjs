@@ -205,15 +205,47 @@ export async function identifyHosted(request, { store }) {
  *
  * Exact string equality against `config.appOrigin` - not a suffix, not a
  * hostname, not a regular expression. A missing `Origin` header is a refusal
- * rather than a pass: browsers send it on every state-changing fetch and form
- * POST, so absence means the request did not come from a browser doing what
- * this API is for, and treating absence as "no evidence against" is how an
- * origin check becomes decorative.
+ * rather than a pass: treating absence as "no evidence against" is how an origin
+ * check becomes decorative.
+ *
+ * ## The one exemption, and why it is not a hole
+ *
+ * A real `<form method="post">` submission is a *navigation*, and Fetch's
+ * "append a request `Origin` header" step reads the document's referrer policy
+ * for a non-CORS request: under `no-referrer` it appends the literal string
+ * `null` instead of the origin. C3 requires `Referrer-Policy: no-referrer` on
+ * every hosted response, so **every** form POST in this deployment arrives with
+ * `Origin: null` - the sign-in form and the different-account form both. An
+ * exact-origin check with no exemption does not merely reject an attacker here;
+ * it rejects the only sign-in path the product has, in every browser. This was
+ * observed rather than reasoned about: `test/approval-browser.mjs` drives
+ * Chromium against these handlers and the start route answered
+ * `/login/?status=expired` on every attempt.
+ *
+ * Fetch Metadata is the browser's other statement of the same fact, and it is a
+ * better one. `Sec-Fetch-Site` is a forbidden header name, so page script cannot
+ * set it, and a cross-site form POST arrives as `cross-site` rather than
+ * `same-origin` - which is exactly the class the `Origin` check exists to
+ * refuse. The exemption is narrowed to the case that needs it by also requiring
+ * `Sec-Fetch-Mode: navigate`: a `fetch` or `XMLHttpRequest` never gets it, and
+ * both send a real `Origin` anyway because their mode is `cors`.
+ *
+ * It stays fail-closed. A browser too old to send Fetch Metadata sends neither
+ * header and is refused, and so is any request that merely omits `Origin`.
  */
 export function requireExactOrigin(request, config) {
   const origin = request.headers.get("origin");
-  if (origin === null || origin !== config.appOrigin) throw new ForbiddenOriginError();
-  return origin;
+  if (origin === config.appOrigin) return origin;
+
+  if (
+    origin === "null" &&
+    request.headers.get("sec-fetch-site") === "same-origin" &&
+    request.headers.get("sec-fetch-mode") === "navigate"
+  ) {
+    return config.appOrigin;
+  }
+
+  throw new ForbiddenOriginError();
 }
 
 /**

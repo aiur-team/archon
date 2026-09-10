@@ -982,16 +982,56 @@ function requireExpectedOrigin(appOrigin, production, what) {
   return validateOrigin(appOrigin, { production, field: "appOrigin" });
 }
 
+/** The two halves of a verification fragment, separated by the one character
+ * that appears in neither of them. */
+const VERIFICATION_FRAGMENT_SEPARATOR = ".";
+
+/**
+ * The `#<publicationId>.<browserSecret>` fragment of a verification URL.
+ *
+ * The fragment has to be self-sufficient, and that is a consequence of the rest
+ * of C3 rather than a preference. `/publish/authorize` is one fixed path with no
+ * query string permitted above; there is no short-code lookup endpoint and no
+ * lookup by browser secret either; and `bindPublication` is frozen to take
+ * `{publicationId, browserSecret}`. So the only channel that can tell the
+ * trusted bootstrap *which* operation it is holding a secret for is the
+ * fragment, and a fragment carrying the secret alone would leave the page unable
+ * to bind anything at all.
+ *
+ * The id in it must be this response's own id. A fragment naming some other
+ * publication would walk the visitor into approving an operation the agent that
+ * printed the URL is not waiting on - and since the fragment is the half a URL
+ * shortener, a chat client or a copy-paste is most likely to mangle, checking it
+ * here is what turns that into a start-response fault rather than a confusing
+ * approval page.
+ *
+ * A fragment stays out of the request line, so neither half reaches a server
+ * access log by being visited; the browser secret is exchanged for a server-side
+ * binding by the bootstrap and the page removes the fragment before anything
+ * else can read it.
+ */
+function requireVerificationFragment(hash, publicationId, field) {
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+  const at = fragment.indexOf(VERIFICATION_FRAGMENT_SEPARATOR);
+  if (at < 1) {
+    throw invalid(field, "must carry <publicationId>.<browserSecret> in its fragment");
+  }
+  if (fragment.slice(0, at) !== publicationId) {
+    throw invalid(field, "fragment must name this response's publicationId");
+  }
+  requireOpaqueToken(fragment.slice(at + 1), field);
+  return fragment;
+}
+
 /**
  * Validate the C3 start response - the 201 body of `POST /api/hosted/publications`.
  *
  * Two checks earn this function its place. The browser URL must live on the
  * configured app origin at the authorization path, because a start response is
  * the first thing a CLI prints and the human is about to visit it; and the
- * fragment must not contain the agent secret, because C3 says the browser URL
- * carries the *browser* secret and putting the agent bearer in a URL would hand
- * the upload capability to anything that sees a referrer, a history entry or a
- * shoulder.
+ * fragment must carry this publication's id and its *browser* secret and nothing
+ * else, because putting the agent bearer in a URL would hand the upload
+ * capability to anything that sees a referrer, a history entry or a shoulder.
  *
  * @param {unknown} value
  * @param {{appOrigin: string, production?: boolean, field?: string}} options
@@ -1033,12 +1073,10 @@ export function validateStartResponse(value, { appOrigin, production = true, fie
       `must be ${HOSTED_LIMITS.AUTHORIZE_PATH} with no query string`,
     );
   }
-  if (uri.hash.length < 2) {
-    throw invalid(`${field}.verificationUriComplete`, "must carry the browser secret in its fragment");
-  }
   if (uri.hash.includes(value.agentSecret)) {
     throw invalid(`${field}.verificationUriComplete`, "must not carry the agent secret");
   }
+  requireVerificationFragment(uri.hash, value.publicationId, `${field}.verificationUriComplete`);
 
   return Object.freeze({
     v: 1,

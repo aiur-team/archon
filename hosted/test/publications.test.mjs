@@ -19,6 +19,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import { HOSTED_LIMITS, HostedContractError, validatePublication } from "../lib/contracts.mjs";
@@ -168,7 +169,7 @@ test("starting stores a pending record and returns each secret exactly once", as
   assert.notEqual(record.agentSecretHash, record.browserSecretHash);
   const stringsStored = stringsIn(record);
   assert.ok(!stringsStored.includes(started.agentSecret), "the agent secret must not be stored");
-  const browserSecret = new URL(started.verificationUriComplete).hash.slice(1);
+  const browserSecret = new URL(started.verificationUriComplete).hash.split(".")[1];
   assert.ok(!stringsStored.includes(browserSecret), "the browser secret must not be stored");
   assert.notEqual(browserSecret, started.agentSecret);
 
@@ -189,6 +190,18 @@ test("the browser URL carries the browser secret and never the agent secret", as
   assert.equal(url.pathname, HOSTED_LIMITS.AUTHORIZE_PATH);
   assert.equal(url.search, "");
   assert.ok(!started.verificationUriComplete.includes(started.agentSecret));
+
+  /* The fragment is what the approval page has to work from, and it has no other
+     input: the path is fixed, no query string is allowed and no lookup endpoint
+     exists. So it carries the id as well as the secret, and the link a visitor
+     actually receives is the one that binds - proved by binding it rather than
+     by re-stating the format. */
+  const [publicationId, browserSecret] = url.hash.slice(1).split(".");
+  assert.equal(publicationId, started.publicationId);
+  assert.deepEqual(await publications.bindPublication({ publicationId, browserSecret }), {
+    publicationId: started.publicationId,
+    browserSecretHash: createHash("sha256").update(browserSecret, "utf8").digest("hex"),
+  });
 });
 
 test("the minted user code uses the unambiguous pairing alphabet", async () => {

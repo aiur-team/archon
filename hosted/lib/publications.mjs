@@ -364,7 +364,12 @@ export async function createPublication(descriptor, dependencies) {
       {
         v: 1,
         publicationId: record.id,
-        verificationUriComplete: `${appOrigin}${HOSTED_LIMITS.AUTHORIZE_PATH}#${browserSecret}`,
+        /* Both halves, because the approval page has no other way to learn which
+           operation the secret belongs to: C3 permits no query string on this
+           path, no short-code lookup and no lookup by browser secret, and
+           `bindPublication` needs the id. `validateStartResponse` holds this
+           exact shape. */
+        verificationUriComplete: `${appOrigin}${HOSTED_LIMITS.AUTHORIZE_PATH}#${record.id}.${browserSecret}`,
         userCode: record.userCode,
         agentSecret,
         expiresAt: record.pendingExpiresAt,
