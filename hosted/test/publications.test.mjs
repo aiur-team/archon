@@ -347,6 +347,34 @@ test("approving fixes the owner from the session and opens the upload window", a
   assertCarriesNoSecret(decided);
 });
 
+test("a decision refuses a binding that was not produced by the server verifier", async () => {
+  /* The binding is the only thing tying a signed-in visitor to *this*
+     publication, so a decision that skipped the check would let any session
+     approve any publication whose id it could guess. The same forgeries the
+     read-only review refuses must be refused by the write. */
+  const { publications, stored } = harness({ seed: "pending" });
+  for (const forged of [
+    null,
+    undefined,
+    { publicationId: FIXTURE_PUBLICATION_ID, browserSecretHash: "0".repeat(64) },
+    { publicationId: "f".repeat(32), browserSecretHash: BINDING.browserSecretHash },
+    { publicationId: FIXTURE_PUBLICATION_ID },
+  ]) {
+    await rejects(
+      publications.decidePublication({
+        publicationId: FIXTURE_PUBLICATION_ID,
+        browserBinding: forged,
+        principal: FIXTURE_PRINCIPAL,
+        decision: "approve",
+        displayedAccountId: FIXTURE_PRINCIPAL.accountId,
+      }),
+      "invalid_capability",
+    );
+    assert.equal(stored().state, "pending", "a refused decision changes nothing");
+    assert.equal(stored().ownerAccountId, null);
+  }
+});
+
 test("a decision whose displayed account is not the session account is refused", async () => {
   const { publications, stored } = harness({ seed: "pending" });
   await rejects(
@@ -780,6 +808,75 @@ test("a retry with different bytes cannot replace a completed document", async (
     "descriptor_mismatch",
   );
   assert.deepEqual(stored(), before);
+});
+
+test("a retry claiming the stored digest for other bytes is refused", async () => {
+  /* The digest and length are the caller's own claims about bytes the server
+     has not hashed yet. A caller that echoes the stored descriptor while
+     sending something else passes both scalar comparisons, so the completed
+     branch compares the bytes themselves - otherwise this returns the real
+     document's receipt for a document the caller never sent. */
+  const { publications, stored } = harness({ seed: "complete" });
+  const before = stored();
+  const sameLengthOtherBytes = FIXTURE_HTML.replace("Deterministic bytes.", "Deterministic byteZ.");
+  assert.equal(
+    Buffer.byteLength(sameLengthOtherBytes, "utf8"),
+    VALID_DESCRIPTOR.contentBytes,
+    "the substitute must be indistinguishable by length",
+  );
+
+  await rejects(
+    publications.completePublication({
+      ...AGENT,
+      html: sameLengthOtherBytes,
+      contentSha256: VALID_DESCRIPTOR.contentSha256,
+      contentBytes: VALID_DESCRIPTOR.contentBytes,
+    }),
+    "descriptor_mismatch",
+  );
+  assert.deepEqual(stored(), before, "a completed record is never rewritten");
+});
+
+test("an identical retry after the receipt window answers receipt_expired", async () => {
+  /* The bearer's recovery window bounds the receipt, not the document: the
+     record stays complete and its owner can still read it. */
+  const { publications, clock, stored } = harness({ seed: "complete" });
+  clock.setIso(RECORDS.complete.receiptExpiresAt);
+
+  const error = await rejects(
+    publications.completePublication({ ...AGENT, ...APPROVED_UPLOAD }),
+    "receipt_expired",
+  );
+  assert.equal(error.status, 410);
+  assert.equal(stored().state, "complete", "the committed document survives its receipt");
+});
+
+test("a cancellation that commits and then loses its response is reported as cancelled", async () => {
+  /* Same lost-response shape as the approval case: the write landed and the
+     provider could not say so. Accepting the readback's `observed` is what
+     ends the call here - a further attempt would re-read the record, and a
+     storage failure on *that* read would turn a cancellation that has already
+     been durably applied into a retryable 503 for a caller with nothing left
+     to retry. The planted read fault is the read that second attempt would
+     make; production never reaches it. */
+  const { publications, provider, stored } = harness({ seed: "approved" });
+  provider.failNextWrite({ throwsAfterCommit: true });
+  provider.failNextRead({ throws: true, skip: 2 });
+
+  const cancelled = await publications.cancelPublication(AGENT);
+
+  assert.equal(cancelled.state, "cancelled");
+  assert.equal(stored().state, "cancelled");
+  assert.equal(
+    provider.calls.filter((call) => call.op === "get").length,
+    2,
+    "the entry read and the ambiguous write's readback, and no third",
+  );
+  assert.equal(
+    provider.calls.filter((call) => call.op === "set").length,
+    1,
+    "an observed cancellation must not write again",
+  );
 });
 
 test("no new upload attempt starts after the deadline", async () => {

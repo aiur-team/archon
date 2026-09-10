@@ -85,9 +85,19 @@ const json = (value) => ({
   body: JSON.stringify(value),
 });
 
+/* The header values C3 freezes, written out rather than imported: asserting a
+   response against the production constant only proves the handler used the
+   constant, so deleting a header from it would keep every route green. */
+const C3_PRIVATE_HEADERS = Object.freeze({
+  "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "private, no-store",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+});
+
 /** The parsed body of a response, plus a check of the headers C3 requires. */
 async function read(response) {
-  for (const [header, value] of Object.entries(PRIVATE_RESPONSE_HEADERS)) {
+  for (const [header, value] of Object.entries(C3_PRIVATE_HEADERS)) {
     assert.equal(response.headers.get(header), value, `missing or wrong ${header}`);
   }
   return response.json();
@@ -111,6 +121,10 @@ const ROUTES = [
 /* ------------------------------------------------------------------ */
 /* routing and entry-point shape                                       */
 /* ------------------------------------------------------------------ */
+
+test("the private-header constant carries exactly the four C3 headers", () => {
+  assert.deepEqual({ ...PRIVATE_RESPONSE_HEADERS }, { ...C3_PRIVATE_HEADERS });
+});
 
 test("each route is declared once, under the hosted API namespace", () => {
   assert.deepEqual(
@@ -308,6 +322,21 @@ for (const route of [
       resolve,
     );
     await assertError(legacy, 400, "invalid_request");
+  });
+
+  test(`${route.name} answers a malformed percent-escape with a final 400`, async () => {
+    const { resolve } = harness({ seed: "pending" });
+    /* `decodeURIComponent("%zz")` throws a `URIError`, which is not a typed
+       contract error. Without the handler's own translation it would fall
+       through to the catch-all and come back as a *retryable* 503, and a
+       conforming client would poll forever on a request that can never
+       succeed. It is the caller's mistake, so it must be a terminal 400. */
+    const response = await route.handle(
+      request(`${START_PATH}/%zz/${route.name}`, { headers: bearer() }),
+      resolve,
+    );
+    const body = await assertError(response, 400, "invalid_request");
+    assert.equal(body.error.retryable, false);
   });
 
   test(`${route.name} does not answer for a path it does not own`, async () => {

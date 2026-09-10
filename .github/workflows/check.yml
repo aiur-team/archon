@@ -82,9 +82,15 @@ jobs:
       # cover: `scripts/check-hosted-modules.mjs` refuses a `*.test.mjs` inside
       # `hosted/lib/` or `hosted/functions/`, because a deployed module that
       # could import a fixture is one edit away from returning a fake success.
+      #
+      # `--test-timeout` bounds each test. These suites verify compare-and-set
+      # loops, and a regression that stops one of them terminating would
+      # otherwise hang the job until the runner's own limit killed it with no
+      # failing test named; thirty seconds is far above the whole suite's
+      # runtime and far below that.
       - name: hosted publication tests
         run: >-
-          node --test
+          node --test --test-timeout=30000
           hosted/test/publication-store.test.mjs
           hosted/test/publications.test.mjs
           hosted/test/publications-agent.test.mjs
