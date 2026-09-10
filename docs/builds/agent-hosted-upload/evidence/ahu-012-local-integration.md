@@ -152,6 +152,73 @@ its supervisor:
     frames, the title and account outside the untrusted frame, and a keyboard
     sign-out that revokes server-side.
 
+## Mutation proof
+
+A gate that cannot fail is worse than no gate, so each guard the ticket names
+was removed one at a time, the runner was run against the mutated tree, the file
+was restored from the pristine checkout, and the restored tree was run again.
+
+The worktree is isolated and never the live checkout:
+
+```sh
+sha=$(git rev-parse HEAD)
+git worktree add --detach "$scratch/pr-190-$unique" "$sha"
+# hosted/, root and templates/docbuild node_modules copied in; nothing installed
+```
+
+Restoring is a **copy from the pristine checkout**, not `git checkout --`: the
+Aiur command wrapper refuses a destructive git command whose target is outside
+the agent workspace, and an earlier run that used `git checkout --` silently
+left the first mutation in place, so the three that followed all failed on it
+and reported a false result. Each case now asserts a clean tree before mutating
+and a clean tree after restoring.
+
+Each case ran:
+
+```sh
+node scripts/test-hosted-integration.mjs   # from the worktree root
+```
+
+| # | Guard removed | Result |
+| --- | --- | --- |
+| M1 | the owner equality check in `readOwnedPublication` (`hosted/lib/publications.mjs`) | **fails** — `stranger metadata was answered 200` |
+| M2 | the exact-source check in the renderer's message listener (`renderer/public/renderer.js`, `event.source !== parentWindow`) | **fails** — `the renderer did not record refusing the artifact's forged messages: wrong-origin` |
+| M3 | the descriptor recheck in `completePublication`'s approved branch | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
+| M3b | the descriptor recheck in `completePublication`'s already-complete branch | **fails** — `a completed publication accepted other bytes with status 200` |
+| M4 | the ambiguous-write readback in `createPublicationStore.update` (`return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}`) | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
+| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 97 cases)` |
+
+### What the first run caught, and what it cost
+
+The first mutation run found a real hole rather than confirming the gate: M1 and
+M2 failed, and **M3 and M4 both left the gate green at 90/90**. Two cases exist
+because of that, and they are the two most interesting in the file.
+
+- **M3 was unreachable over HTTP.** `handleArtifact` derives the digest and the
+  length from the bytes it read, so a client cannot present the state machine
+  with facts that disagree with its own body — the guard inside
+  `completePublication` had no wire-level input that could trip it. The case now
+  calls the real producer with the real dependencies and the real record and
+  presents exactly that combination, and asserts no write reached storage.
+  M3b covers the same guard on the already-complete branch, which *is* reachable
+  over HTTP: a retry carrying other bytes must be refused rather than handed the
+  receipt the first upload earned.
+- **M4 needed a non-idempotent transition.** A completion is idempotent, so a
+  lost write answer resolves to the same document whether the state machine
+  reads back or retries — which is why the completion case could not see the
+  difference. An approval is not idempotent: a state machine that reads a lost
+  answer as a refusal re-reads an already-approved record and reports
+  `state_conflict`, telling a person their successful approval failed on a
+  publication that is in fact theirs. The case drives the real browser approval
+  with the write's answer thrown away and asserts the status code the decision
+  route actually returned — not the page's copy, because every terminal answer
+  leaves the same shape on screen with a different sentence.
+
+A third correction came out of the same work: the ambiguous-approval case
+originally asserted the absence of failure words in the status line, and M4
+survived it because "This publication already has an answer." contains none of
+them. Asserting the response rather than the prose is what made it a proof.
+
 ## Reproducing it
 
 ```sh
