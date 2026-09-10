@@ -42,6 +42,7 @@ import { promisify } from "node:util";
 
 import {
   nextPollDelayMs,
+  observeStatus,
   PUBLISH_CONTRACT,
   PublishError,
   readRequestState,
@@ -92,7 +93,7 @@ interface Fixture {
 
 /** Later timestamps, in the exact grammar the contract's validators accept. */
 function isoIn(seconds: number): string {
-  return new Date(Date.now() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return new Date(Date.now() + seconds * 1000).toISOString();
 }
 
 function startBody(origin: string): Record<string, unknown> {
@@ -674,6 +675,160 @@ test("receipt_expired offers a check link, keeps exit 21 and claims no receipt",
   assert.equal(service.calls.start, 1, "receipt_expired must never start a replacement publication");
 });
 
+test("a receipt for other bytes or another publication is refused", async () => {
+  /* The one success claim that was previously taken on the service's word.
+     A well-formed receipt on the pinned origin is not enough: it also has to
+     be about this publication and the bytes the human approved. */
+  const wrongBytes = { ...(completeBody("https://x.example")["result"] as Record<string, unknown>) };
+  for (const corrupt of ["digest", "document"] as const) {
+    const space = workspace();
+    const service = await fixture({
+      start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+      status: () => {
+        const body = completeBody(serviceOrigin);
+        const result = { ...(body["result"] as Record<string, unknown>) };
+        if (corrupt === "digest") {
+          result["contentSha256"] = "b".repeat(64);
+        } else {
+          const other = "ffffffffffffffffffffffffffffffff";
+          result["documentId"] = other;
+          result["url"] = `${serviceOrigin}/docs/${other}`;
+        }
+        return { status: 200, json: { ...body, result } };
+      },
+    });
+    const serviceOrigin = service.origin;
+
+    const started = await startVia(space, serviceOrigin);
+    const requestFile = onlyObject(started.stdout)["requestFile"] as string;
+    const observed = await cli(["status", "--request", requestFile, "--json"], space.stateDir);
+    await service.close();
+
+    assert.equal(observed.code, 22, `${corrupt}: ${observed.stderr}`);
+    const payload = onlyObject(observed.stdout);
+    assert.equal(payload["code"], "protocol_error");
+    assert.equal(payload["result"], undefined, "a receipt this client cannot bind is not reported");
+  }
+  assert.ok(wrongBytes["contentSha256"], "the fixture receipt shape is what the server sends");
+});
+
+test("request state cannot redirect the human's sign-in to another origin", async () => {
+  const space = workspace();
+  const service = await fixture({ start: () => ({ status: 201, json: startBody(serviceOrigin) }) });
+  const serviceOrigin = service.origin;
+  const started = await startVia(space, serviceOrigin);
+  await service.close();
+  const requestFile = onlyObject(started.stdout)["requestFile"] as string;
+
+  for (const url of [
+    "https://evil.example/publish/authorize#browser-secret",
+    `${serviceOrigin}/evil#browser-secret`,
+    `${serviceOrigin}/publish/authorize`,
+  ]) {
+    const state = JSON.parse(readFileSync(requestFile, "utf8")) as Record<string, unknown>;
+    state["verificationUrl"] = url;
+    writeFileSync(requestFile, JSON.stringify(state), { mode: 0o600 });
+    const observed = await cli(["status", "--request", requestFile, "--json"], space.stateDir);
+    assert.equal(observed.code, 22, `${url}: ${observed.stderr}`);
+    assert.equal(onlyObject(observed.stdout)["code"], "invalid_state");
+    assert.ok(!observed.stdout.includes("evil.example"));
+    assert.ok(!observed.stderr.includes("evil.example"));
+  }
+});
+
+test("an oversized response body is refused rather than buffered", async () => {
+  const space = workspace();
+  const service = await fixture({
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+    status: () => ({ status: 200, json: `{"v":1,"pad":"${"p".repeat(200_000)}"}` }),
+  });
+  const serviceOrigin = service.origin;
+  const started = await startVia(space, serviceOrigin);
+  const requestFile = onlyObject(started.stdout)["requestFile"] as string;
+  const observed = await cli(["status", "--request", requestFile, "--json"], space.stateDir);
+  await service.close();
+
+  assert.equal(observed.code, 22, observed.stderr);
+  const payload = onlyObject(observed.stdout);
+  assert.equal(payload["code"], "protocol_error");
+  assert.match(payload["message"] as string, /bytes/);
+});
+
+test("a garbled answer to an accepted upload still recovers the receipt", async () => {
+  /* The upload landed; only the answer was unusable. Reporting exit 22 — whose
+     documented meaning is "nothing was published" — would talk a wrapper into
+     publishing the same document twice. */
+  const space = workspace();
+  const service = await fixture({
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+    status: (call) => ({ status: 200, json: call === 0 ? envelope("approved") : completeBody(serviceOrigin) }),
+    artifact: () => ({ status: 201, json: "not json at all" }),
+  });
+  const serviceOrigin = service.origin;
+
+  const started = await startVia(space, serviceOrigin);
+  const requestFile = onlyObject(started.stdout)["requestFile"] as string;
+  const resumed = await cli(["resume", "--request", requestFile, "--timeout-seconds", "30", "--json"], space.stateDir);
+  await service.close();
+
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(onlyObject(resumed.stdout)["state"], "complete");
+  assert.equal(service.calls.artifact, 1, "the upload is not repeated");
+  assert.equal(service.calls.start, 1, "no replacement publication is started");
+});
+
+test("start-only flags are refused on the commands that cannot honour them", async () => {
+  const space = workspace();
+  for (const extra of [["--state-dir", space.stateDir], ["--local-test"]]) {
+    const observed = await cli(["status", "--request", join(space.root, "x.json"), ...extra], space.stateDir);
+    assert.equal(observed.code, 22);
+    assert.match(observed.stderr, /status does not take/);
+  }
+});
+
+test("without --json stdout stays empty and the summary goes to stderr", async () => {
+  const space = workspace();
+  const service = await fixture({
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+    status: () => ({ status: 200, json: envelope("pending") }),
+  });
+  const serviceOrigin = service.origin;
+  const started = await cli(
+    ["start", "--file", space.file, "--title", "A test document", "--service", serviceOrigin, "--local-test"],
+    space.stateDir,
+  );
+  await service.close();
+
+  assert.equal(started.code, 10, started.stderr);
+  assert.equal(started.stdout, "", "stdout is a JSON result or nothing at all");
+  assert.match(started.stderr, /pairing code BCDF-2345/);
+  assert.ok(!started.stderr.includes(AGENT_SECRET));
+});
+
+test("every request carries an abort signal so a silent service cannot wedge the agent", async () => {
+  /* `resume --timeout-seconds` is only consulted between polls, so without a
+     per-request deadline a service that accepts the connection and says nothing
+     hangs the command forever. */
+  const state = fakeState();
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const deps: PublishDeps = {
+    fetch: (async (_url: unknown, init: RequestInit | undefined) => {
+      seen.push(init?.signal as AbortSignal | undefined);
+      return jsonResponse(200, envelope("denied"));
+    }) as unknown as typeof globalThis.fetch,
+    now: () => Date.now(),
+    sleep: async () => undefined,
+    random: () => 0.5,
+  };
+
+  const envelopeSeen = await observeStatus(state, deps);
+  assert.equal(envelopeSeen.state, "denied");
+  assert.equal(seen.length, 1);
+  const signal = seen[0];
+  assert.ok(signal instanceof AbortSignal, "every request must carry a timeout signal");
+  assert.equal(signal.aborted, false);
+});
+
 test("cancelling a completed publication returns the server's unchanged receipt", async () => {
   const space = workspace();
   const service = await fixture({
@@ -805,8 +960,8 @@ function fakeState(overrides: Partial<RequestState> = {}): RequestState {
     agentSecret: AGENT_SECRET,
     verificationUrl: "https://docs.example.com/publish/authorize#x",
     userCode: "BCDF-2345",
-    expiresAt: new Date(Date.now() + 900_000).toISOString().replace(/\.\d{3}Z$/, "Z"),
-    createdAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    createdAt: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -866,8 +1021,19 @@ test("polling honours Retry-After and never polls faster than the floor", async 
   const outcome = await resumePublication(state, deps, 300);
 
   assert.equal(outcome.envelope.state, "cancelled");
-  assert.equal(sleeps[0], 17000, "Retry-After overrides the backoff schedule");
-  assert.equal(sleeps[1], 5000, "a Retry-After under the floor is raised to the floor");
+  /* Jitter on a Retry-After only ever adds. Coming back sooner than the service
+     asked, on the one path where it has already said it is being polled too
+     often, is the failure this bound exists to prevent. */
+  assert.ok((sleeps[0] as number) >= 17000, "Retry-After is never undercut");
+  assert.ok((sleeps[0] as number) <= 17000 * 1.2, "Retry-After is not inflated beyond the jitter band");
+  assert.ok((sleeps[1] as number) >= 5000, "a Retry-After under the floor is raised to the floor");
+});
+
+test("jitter can never poll sooner than a Retry-After", () => {
+  for (const random of [() => 0, () => 0.5, () => 1]) {
+    assert.ok(nextPollDelayMs(0, 30, random) >= 30000, "downward jitter must not undercut Retry-After");
+    assert.ok(nextPollDelayMs(3, 30, random) >= 30000);
+  }
 });
 
 test("jitter varies the wait without breaking the floor", () => {
@@ -881,7 +1047,7 @@ test("polling stops one observation past the server's own deadline", async () =>
   /* The window closes in eight seconds; the floor is five. The loop is allowed
      one observation at or after the deadline so the *server* can say expired,
      and must not keep polling an authorization that cannot be approved. */
-  const closesAt = new Date(Date.now() + 8000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const closesAt = new Date(Date.now() + 8000).toISOString();
   const state = fakeState({ expiresAt: closesAt });
   const { deps, sleeps, clock } = drivenDeps([
     () => jsonResponse(200, { v: 1, state: "pending", expiresAt: closesAt, intervalSeconds: 5 }),

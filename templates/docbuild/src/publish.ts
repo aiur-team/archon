@@ -36,7 +36,7 @@
  * the server is entitled to mint.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
@@ -96,6 +96,17 @@ export const PUBLISH_CONTRACT = Object.freeze({
   /** C5: `resume --timeout-seconds` bounds. */
   RESUME_TIMEOUT_DEFAULT_SECONDS: 60,
   RESUME_TIMEOUT_MAX_SECONDS: 300,
+  /**
+   * The deadline on a single request, including reading its body.
+   *
+   * `resume --timeout-seconds` is a bound on the *poll loop*, which is only
+   * consulted between polls — so without this a service that accepts the
+   * connection and then says nothing wedges the command forever and the
+   * "bounded, tool-friendly timeout" the whole design rests on is not bounded
+   * at all. Thirty seconds is far longer than any legal C3 response needs and
+   * short enough that a hung service still returns a checkpoint.
+   */
+  REQUEST_TIMEOUT_SECONDS: 30,
   /** The ceiling backoff grows to between polls. */
   POLL_MAX_INTERVAL_SECONDS: 30,
   /**
@@ -188,6 +199,9 @@ export const EXIT = Object.freeze({
 const UNSAFE_DISPLAY = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const UNSAFE_DISPLAY_GLOBAL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
+/** C3 timestamps are exactly what `Date#toISOString` produces, milliseconds included. */
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 /** U+0000 and U+FEFF, spelled as escapes so this file holds no control characters. */
 const NUL = "\u0000";
 const BYTE_ORDER_MARK = "\uFEFF";
@@ -251,6 +265,23 @@ export function safeText(text: unknown): string {
   const scalars = [...cleaned];
   if (scalars.length <= PUBLISH_CONTRACT.ERROR_MESSAGE_MAX_LENGTH) return cleaned;
   return `${scalars.slice(0, PUBLISH_CONTRACT.ERROR_MESSAGE_MAX_LENGTH - 1).join("").trim()}…`;
+}
+
+/**
+ * Make a value safe to print without changing what it says.
+ *
+ * `safeText` is for messages: it collapses whitespace, which is right for prose
+ * and wrong for a filesystem path, where a run of spaces is part of the name
+ * and a caller is expected to paste the result back into a command. This keeps
+ * the value intact and only removes the characters that could rewrite the
+ * terminal line around it — a path is chosen by whoever invoked the command,
+ * but on an agent that can be a name a hostile document proposed.
+ */
+export function stripControls(text: unknown, max = 1024): string {
+  const cleaned = String(text).replace(UNSAFE_DISPLAY_GLOBAL, "\uFFFD");
+  const scalars = [...cleaned];
+  if (scalars.length <= max) return cleaned;
+  return `${scalars.slice(0, max - 1).join("")}…`;
 }
 
 const localError = (message: string, code = "invalid_input"): PublishError =>
@@ -605,7 +636,25 @@ export function ensureStateDir(dir: string): string {
       "unsafe_state_dir",
     );
   }
+  requireOwnedByThisUser(info.uid, path, "state directory", "unsafe_state_dir");
   return path;
+}
+
+/**
+ * Refuse a path this user does not own.
+ *
+ * Mode 0700 says "only the owner may read this"; it does not say the owner is
+ * us. With the default `~/.local/state` layout the two are the same question,
+ * but `--state-dir` and `ARCHON_PUBLISH_STATE_DIR` can name anywhere, and a
+ * directory somebody else owns and has made mode 0700 is a place they can read
+ * our bearer from. `getuid` is absent on Windows, where this check has no
+ * meaning and is skipped rather than faked.
+ */
+function requireOwnedByThisUser(uid: number, path: string, what: string, code: string): void {
+  const me = typeof process.getuid === "function" ? process.getuid() : null;
+  if (me !== null && uid !== me) {
+    throw localError(`the ${what} ${path} is owned by another user`, code);
+  }
 }
 
 export function requestStatePath(stateDir: string, publicationId: string): string {
@@ -621,15 +670,28 @@ export function requestStatePath(stateDir: string, publicationId: string): strin
  * than by a later `chmod` that would leave a window in which the bearer is
  * world-readable. The `rename` that follows replaces whatever is at the target
  * — including a symlink — rather than writing through it.
+ *
+ * Nothing unlinks the temporary name first, and the name carries random bytes
+ * rather than the pid. Clearing the path before `wx` would give back exactly
+ * the property `wx` is here for: an existing entry would stop being a refusal
+ * and become a race against re-planting it. A collision is therefore an error,
+ * not something to tidy up and proceed through.
  */
 export function writeRequestState(stateDir: string, state: RequestState): string {
   const dir = ensureStateDir(stateDir);
   const target = requestStatePath(dir, state.publicationId);
-  const temporary = `${target}.${process.pid}.tmp`;
+  const temporary = `${target}.${randomBytes(8).toString("hex")}.tmp`;
   const body = `${JSON.stringify(state, null, 2)}\n`;
 
-  rmSync(temporary, { force: true });
-  const fd = openSync(temporary, "wx", 0o600);
+  let fd: number;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+  } catch (error) {
+    throw localError(
+      `cannot create request state at ${temporary}: ${(error as Error).message}`,
+      "state_unwritable",
+    );
+  }
   try {
     writeSync(fd, body);
     fsyncSync(fd);
@@ -654,6 +716,56 @@ const requireStateString = (value: unknown, field: string): string => {
   }
   return value;
 };
+
+const requireStateTimestamp = (value: unknown, field: string): string => {
+  const text = requireStateString(value, field);
+  if (!TIMESTAMP.test(text) || Number.isNaN(Date.parse(text))) {
+    throw localError(`request state field ${field} is not a UTC timestamp`, "invalid_state");
+  }
+  return text;
+};
+
+const requireStateDisplayText = (value: unknown, max: number, field: string): string => {
+  const text = requireStateString(value, field);
+  if (UNSAFE_DISPLAY.test(text) || text.trim() !== text || [...text].length > max) {
+    throw localError(`request state field ${field} is not safe display text`, "invalid_state");
+  }
+  return text;
+};
+
+/**
+ * Why the browser URL is checked identically on both paths.
+ *
+ * `validateStartResponse` refuses a verification URL that is not on the pinned
+ * origin, because it is the first thing printed and a human is about to sign
+ * in there. The request file then carries that URL between processes — and a
+ * file on disk is input, so `status` and `resume` print a value this process
+ * never checked. Without re-running the same rules, editing one string in a
+ * request file redirects the approving human to somebody else's sign-in page,
+ * which is precisely the attack the wire-path check exists to stop.
+ *
+ * @returns the rule that was broken, or `null` when the URL is acceptable.
+ */
+function verificationUrlProblem(
+  value: unknown,
+  serviceOrigin: string,
+  agentSecret: string | null,
+): string | null {
+  if (typeof value !== "string") return "must be text";
+  let uri: URL;
+  try {
+    uri = new URL(value);
+  } catch {
+    return "must be an absolute URL";
+  }
+  if (uri.origin !== serviceOrigin) return "must be on the pinned service origin";
+  if (uri.pathname !== PUBLISH_CONTRACT.AUTHORIZE_PATH || uri.search !== "") {
+    return `must be ${PUBLISH_CONTRACT.AUTHORIZE_PATH} with no query string`;
+  }
+  if (uri.hash.length < 2) return "must carry the browser secret in its fragment";
+  if (agentSecret !== null && uri.hash.includes(agentSecret)) return "must not carry the agent secret";
+  return null;
+}
 
 /**
  * Read and validate request state, then re-derive everything security-relevant
@@ -684,6 +796,7 @@ export function readRequestState(requestPath: string): { state: RequestState; pa
       "unsafe_state",
     );
   }
+  requireOwnedByThisUser(info.uid, path, "request state", "unsafe_state");
 
   let parsed: unknown;
   try {
@@ -745,6 +858,12 @@ export function readRequestState(requestPath: string): { state: RequestState; pa
     throw localError("request state capability is malformed", "invalid_state");
   }
 
+  const verificationUrl = requireStateString(raw["verificationUrl"], "verificationUrl");
+  const problem = verificationUrlProblem(verificationUrl, serviceOrigin, agentSecret);
+  if (problem !== null) {
+    throw localError(`request state verificationUrl ${problem}`, "invalid_state");
+  }
+
   const state: RequestState = Object.freeze({
     v: 1 as const,
     publicationId,
@@ -753,10 +872,14 @@ export function readRequestState(requestPath: string): { state: RequestState; pa
     inputPath,
     descriptor,
     agentSecret,
-    verificationUrl: requireStateString(raw["verificationUrl"], "verificationUrl"),
-    userCode: requireStateString(raw["userCode"], "userCode"),
-    expiresAt: requireStateString(raw["expiresAt"], "expiresAt"),
-    createdAt: requireStateString(raw["createdAt"], "createdAt"),
+    verificationUrl,
+    userCode: requireStateDisplayText(
+      raw["userCode"],
+      PUBLISH_CONTRACT.USER_CODE_MAX_SCALARS,
+      "userCode",
+    ),
+    expiresAt: requireStateTimestamp(raw["expiresAt"], "expiresAt"),
+    createdAt: requireStateTimestamp(raw["createdAt"], "createdAt"),
   });
   return { state, path };
 }
@@ -789,13 +912,17 @@ const requireDisplayText = (value: unknown, max: number, field: string): string 
   if (UNSAFE_DISPLAY.test(value)) {
     throw protocolError(`${field} must not contain control or format characters`);
   }
+  if (value.trim() !== value) throw protocolError(`${field} must not be padded with whitespace`);
   const scalars = [...value].length;
   if (scalars < 1 || scalars > max) throw protocolError(`${field} is outside its length bounds`);
   return value;
 };
 
 const requireTimestamp = (value: unknown, field: string): string => {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(value)) {
+  /* The exact `Date#toISOString` spelling, milliseconds included, because that
+     is the one spelling the server contract emits and accepting a second
+     spelling here would mean two clients disagreeing about equality. */
+  if (typeof value !== "string" || !TIMESTAMP.test(value)) {
     throw protocolError(`${field} must be a UTC ISO-8601 timestamp`);
   }
   if (Number.isNaN(Date.parse(value))) throw protocolError(`${field} must be a real instant`);
@@ -853,7 +980,7 @@ export function validateStartResponse(value: unknown, serviceOrigin: string): St
     typeof agentSecret !== "string" ||
     agentSecret.length < PUBLISH_CONTRACT.OPAQUE_TOKEN_MIN_LENGTH ||
     agentSecret.length > PUBLISH_CONTRACT.OPAQUE_TOKEN_MAX_LENGTH ||
-    !/^[A-Za-z0-9._~-]+$/.test(agentSecret)
+    !/^[A-Za-z0-9_-]+$/.test(agentSecret)
   ) {
     throw protocolError("start response agentSecret is not an opaque bearer token");
   }
@@ -865,36 +992,15 @@ export function validateStartResponse(value: unknown, serviceOrigin: string): St
   }
 
   const uriText = body["verificationUriComplete"];
-  if (typeof uriText !== "string") {
-    throw protocolError("start response verificationUriComplete must be text");
-  }
-  let uri: URL;
-  try {
-    uri = new URL(uriText);
-  } catch {
-    throw protocolError("start response verificationUriComplete must be an absolute URL");
-  }
-  if (uri.origin !== serviceOrigin) {
-    throw protocolError("start response verificationUriComplete must be on the pinned service origin");
-  }
-  if (uri.pathname !== PUBLISH_CONTRACT.AUTHORIZE_PATH || uri.search !== "") {
-    throw protocolError(
-      `start response verificationUriComplete must be ${PUBLISH_CONTRACT.AUTHORIZE_PATH} with no query string`,
-    );
-  }
-  if (uri.hash.length < 2) {
-    throw protocolError(
-      "start response verificationUriComplete must carry the browser secret in its fragment",
-    );
-  }
-  if (uri.hash.includes(agentSecret)) {
-    throw protocolError("start response verificationUriComplete must not carry the agent secret");
+  const problem = verificationUrlProblem(uriText, serviceOrigin, agentSecret);
+  if (problem !== null) {
+    throw protocolError(`start response verificationUriComplete ${problem}`);
   }
 
   return Object.freeze({
     v: 1 as const,
     publicationId,
-    verificationUriComplete: uriText,
+    verificationUriComplete: uriText as string,
     userCode,
     agentSecret,
     expiresAt,
@@ -1007,6 +1113,38 @@ export function validateStatusEnvelope(value: unknown, serviceOrigin: string): S
   });
 }
 
+/**
+ * Bind a completion receipt to the publication this client actually started.
+ *
+ * `validateStatusEnvelope` proves the receipt is *self*-consistent — well-formed
+ * fields, a `/docs/<documentId>` URL on the pinned origin. That leaves one gap,
+ * and it is the only success claim in this client taken on the service's word:
+ * nothing compares the receipt to what this request was about. A service that
+ * answers the first status poll with a well-formed receipt for a different
+ * document, or for different bytes, gets `published <url>` and exit 0 out of a
+ * command that uploaded nothing.
+ *
+ * Both equalities are re-derivable locally, so both are checked. The digest and
+ * length are the bytes the human approved. The document ID must be this
+ * publication's ID because C3 builds the recovery destination as
+ * `/docs/<saved-publicationId>` — a document at any other path could not be
+ * found by the client's own documented check link.
+ */
+export function requireReceiptBinding(envelope: StatusEnvelope, state: RequestState): StatusEnvelope {
+  const receipt = envelope.result;
+  if (receipt === undefined) return envelope;
+  if (receipt.documentId !== state.publicationId) {
+    throw protocolError("the completion receipt names a different publication than this request started");
+  }
+  if (
+    receipt.contentSha256 !== state.descriptor.contentSha256 ||
+    receipt.contentBytes !== state.descriptor.contentBytes
+  ) {
+    throw protocolError("the completion receipt describes different bytes than the approved descriptor");
+  }
+  return envelope;
+}
+
 /** How a wire error code maps onto a C5 exit class. */
 function failureForCode(code: WireErrorCode): PublishFailure {
   if (WIRE_ERROR_CODES[code]) return "retryable";
@@ -1044,6 +1182,11 @@ export function wireErrorFrom(
     return protocolError(`the service returned HTTP ${status} with a malformed error envelope`);
   }
   const fields = error as Record<string, unknown>;
+  try {
+    requireExactKeys(fields, ["code", "message", "retryable"], "error");
+  } catch {
+    return protocolError(`the service returned HTTP ${status} with a malformed error envelope`);
+  }
   const code = fields["code"];
   if (typeof code !== "string" || !Object.hasOwn(WIRE_ERROR_CODES, code)) {
     return protocolError(
@@ -1110,6 +1253,50 @@ interface WireResponse {
   readonly json: unknown;
 }
 
+/**
+ * Read a response body, refusing one that is too large *while* reading it.
+ *
+ * Buffering the whole body and then checking its length is not a bound — by
+ * the time the check runs the memory has already been spent, so a service
+ * answering a status poll with a multi-gigabyte body kills the agent before a
+ * single validation rule gets to run. Every legal C3 body is a small JSON
+ * object, so the counter stops the read at the limit and cancels the stream.
+ */
+async function readBounded(response: Response, max: number, origin: string): Promise<Buffer> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await response.body?.cancel().catch(() => undefined);
+    throw protocolError(`the service declared a response body larger than ${max} bytes`);
+  }
+
+  const stream = response.body;
+  if (stream === null) return Buffer.alloc(0);
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      if (total > max) {
+        throw protocolError(`the service returned more than ${max} bytes`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    if (error instanceof PublishError) throw error;
+    throw new PublishError(
+      "retryable",
+      "network_unavailable",
+      `cannot read the response from ${origin}: ${(error as Error).message}`,
+    );
+  }
+  return Buffer.concat(chunks);
+}
+
 /** `Retry-After` in its delta-seconds form, ignored when it is not one. */
 export function parseRetryAfter(header: string | null): number | null {
   if (header === null || header.trim() === "") return null;
@@ -1148,6 +1335,11 @@ async function send(deps: PublishDeps, request: WireRequest): Promise<WireRespon
       method: request.method,
       headers,
       redirect: "manual",
+      /* Covers reading the body as well as establishing the connection, which
+         is the half a connect timeout would miss: a service that sends headers
+         and then trickles is as effective at wedging an agent as one that
+         never answers. */
+      signal: AbortSignal.timeout(PUBLISH_CONTRACT.REQUEST_TIMEOUT_SECONDS * 1000),
       ...(body === undefined ? {} : { body }),
     });
   } catch (error) {
@@ -1159,17 +1351,15 @@ async function send(deps: PublishDeps, request: WireRequest): Promise<WireRespon
   }
 
   if (response.status >= 300 && response.status < 400) {
+    /* Cancel rather than abandon: an undrained body holds the socket open for
+       the rest of the process's life. */
+    await response.body?.cancel().catch(() => undefined);
     throw protocolError(
       `the service answered with an HTTP ${response.status} redirect; this client never follows a redirect while holding a capability`,
     );
   }
 
-  const raw = Buffer.from(await response.arrayBuffer());
-  if (raw.byteLength > PUBLISH_CONTRACT.RESPONSE_BODY_MAX_BYTES) {
-    throw protocolError(
-      `the service returned more than ${PUBLISH_CONTRACT.RESPONSE_BODY_MAX_BYTES} bytes`,
-    );
-  }
+  const raw = await readBounded(response, PUBLISH_CONTRACT.RESPONSE_BODY_MAX_BYTES, request.origin);
   let json: unknown;
   try {
     json = JSON.parse(raw.toString("utf8"));
@@ -1226,7 +1416,20 @@ export async function startPublication(input: StartInput, deps: PublishDeps): Pr
     }
     throw wireErrorFrom(response.status, response.json, response.retryAfterSeconds);
   }
-  const started = validateStartResponse(response.json, input.serviceOrigin);
+  /* Past this point the service has created a publication, so every failure
+     below is a failure that leaves one behind. Saying "nothing was published"
+     there — which is what exit 22 means — is what talks a wrapper into calling
+     `start` a second time for the same document. */
+  let started: StartResponse;
+  try {
+    started = validateStartResponse(response.json, input.serviceOrigin);
+  } catch (error) {
+    throw protocolError(
+      `the service created a publication and answered with a body this client cannot trust, so it can be neither resumed nor cancelled; do not retry automatically (${
+        error instanceof PublishError ? error.message : "invalid start response"
+      })`,
+    );
+  }
 
   const state: RequestState = Object.freeze({
     v: 1 as const,
@@ -1241,8 +1444,26 @@ export async function startPublication(input: StartInput, deps: PublishDeps): Pr
     expiresAt: started.expiresAt,
     createdAt: new Date(deps.now()).toISOString(),
   });
-  const requestFile = writeRequestState(stateDir, state);
-  return { state, requestFile };
+  try {
+    const requestFile = writeRequestState(stateDir, state);
+    return { state, requestFile };
+  } catch (error) {
+    /* The capability is about to be lost with this process. Spending it once
+       on a cancellation leaves the service with a closed publication rather
+       than a pending one nobody holds the bearer for. */
+    let cancelled = "could not be cancelled";
+    try {
+      await cancelPublication(state, deps);
+      cancelled = "was cancelled";
+    } catch {
+      /* Nothing further is available; the message says so rather than implying
+         a tidy outcome that did not happen. */
+    }
+    throw localError(
+      `request state could not be saved (${(error as Error).message}); the publication ${cancelled}, so do not retry automatically`,
+      "state_unwritable",
+    );
+  }
 }
 
 /** Observe the publication exactly once. Never uploads. */
@@ -1256,7 +1477,7 @@ export async function observeStatus(state: RequestState, deps: PublishDeps): Pro
   if (response.status !== 200) {
     throw wireErrorFrom(response.status, response.json, response.retryAfterSeconds);
   }
-  return validateStatusEnvelope(response.json, state.serviceOrigin);
+  return requireReceiptBinding(validateStatusEnvelope(response.json, state.serviceOrigin), state);
 }
 
 /**
@@ -1277,9 +1498,8 @@ export async function uploadArtifact(state: RequestState, deps: PublishDeps): Pr
   const artifact = readArtifact(state.inputPath);
   requireDescriptorMatch(artifact, state.descriptor);
 
-  let response: WireResponse;
   try {
-    response = await send(deps, {
+    const response = await send(deps, {
       origin: state.serviceOrigin,
       path: `/api/hosted/publications/${state.publicationId}/artifact`,
       method: "PUT",
@@ -1287,31 +1507,27 @@ export async function uploadArtifact(state: RequestState, deps: PublishDeps): Pr
       body: artifact.bytes,
       contentType: PUBLISH_CONTRACT.ARTIFACT_MEDIA_TYPE,
     });
-  } catch (error) {
-    if (error instanceof PublishError && error.code === "network_unavailable") {
-      const recovered = await recoverAmbiguousUpload(state, deps);
-      if (recovered !== null) return recovered;
+    if (response.status !== 201 && response.status !== 200) {
+      throw wireErrorFrom(response.status, response.json, response.retryAfterSeconds);
     }
+    const envelope = requireReceiptBinding(
+      validateStatusEnvelope(response.json, state.serviceOrigin),
+      state,
+    );
+    if (envelope.state !== "complete" || envelope.result === undefined) {
+      throw protocolError("the service accepted the artifact without returning a completion receipt");
+    }
+    return envelope;
+  } catch (error) {
+    /* Every failure inside that block happens with the request already sent,
+       so the upload may have completed durably whatever went wrong afterwards
+       — a dropped connection, a 409 that means "already finished", a garbled
+       201 body. Reporting any of them as "nothing was published" would be a
+       guess, and the wrong one is the expensive direction. So ask once. */
+    const recovered = await recoverAmbiguousUpload(state, deps);
+    if (recovered !== null) return recovered;
     throw error;
   }
-
-  if (response.status !== 201 && response.status !== 200) {
-    const failure = wireErrorFrom(response.status, response.json, response.retryAfterSeconds);
-    /* A state conflict here can mean "this one already finished", which is a
-       success we are allowed to report — but only if the server hands back the
-       receipt when asked, never on the strength of the conflict alone. */
-    if (failure.code === "state_conflict") {
-      const recovered = await recoverAmbiguousUpload(state, deps);
-      if (recovered !== null) return recovered;
-    }
-    throw failure;
-  }
-
-  const envelope = validateStatusEnvelope(response.json, state.serviceOrigin);
-  if (envelope.state !== "complete" || envelope.result === undefined) {
-    throw protocolError("the service accepted the artifact without returning a completion receipt");
-  }
-  return envelope;
 }
 
 /** One status call after a lost upload answer. `null` when it did not land. */
@@ -1350,7 +1566,7 @@ export async function cancelPublication(
   if (response.status !== 200) {
     throw wireErrorFrom(response.status, response.json, response.retryAfterSeconds);
   }
-  return validateStatusEnvelope(response.json, state.serviceOrigin);
+  return requireReceiptBinding(validateStatusEnvelope(response.json, state.serviceOrigin), state);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1375,10 +1591,14 @@ export function nextPollDelayMs(
 ): number {
   const floor = PUBLISH_CONTRACT.POLL_INTERVAL_SECONDS * 1000;
   const ceiling = PUBLISH_CONTRACT.POLL_MAX_INTERVAL_SECONDS * 1000;
-  const base =
-    retryAfterSeconds !== null
-      ? Math.max(floor, retryAfterSeconds * 1000)
-      : Math.min(ceiling, Math.round(floor * 1.5 ** Math.max(0, attempt)));
+  if (retryAfterSeconds !== null) {
+    /* Jitter only ever adds here. Spreading a `Retry-After` in both directions
+       would let the client come back sooner than the service asked, on the one
+       path where the service has already said it is being asked too often. */
+    const requested = Math.max(floor, retryAfterSeconds * 1000);
+    return Math.round(requested * (1 + random() * 0.2));
+  }
+  const base = Math.min(ceiling, Math.round(floor * 1.5 ** Math.max(0, attempt)));
   const jitter = 1 + (random() * 2 - 1) * 0.2;
   return Math.max(floor, Math.round(base * jitter));
 }
@@ -1432,33 +1652,39 @@ export async function resumePublication(
   let polls = 0;
   let observedAtOrAfterExpiry = false;
 
+  /** The last wait before the server's own deadline is clamped onto it. */
+  const waitFor = (wait: number): number =>
+    Number.isFinite(serverExpiry) && deps.now() + wait > serverExpiry
+      ? Math.max(0, serverExpiry - deps.now())
+      : wait;
+
   for (;;) {
-    const observingAfterExpiry: boolean =
+    observedAtOrAfterExpiry =
       observedAtOrAfterExpiry || (Number.isFinite(serverExpiry) && deps.now() >= serverExpiry);
 
     let envelope: StatusEnvelope;
     try {
       envelope = await observeStatus(state, deps);
     } catch (error) {
-      /* A rate limit or a transient outage is a reason to wait, not a reason
-         to abandon a publication a human may already have approved. Anything
-         else — a refused capability, a protocol violation — is not something
-         waiting fixes, so it leaves immediately. */
-      if (
-        !(error instanceof PublishError) ||
-        (error.code !== "rate_limited" && error.code !== "unavailable")
-      ) {
-        throw error;
-      }
+      /* A rate limit, a transient outage or a dropped connection is a reason
+         to wait, not a reason to abandon a publication a human may already
+         have approved. Anything the classifier does not call retryable — a
+         refused capability, a protocol violation — is not something waiting
+         fixes, so it leaves immediately. Deciding this from `failure` rather
+         than from a list of codes keeps the two in step; the earlier code list
+         silently excluded `network_unavailable`, the most common one of all. */
+      if (!(error instanceof PublishError) || error.failure !== "retryable") throw error;
       polls += 1;
       const wait = nextPollDelayMs(attempt, error.retryAfterSeconds, deps.random);
-      if (deps.now() + wait > deadline) throw error;
+      /* The same two limits as the success path: waiting past the caller's
+         timeout, or past a window that has already closed, is not waiting for
+         anything that can still happen. */
+      if (deps.now() + wait > deadline || observedAtOrAfterExpiry) throw error;
       attempt += 1;
-      await deps.sleep(wait);
+      await deps.sleep(waitFor(wait));
       continue;
     }
     polls += 1;
-    observedAtOrAfterExpiry = observingAfterExpiry;
 
     if (envelope.state === "approved") {
       return {
@@ -1488,7 +1714,7 @@ export async function resumePublication(
     /* Clamp the last sleep onto the server's deadline so the loop takes exactly
        one observation past it rather than sailing a whole interval beyond. */
     const clamped = wakeAt > envelopeExpiry ? Math.max(0, envelopeExpiry - deps.now()) : wait;
-    await deps.sleep(clamped);
+    await deps.sleep(waitFor(clamped));
   }
 }
 

@@ -26,6 +26,7 @@
  * one document becomes two.
  */
 
+import { writeSync } from "node:fs";
 import { basename } from "node:path";
 
 import {
@@ -41,6 +42,7 @@ import {
   resumePublication,
   safeText,
   selectServiceOrigin,
+  stripControls,
   startPublication,
   STATE_DIR_ENV,
   SERVICE_ORIGIN_ENV,
@@ -75,10 +77,11 @@ Options
                            Defaults to ${SERVICE_ORIGIN_ENV} when set.
   --request <path>         The request-state file printed by start.
   --timeout-seconds <n>    resume only. Default ${PUBLISH_CONTRACT.RESUME_TIMEOUT_DEFAULT_SECONDS}, maximum ${PUBLISH_CONTRACT.RESUME_TIMEOUT_MAX_SECONDS}.
-  --state-dir <path>       Where private request state lives. Defaults to
-                           ${STATE_DIR_ENV}, then \$XDG_STATE_HOME, then
-                           ~/.local/state/archon-publish.
-  --local-test             Allow a plain-http loopback service origin. Testing only.
+  --state-dir <path>       start only. Where private request state lives.
+                           Defaults to ${STATE_DIR_ENV}, then \$XDG_STATE_HOME,
+                           then ~/.local/state/archon-publish.
+  --local-test             start only. Allow a plain-http loopback service
+                           origin. Testing only.
   --json                   Print one machine-readable JSON object on stdout.
   -h, --help               Print this help.
 
@@ -96,13 +99,20 @@ never sees a GitHub credential or a browser cookie, and never stores an account
 login — only a capability for the single publication it started.
 `;
 
-/** Write help and leave, with 0 only when help is what was asked for. */
+/**
+ * Write help and leave, with 0 only when help is what was asked for.
+ *
+ * `writeSync` rather than `process.stdout.write`, because `process.exit` on the
+ * next line does not wait for an asynchronous write to drain and stdout is a
+ * pipe whenever this is called from a script — the exact case where the help
+ * text would be truncated.
+ */
 function usage(message?: string): never {
   if (message === undefined) {
-    process.stdout.write(HELP);
+    writeSync(1, HELP);
     process.exit(0);
   }
-  process.stderr.write(`error: ${safeText(message)}\n\n${HELP}`);
+  writeSync(2, `error: ${safeText(message)}\n\n${HELP}`);
   process.exit(EXIT.LOCAL);
 }
 
@@ -185,16 +195,24 @@ function refuse(options: Options, flags: readonly string[]): void {
 
 /** Progress and human instructions. Never a result, never a secret. */
 function note(line: string): void {
-  process.stderr.write(`${line}\n`);
+  writeSync(2, `${line}\n`);
 }
 
-/** The single stdout object, written exactly once per run. */
+/**
+ * stdout is one machine-readable JSON object, or it is empty.
+ *
+ * The human summary goes to stderr with everything else that is not a result.
+ * That reads oddly for a command run by hand — nothing on stdout — and it is
+ * the point: a caller can redirect stdout into a parser without knowing which
+ * mode the command ran in, and a progress line can never be mistaken for a
+ * result. `--json` is what asks for the result on stdout.
+ */
 function emit(options: Options, payload: Record<string, unknown>, human: readonly string[]): void {
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    writeSync(1, `${JSON.stringify(payload)}\n`);
     return;
   }
-  for (const line of human) process.stdout.write(`${line}\n`);
+  for (const line of human) note(line);
 }
 
 /**
@@ -204,7 +222,8 @@ function emit(options: Options, payload: Record<string, unknown>, human: readonl
  * Written from the state rather than from which command produced it, so
  * `status` and `resume` cannot disagree about what a pending publication needs.
  */
-function nextActionFor(state: PublicationState, request: string, verificationUrl: string): string {
+function nextActionFor(state: PublicationState, requestPath: string, verificationUrl: string): string {
+  const request = stripControls(requestPath);
   switch (state) {
     case "pending":
       return `Ask the human to open ${verificationUrl}, sign in and approve, then run: archon-publish resume --request ${request}`;
@@ -290,13 +309,13 @@ async function runStart(options: Options): Promise<number> {
   );
   const stateDir = options.flags.get("--state-dir") ?? defaultStateDir(process.env);
 
-  note(`publishing ${basename(file)} to ${serviceOrigin}`);
+  note(`publishing ${stripControls(basename(file))} to ${serviceOrigin}`);
   const { state, requestFile } = await startPublication(
     { file, title, serviceOrigin, localTest: options.localTest, stateDir },
     defaultDeps(),
   );
 
-  const nextAction = `Ask the human to open ${state.verificationUrl}, confirm the pairing code ${state.userCode}, sign in and approve. Then run: archon-publish resume --request ${requestFile}`;
+  const nextAction = `Ask the human to open ${state.verificationUrl}, confirm the pairing code ${state.userCode}, sign in and approve. Then run: archon-publish resume --request ${stripControls(requestFile)}`;
   /* Exactly the seven fields C5 fixes for this command, and no others. The
      agent secret is in the request file and stays there. */
   emit(
@@ -328,7 +347,12 @@ interface LoadedRequest {
 }
 
 function loadRequest(options: Options): LoadedRequest {
-  refuse(options, ["--file", "--title", "--service"]);
+  /* `--state-dir` and `--local-test` are start-only. Both are already answered
+     by the request file — it *is* the state, and it pins whether this was a
+     local test — so accepting them here would be accepting a flag that cannot
+     do what the person typing it believes it does. */
+  refuse(options, ["--file", "--title", "--service", "--state-dir"]);
+  if (options.localTest) usage(`${options.command} does not take --local-test`);
   return readRequestState(required(options, "--request"));
 }
 
@@ -398,7 +422,8 @@ function reportFailure(options: Options | null, error: unknown, state: RequestSt
   if (failure.code === "receipt_expired" && state !== null) {
     const url = checkPublicationUrl(state.serviceOrigin, state.publicationId);
     payload["checkPublicationUrl"] = url;
-    payload["nextAction"] = `Check publication: sign in at ${url} to see whether this document exists. This link is not a receipt, and no replacement publication was started.`;
+    payload["nextAction"] =
+      `Check publication: sign in at ${url} to see whether this document exists. This link is not a receipt, and no replacement publication was started.`;
     note(`Check publication: ${url}`);
     note("this is a sign-in destination, not proof the document exists");
   }
