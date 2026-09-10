@@ -40,7 +40,18 @@ function code(path) {
 const SOURCE_EXTENSIONS = [".mjs", ".js", ".ts", ".json"];
 const DOCUMENTATION = ["docs/", "research/", "how-archon-works/", "README.md", "website/"];
 
+/**
+ * This file, excluded from its own scan.
+ *
+ * It has to name what it is looking for in order to look for it, so a scanner
+ * that scanned itself would report itself: the first version of this suite
+ * failed on `safeNext` the moment it was committed, having found the only
+ * occurrence left in the repository — its own assertion.
+ */
+const SELF = "netlify/test/identity-removal.test.mjs";
+
 function isProductionSource(path) {
+  if (path === SELF) return false;
   if (DOCUMENTATION.some((prefix) => path.startsWith(prefix))) return false;
   return SOURCE_EXTENSIONS.some((extension) => path.endsWith(extension));
 }
