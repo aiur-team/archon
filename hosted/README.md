@@ -51,8 +51,11 @@ the build if it ever does. Nothing about the root deployment or
   a dynamic one inside a function body is invisible to any check that does not
   execute it, and its specifier can be computed. Write "dynamic import" in prose
   if you need to mention it.
-- **Plain JavaScript.** No TypeScript: the deploy has no build step, and the
-  gate has to be able to load what it checks.
+- **`.mjs` only.** No TypeScript — the deploy has no build step, and the gate
+  has to be able to load what it checks. No `.cjs` or `.js` either: the boundary
+  rules above are read off an ESM resolution hook, which Node never consults for
+  a CommonJS `require()`, and a `.js` file's module system is decided by the
+  nearest `package.json` rather than by the file itself.
 
 ## Modules
 

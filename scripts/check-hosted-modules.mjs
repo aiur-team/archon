@@ -15,7 +15,7 @@
  * loaded, never called, so nothing here runs a handler, reads a credential,
  * opens a store or contacts a provider.
  *
- * On top of linking, four rules hold the boundary. Each exists because a
+ * On top of linking, five rules hold the boundary. Each exists because a
  * plausible mistake would otherwise deploy:
  *
  *  1. **Nothing resolves outside `hosted/`.** A hosted module that reached into
@@ -45,6 +45,16 @@
  *     them: a whitespace-only pattern reads `import/*x*\/("...")` as prose.
  *     Hosted deploy modules have no need for one; write "dynamic import" in
  *     prose if you must mention it.
+ *  5. **The deploy tree is explicit ESM: `.mjs` only.** Rules 1 to 3 are read
+ *     off an ESM `resolve` hook, and Node never consults that hook for a
+ *     CommonJS `require()`. A `hosted/lib/*.cjs` that required
+ *     `netlify/lib/*.cjs` therefore linked, loaded and reported PASS with the
+ *     boundary rules simply not applied - the exact escape rule 1 exists to
+ *     stop, reached by changing a letter in a filename. `.js` is refused with
+ *     it, because its module system is decided by the nearest `package.json`
+ *     rather than by the file, and that manifest is not something this gate
+ *     reads. Refusing both by extension keeps the rule where a reviewer can see
+ *     it, in the filename.
  *
  * The import graph comes from `scripts/hosted-module-loader.mjs`, a resolution
  * hook that records what Node actually resolved. An earlier version of this
@@ -102,9 +112,35 @@ const ASSET_DIRECTORY = "public";
 /** The path prefix every hosted HTTP function is routed under. */
 const ROUTED_PREFIX = "/api/hosted/";
 
-/** Source files this gate can load, and source files it refuses outright. */
-const LOADABLE = Object.freeze([".mjs", ".cjs", ".js"]);
-const UNSUPPORTED = Object.freeze([".ts", ".mts", ".cts", ".jsx", ".tsx"]);
+/** The one source extension a hosted deploy directory may carry. */
+const LOADABLE = ".mjs";
+
+/**
+ * Every other source extension, refused inside a deploy directory, with the
+ * reason each one is refused. This is rule 5: the tree is explicit ESM.
+ *
+ * `.cjs` is the load-bearing entry. The gate reasons about the import graph
+ * through an ESM `resolve` hook, and that hook is never consulted for a
+ * CommonJS `require()`, so a `.cjs` module reaching into `netlify/lib/` linked
+ * cleanly and the gate printed PASS - rules 1 to 3 silently did not apply to
+ * it. `.js` is refused for the same reason one step removed: whether it is ESM
+ * or CommonJS is decided by the nearest `package.json`, which is a file this
+ * gate does not police, so the same `require()` graph can hide behind it.
+ * Refusing both by extension keeps the rule local to the filename, which is the
+ * only form of it that cannot be undone from somewhere else in the tree.
+ */
+const REFUSED = Object.freeze({
+  ".cjs": "a CommonJS require() graph is invisible to the ESM resolution hook that enforces the boundary",
+  ".js": "whether a .js file is ESM or CommonJS depends on the nearest package.json, so a require() graph can hide behind it",
+  ".jsx": "JSX is not JavaScript this gate can load",
+  ".ts": "TypeScript is not JavaScript this gate can load",
+  ".mts": "TypeScript is not JavaScript this gate can load",
+  ".cts": "TypeScript is not JavaScript this gate can load",
+  ".tsx": "TypeScript is not JavaScript this gate can load",
+});
+
+/** Extensions the placement and shape rules apply to at all. */
+const SCANNED = Object.freeze([LOADABLE, ...Object.keys(REFUSED)]);
 
 /**
  * Whether `candidate` is inside `root`.
@@ -350,7 +386,7 @@ async function main(argv) {
     const name = path.slice(path.lastIndexOf(sep) + 1);
     const dot = name.lastIndexOf(".");
     const extension = dot === -1 ? "" : name.slice(dot);
-    if (!LOADABLE.includes(extension) && !UNSUPPORTED.includes(extension)) continue;
+    if (!SCANNED.includes(extension)) continue;
 
     const shown = relative(repoRoot, path);
     const directory = relative(hostedRoot, path).split(sep)[0];
@@ -360,11 +396,11 @@ async function main(argv) {
       );
       continue;
     }
-    if (UNSUPPORTED.includes(extension)) {
-      faults.push(`${shown} is ${extension}; the hosted deploy tree is plain JavaScript this gate can load`);
+    if (extension !== LOADABLE) {
+      faults.push(`${shown} is ${extension}; the hosted deploy tree is ${LOADABLE} only, because ${REFUSED[extension]}`);
       continue;
     }
-    if (/\.test\.[cm]?js$/.test(name)) {
+    if (/\.test\.mjs$/.test(name)) {
       faults.push(`${shown} is a test file inside a deployed directory; it belongs in ${HOSTED}/${FIXTURE_DIRECTORY}/`);
       continue;
     }

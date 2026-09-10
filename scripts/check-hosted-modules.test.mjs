@@ -366,10 +366,41 @@ test("an unresolvable import and a missing named export both fail", () => {
   );
 });
 
+test("a CommonJS module cannot smuggle a require() past the resolution hook", () => {
+  /* The gate reads rules 1 to 3 off an ESM `resolve` hook, and Node never
+     consults that hook for a `require()`. So this exact tree - a `.cjs` module
+     in a deploy directory requiring the legacy tree - loaded, linked and
+     printed PASS while reaching straight out of `hosted/`. The escape is closed
+     at the filename, so the assertion is on the extension rule rather than on
+     the boundary message: there is no reading of a `.cjs` file that this gate
+     can check, so it never gets that far. */
+  assertRejected(
+    (root, hosted) => {
+      write(join(root, "netlify", "lib", "legacy.cjs"), "module.exports = { legacy: true };\n");
+      write(join(hosted, "lib", "leak.cjs"), 'module.exports = require("../../netlify/lib/legacy.cjs");\n');
+    },
+    /leak\.cjs is \.cjs; the hosted deploy tree is \.mjs only, because a CommonJS require\(\) graph is invisible/,
+  );
+});
+
+test("a .js module is refused, because its module system is not in the filename", () => {
+  /* `.js` is whatever the nearest `package.json` says it is, and that manifest
+     is not a file this gate reads - a nested `{"type":"commonjs"}` would turn
+     the module below back into the `require()` graph the rule above closes,
+     with the deploy tree untouched. */
+  assertRejected(
+    (root, hosted) => {
+      write(join(hosted, "lib", "nested", "package.json"), JSON.stringify({ type: "commonjs" }));
+      write(join(hosted, "lib", "nested", "leak.js"), 'module.exports = require("../../../netlify/lib/identity.mjs");\n');
+    },
+    /leak\.js is \.js; the hosted deploy tree is \.mjs only/,
+  );
+});
+
 test("TypeScript and test files inside a deployed directory are refused", () => {
   assertRejected(
     (root, hosted) => write(join(hosted, "lib", "typed.ts"), "export const typed: boolean = true;\n"),
-    /is \.ts; the hosted deploy tree is plain JavaScript/,
+    /is \.ts; the hosted deploy tree is \.mjs only, because TypeScript is not JavaScript/,
   );
   assertRejected(
     (root, hosted) => write(join(hosted, "lib", "ok.test.mjs"), "export const spec = 1;\n"),
