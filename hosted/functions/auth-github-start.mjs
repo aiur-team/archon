@@ -119,8 +119,11 @@ export function createStartRoute({ store, config: hostedConfig }) {
       await store.revokeSession(sessionToken);
       cookies.push(clearCookie(SESSION_COOKIE));
     } else {
+      /* One check, not two: `consumeTransient` refuses an absent token as well
+         as an unknown, expired or already-consumed one, and all four are the
+         same answer here. A separate null check above it would be a guard no
+         input could reach on its own. */
       const binding = readCookie(request, LOGIN_COOKIE);
-      if (binding === null) throw new CsrfFailedError();
       if ((await store.consumeTransient("login", binding)) === null) throw new CsrfFailedError();
       cookies.push(clearCookie(LOGIN_COOKIE));
     }

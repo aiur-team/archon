@@ -146,6 +146,21 @@ test("a refusal delivered with HTTP 200 is a refusal", async () => {
     token: { error: "bad_verification_code", error_description: "wrong" },
   });
   await assert.rejects(() => exchange(provider), AuthRequestError);
+
+  /* The interesting shape is a body that carries an error *and* something that
+     looks like a usable token. Without the `error` check the rest of this
+     response satisfies every other rule, so the exchange would proceed on a
+     credential the provider has just said is not valid. */
+  const contradictory = githubProvider({
+    token: {
+      error: "bad_verification_code",
+      access_token: "fixture-provider-access-token",
+      token_type: "bearer",
+      scope: "",
+    },
+  });
+  await assert.rejects(() => exchange(contradictory), AuthRequestError);
+  assert.equal(contradictory.calls.length, 1, "the identity call must not happen");
 });
 
 test("a token response missing its token, or bearing the wrong type, is refused", async () => {

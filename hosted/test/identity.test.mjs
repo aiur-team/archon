@@ -21,6 +21,7 @@ import {
   SessionRequiredError,
 } from "../lib/auth-errors.mjs";
 import { SESSION_TTL_SECONDS, TRANSIENT_TTL_SECONDS } from "../lib/auth-store.mjs";
+import { constantTimeEqual } from "../lib/secrets.mjs";
 import {
   BINDING_COOKIE,
   LOGIN_COOKIE,
@@ -47,6 +48,21 @@ async function signedIn(clock = fixedClock()) {
   const { token } = await store.createSession(PRINCIPAL_ALPHA);
   return { store, blobs, clock, token, csrf: deriveCsrfToken(token) };
 }
+
+test("a secret comparison is total, whatever lengths arrive", () => {
+  /* `crypto.timingSafeEqual` throws on a length mismatch, so a comparison built
+     straight on it would need a length branch in front of it - and that branch
+     is the length oracle the helper exists to remove. Comparing values of every
+     shape a request can carry proves the helper is total instead. The
+     constant-time property itself is not observable from a unit test and this
+     suite does not claim to check it. */
+  assert.equal(constantTimeEqual("abc", "abc"), true);
+  assert.equal(constantTimeEqual("abc", "abcd"), false);
+  assert.equal(constantTimeEqual("", "a-much-longer-value"), false);
+  assert.equal(constantTimeEqual("a-much-longer-value", ""), false);
+  assert.equal(constantTimeEqual("abc", null), false);
+  assert.equal(constantTimeEqual(undefined, "abc"), false);
+});
 
 test("the four cookies are distinct __Host- names", () => {
   const names = [SESSION_COOKIE, OAUTH_COOKIE, LOGIN_COOKIE, BINDING_COOKIE];
