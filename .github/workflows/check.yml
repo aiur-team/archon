@@ -75,7 +75,7 @@ jobs:
           node --test \
             netlify/test/hosted/identity.test.mjs \
             netlify/test/hosted/auth-store.test.mjs \
-            netlify/test/hosted/github-oauth.test.mjs \
+            netlify/test/hosted/auth0-oidc.test.mjs \
             netlify/test/hosted/auth-routes.test.mjs
 
       # AHU-004's publication state. Three suites rather than one because they

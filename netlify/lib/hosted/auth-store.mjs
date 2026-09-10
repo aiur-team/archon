@@ -4,7 +4,7 @@
  *
  * AHU-003 owns exactly two families of record and nothing else:
  *
- *   sessions/<sha256(sessionToken)>   the browser session, seven-day absolute expiry
+ *   sessions/<sha256(sessionToken)>   the browser session, 24-hour absolute expiry
  *   auth/<kind>/<sha256(token)>       a transient browser transaction, fifteen minutes
  *
  * Publication state is AHU-004's, and this module cannot read or write it. That
@@ -96,8 +96,17 @@ export const TRANSIENT_PREFIX = "auth/";
  */
 export const TRANSIENT_KINDS = Object.freeze(["oauth", "login", "binding"]);
 
-/** C1: the browser session's absolute expiry. Seven days, from creation. */
-export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+/**
+ * C1 (v2): the browser session's absolute expiry, 24 hours from creation.
+ *
+ * Reduced from seven days so that a changed or removed provider email loses
+ * access within a day: every later domain rule reads the session's principal,
+ * and a session that outlived the identity behind it would keep serving a
+ * revoked address. This is the single source of the lifetime, and
+ * `SESSION_COOKIE_MAX_AGE` in `identity.mjs` is its cookie mirror; the two are
+ * one decision expressed twice and must not drift.
+ */
+export const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 /** C1: the ceiling on every transient cookie and its record. Fifteen minutes. */
 export const TRANSIENT_TTL_SECONDS = 15 * 60;

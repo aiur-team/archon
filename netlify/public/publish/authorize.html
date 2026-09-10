@@ -126,30 +126,30 @@
 
     <!-- Sign-in continuation. A real form, so it works from the keyboard. -->
     <div class="account" id="signin" hidden>
-      <form method="post" action="/api/hosted/auth/github/start">
+      <form method="post" action="/api/hosted/auth/start">
         <input type="hidden" name="destination" value="/publish/authorize" />
-        <button type="submit" id="signin-submit">Continue with GitHub</button>
+        <button type="submit" id="signin-submit">Sign in</button>
       </form>
       <p class="lede">
-        Archon identifies you by your GitHub account. It asks for no repository,
-        organisation or email permissions.
+        Archon identifies you through Auth0, which lets you continue with Google
+        or GitHub. It reads only your name and email.
       </p>
     </div>
 
     <!-- Account switching. Kept available beside the decision, because the whole
          point of showing the account is that a visitor can change it. -->
     <div class="account" id="switch" hidden>
-      <form method="post" action="/api/hosted/auth/github/start">
+      <form method="post" action="/api/hosted/auth/start">
         <input type="hidden" name="switchAccount" value="true" />
         <input type="hidden" name="csrfToken" id="csrf" value="" />
         <input type="hidden" name="destination" value="/publish/authorize" />
         <button type="submit" class="secondary" id="switch-submit">
-          Use a different GitHub account
+          Use a different account
         </button>
       </form>
       <p class="lede">
-        This signs you out of Archon and asks GitHub which account to use. It does
-        not sign you out of GitHub, and it keeps this pending publication.
+        This signs you out of Archon and asks Auth0 which account to use. It does
+        not sign you out of Google or GitHub, and it keeps this pending publication.
       </p>
     </div>
 

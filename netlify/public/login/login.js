@@ -4,8 +4,8 @@
  * It has exactly one responsibility: obtain the pre-login CSRF binding by
  * calling `GET /api/hosted/session`, which issues it as a `__Host-` cookie, and
  * put the page into a state that matches the answer. It handles no credential,
- * touches no GitHub endpoint and reads no cookie — it cannot, since every cookie
- * this deployment sets is HttpOnly.
+ * touches no provider endpoint and reads no cookie — it cannot, since every
+ * cookie this deployment sets is HttpOnly.
  *
  * Everything it reports goes through one live region so a screen reader
  * announces state changes, and every failure leaves a button the visitor can
@@ -23,18 +23,26 @@
   const accountText = document.getElementById("account-text");
   const csrf = document.getElementById("csrf");
 
-  /* The same two shapes the server allows, checked here too so a hostile link
-     cannot even put a rejected value into the form. The server validates it
-     again and is the authority; this is only about not submitting garbage. */
-  const DESTINATION = /^\/publish\/authorize$|^\/docs\/[0-9a-f]{32}$/;
+  /* The same three shapes the server allows, checked here too so a hostile link
+     cannot even put a rejected value into the form: `/publish/authorize`, a
+     `/docs/<32 hex>` document, and a single collaboration slug that is not a
+     reserved route name. The server validates it again and is the authority;
+     this is only about not submitting garbage. */
+  const RESERVED = new Set(["login", "invite", "publish", "docs", "api", "_assets", "_render"]);
+  function destinationAllowed(value) {
+    if (value === "/publish/authorize") return true;
+    if (/^\/docs\/[0-9a-f]{32}$/.test(value)) return true;
+    const slug = /^\/([a-z0-9-]{1,64})\/$/.exec(value);
+    return slug !== null && !RESERVED.has(slug[1]);
+  }
 
   /* The closed set of words the callback may land back here with. Anything else
      in the URL is ignored rather than rendered, so the query string cannot
      become a way to put chosen text on a trusted page. */
   const LANDING = {
-    denied: "You cancelled the GitHub sign-in. You can try again.",
+    denied: "You cancelled the sign-in. You can try again.",
     expired: "That sign-in attempt expired or could not be verified. Please try again.",
-    unavailable: "Archon could not reach GitHub just now. Please try again in a moment.",
+    unavailable: "Archon could not reach the sign-in service just now. Please try again in a moment.",
   };
 
   function say(message, tone) {
@@ -44,7 +52,7 @@
 
   function applyDestination() {
     const wanted = new URL(window.location.href).searchParams.get("destination");
-    if (wanted === null || !DESTINATION.test(wanted)) return;
+    if (wanted === null || !destinationAllowed(wanted)) return;
     for (const id of ["destination", "switch-destination"]) {
       document.getElementById(id).value = wanted;
     }
@@ -72,20 +80,20 @@
     }
 
     form.dataset.mode = "signin";
-    submit.textContent = "Continue with GitHub";
+    submit.textContent = "Sign in";
     submit.disabled = false;
 
     if (session.authenticated === true) {
       accountText.textContent = `You are signed in to Archon as @${session.login}.`;
       csrf.value = session.csrfToken;
       account.hidden = false;
-      say("Continue to authorise, or choose a different GitHub account.", "ok");
+      say("Continue to authorise, or choose a different account.", "ok");
       return;
     }
     account.hidden = true;
     const landing = LANDING[new URL(window.location.href).searchParams.get("status")];
     if (landing !== undefined) say(landing, "error");
-    else say("Ready. Archon will ask GitHub to confirm who you are.", "ok");
+    else say("Ready. Archon will ask Auth0 to confirm who you are.", "ok");
   }
 
   form.addEventListener("submit", (event) => {

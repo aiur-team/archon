@@ -409,7 +409,7 @@ section("production origin and registrable-site rules", async () => {
            verbatim, and half of these keys carry a credential. The rule may be
            named; the value may not. */
         assert.ok(
-          !error.message.includes(app) && !error.message.includes(base.GITHUB_CLIENT_SECRET),
+          !error.message.includes(app) && !error.message.includes(base.AUTH0_CLIENT_SECRET),
           `${name}: the error must name the key and a rule, never a value`,
         );
         return true;
@@ -439,14 +439,14 @@ section("hosted/.env.example is redacted and defaults to disabled", async () => 
   const env = Object.fromEntries(
     text
       .split("\n")
-      .filter((line) => /^[A-Z_]+=/.test(line))
+      .filter((line) => /^[A-Z0-9_]+=/.test(line))
       .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
   );
 
   assert.deepEqual(
     Object.keys(env).sort(),
     [...HOSTED_CONFIG_KEYS].sort(),
-    "the example must carry exactly the five C6 keys the config owner reads",
+    "the example must carry exactly the C6 keys the config owner reads",
   );
   assert.equal(
     env.HOSTED_PUBLISH_ENABLED,
@@ -473,7 +473,7 @@ section("hosted/.env.example is redacted and defaults to disabled", async () => 
   /* And no credential-shaped string anywhere in the file, in a value or in the
      prose around it. */
   assert.ok(
-    env.GITHUB_CLIENT_SECRET.includes("example"),
+    env.AUTH0_CLIENT_SECRET.includes("example"),
     "the client secret placeholder must announce itself as an example",
   );
   for (const pattern of [/gh[pousr]_[A-Za-z0-9]{20,}/, /\b[0-9a-f]{40}\b/, /-----BEGIN [A-Z ]*PRIVATE KEY/]) {

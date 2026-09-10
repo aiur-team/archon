@@ -2,10 +2,13 @@
   "name": "architecture-docs-functions",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.15.0" },
+  "engines": {
+    "node": ">=22.15.0"
+  },
   "dependencies": {
     "@netlify/blobs": "11.0.2",
     "@netlify/identity": "2.0.0",
+    "jose": "6.1.0",
     "tldts": "7.4.12"
   },
   "devDependencies": {
