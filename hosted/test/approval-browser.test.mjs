@@ -23,10 +23,13 @@
  * byte, under the same Content-Security-Policy `netlify.toml` puts on them.
  *
  * Fixtures: the blob provider is the in-memory double with real conditional
- * writes, the clock is hand-driven, and GitHub itself is intercepted at the
- * browser and answered with a redirect straight to the real callback route,
- * whose token exchange is answered by the same `githubProvider` fixture the
- * auth suite uses. No credential and no network beyond loopback.
+ * writes, the clock is hand-driven, and GitHub is a stand-in on this same
+ * loopback origin - the start route's redirect out is rewritten to it, it
+ * answers the way a consenting provider does, and the real callback route's
+ * token exchange is answered by the same `githubProvider` fixture the auth
+ * suite uses. The browser aborts every request that is not loopback, so a
+ * fixture that stopped standing in fails loudly instead of reaching the
+ * internet. No credential and no network beyond loopback.
  *
  * ## Why it is one case with its own timeout
  *
@@ -84,6 +87,15 @@ const CSP =
 
 /** The account the fixture provider signs in, and the id C1 derives for it. */
 const ACCOUNT = { id: 1010, login: "alpha-example", accountId: "gh_1010" };
+
+/** A second account, for the switch. A different numeric id is a different owner. */
+const OTHER_ACCOUNT = { id: 2020, login: "beta-example", accountId: "gh_2020" };
+
+/** Where the provider stand-in listens, on this deployment's own loopback origin. */
+const PROVIDER_PATH = "/fixture-provider/authorize";
+
+/** The real endpoint the start route redirects to, and this matrix intercepts. */
+const GITHUB_AUTHORIZE_PREFIX = "https://github.com/login/oauth/authorize";
 
 /** A title an agent chose, carrying everything a naive renderer would execute. */
 const HOSTILE_TITLE = 'Q3 <img src=x onerror="window.__pwned=1"> & "review" — <script>';
@@ -147,7 +159,17 @@ async function startDeployment(record) {
   const publicationClock = createClock(FIXTURE_NOW);
   const authClock = fixedClock(Date.parse(FIXTURE_NOW));
   const { store } = memoryAuthStore(authClock, new MemoryBlobStore());
-  const fetchImpl = githubProvider({ user: { id: ACCOUNT.id, login: ACCOUNT.login } });
+  /* Which account the provider says it is, changeable mid-case so a test can
+     drive the "use a different GitHub account" path through the real start and
+     callback routes rather than around them. */
+  const account = { current: ACCOUNT };
+  const fetchImpl = githubProvider({
+    user: () =>
+      new Response(JSON.stringify({ id: account.current.id, login: account.current.login }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
 
   const html = await readFile(join(HOSTED, "public/publish/authorize.html"), "utf8");
   const script = await readFile(join(HOSTED, "public/publish/authorize.js"), "utf8");
@@ -175,6 +197,23 @@ async function startDeployment(record) {
       return;
     }
 
+    /* GitHub's authorize endpoint, standing on loopback.
+       The redirect to it is a *server* redirect on the same navigation as the
+       form POST, and Playwright does not consult a route handler for those - so
+       intercepting it in the browser silently reached the real github.com. The
+       start route still runs in full: it mints and stores the state, sets its
+       cookie, derives PKCE and validates the destination. Only the hop out is
+       redirected here, and this answers it the way a consenting provider does. */
+    if (url.pathname === PROVIDER_PATH) {
+      const state = url.searchParams.get("state") ?? "";
+      outgoing.writeHead(302, {
+        location: `${dependencies.origin}/api/hosted/auth/github/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
+        "cache-control": "private, no-store",
+      });
+      outgoing.end();
+      return;
+    }
+
     const handler = routes.get(routeKeyOf(url.pathname));
     if (handler === undefined) {
       outgoing.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
@@ -195,6 +234,9 @@ async function startDeployment(record) {
     const headers = {};
     for (const [name, value] of response.headers) {
       if (name.toLowerCase() !== "set-cookie") headers[name] = value;
+    }
+    if (typeof headers.location === "string" && headers.location.startsWith(GITHUB_AUTHORIZE_PREFIX)) {
+      headers.location = `${dependencies.origin}${PROVIDER_PATH}?${new URL(headers.location).searchParams}`;
     }
     /* `Set-Cookie` is the one header that must stay a list: joining two of them
        into one value is how a route that clears one cookie and sets another
@@ -268,6 +310,10 @@ async function startDeployment(record) {
     seen,
     publicationClock,
     authClock,
+    /** What the provider answers with from the next exchange onwards. */
+    switchTo(next) {
+      account.current = next;
+    },
     stored() {
       const raw = provider.raw(`${PUBLICATION_KEY_PREFIX}${record.id}`);
       return raw === null ? null : JSON.parse(raw.data);
@@ -298,17 +344,15 @@ async function readBody(incoming) {
  * navigates away and really comes back, which is the part that decides whether a
  * `SameSite=Lax` `__Host-` cookie and a `sessionStorage` entry survive.
  */
-async function interceptGitHub(context, origin) {
-  await context.route("https://github.com/**", async (route) => {
-    const target = new URL(route.request().url());
-    const state = target.searchParams.get("state") ?? "";
-    await route.fulfill({
-      status: 302,
-      headers: {
-        location: `${origin}/api/hosted/auth/github/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
-      },
-      body: "",
-    });
+async function refuseTheInternet(context, origin) {
+  await context.route(/.*/, async (route) => {
+    if (route.request().url().startsWith(origin)) return route.continue();
+    /* Nothing in this matrix has any business leaving loopback. Aborting rather
+       than allowing turns "the fixture stopped standing in for the provider"
+       into a visible failure instead of a minute spent on github.com's real
+       sign-in page, which is exactly how an earlier version of this file wasted
+       one. */
+    return route.abort();
   });
 }
 
@@ -327,7 +371,7 @@ async function runMatrix(chromium) {
   async function withCase(record, run) {
     const app = await startDeployment(record);
     const context = await browser.newContext();
-    await interceptGitHub(context, app.origin);
+    await refuseTheInternet(context, app.origin);
     const page = await context.newPage();
     try {
       await run({ app, page, context });
@@ -386,6 +430,12 @@ async function runMatrix(chromium) {
 
   /* -------- 1. the fragment is gone, and gone from history too -------- */
   await withCase(seedRecord(), async ({ app, page }) => {
+    /* From a real previous page, so "did the token become a history entry" is a
+       question with an answer rather than a comparison against whatever a fresh
+       context happens to start with. */
+    await page.goto(`${app.origin}/login/`);
+    const entriesBefore = await page.evaluate(() => window.history.length);
+
     await open(page, link(app));
 
     eq(new URL(page.url()).hash, "", "the fragment must be removed from the address bar");
@@ -394,14 +444,19 @@ async function runMatrix(chromium) {
       !(await page.content()).includes(FIXTURE_RECORD_BROWSER_SECRET),
       "the browser secret must never be rendered into the page",
     );
-    /* One entry, so Back cannot return to the token-bearing URL. */
-    eq(await page.evaluate(() => window.history.length), 1, "replaceState must not add a history entry");
+    eq(await page.evaluate(() => window.history.length), entriesBefore + 1,
+      "replaceState must replace the entry rather than add one");
     check(
       !(await page.evaluate(() => JSON.stringify(window.sessionStorage))).includes(
         FIXTURE_RECORD_BROWSER_SECRET,
       ),
       "the browser secret must never be persisted",
     );
+    /* And the entry it replaced is gone for good: Back leaves the flow rather
+       than returning to a URL that still carries the token. */
+    await page.goBack();
+    eq(page.url(), `${app.origin}/login/`, "Back must not return to the token-bearing URL");
+
     check(
       app.seen.some((entry) => entry.path === "/api/hosted/publications/bind"),
       "the bootstrap must exchange the fragment for a server-side binding",
@@ -441,6 +496,32 @@ async function runMatrix(chromium) {
     );
   });
 
+  /* -------- 3. switching account keeps the operation and moves the owner ---- */
+  await withCase(seedRecord(), async ({ app, page }) => {
+    await open(page, link(app));
+    await signIn(page);
+    await page.waitForSelector("#review:not([hidden])");
+    eq(await page.textContent("#account"), `@${ACCOUNT.login} (${ACCOUNT.accountId})`,
+      "the first account must be shown before the switch");
+
+    app.switchTo(OTHER_ACCOUNT);
+    await Promise.all([page.waitForNavigation(), page.click("#switch-submit")]);
+    await settled(page, "the account switch");
+
+    /* C1 keeps the publication binding through an account switch; without that
+       the visitor who noticed the wrong account would land back here holding
+       nothing. */
+    await page.waitForSelector("#review:not([hidden])");
+    eq(await page.textContent("#account"), `@${OTHER_ACCOUNT.login} (${OTHER_ACCOUNT.accountId})`,
+      "the page must name the account it switched to");
+
+    await page.click("#approve");
+    await page.waitForSelector("#review", { state: "hidden" });
+    await settled(page, "the decision");
+    eq(app.stored().ownerAccountId, OTHER_ACCOUNT.accountId,
+      "the owner must be the account that was on screen when the button was pressed");
+  });
+
   /* -------- 3. an explicit approval, and only then -------- */
   await withCase(seedRecord(), async ({ app, page }) => {
     await open(page, link(app));
@@ -449,7 +530,7 @@ async function runMatrix(chromium) {
 
     eq(app.stored().state, "pending", "nothing may be approved before the click");
     await page.click("#approve");
-    await page.waitForSelector("#review[hidden]");
+    await page.waitForSelector("#review", { state: "hidden" });
     await settled(page, "the decision");
 
     const stored = app.stored();
@@ -471,7 +552,7 @@ async function runMatrix(chromium) {
     await signIn(page);
     await page.waitForSelector("#review:not([hidden])");
     await page.click("#deny");
-    await page.waitForSelector("#review[hidden]");
+    await page.waitForSelector("#review", { state: "hidden" });
     await settled(page, "the decision");
 
     eq(app.stored().state, "denied", "the click must deny");
@@ -497,7 +578,7 @@ async function runMatrix(chromium) {
     /* The deadline passes while the tab sits open, which is the real case. */
     app.publicationClock.advanceSeconds(901);
     await page.click("#approve");
-    await page.waitForSelector("#review[hidden]");
+    await page.waitForSelector("#review", { state: "hidden" });
     await settled(page, "the decision");
     check((await statusOf(page)).includes("expired"), "an expired approval must say it expired");
     eq(app.stored().state, "pending", "an expired approval must write nothing");
