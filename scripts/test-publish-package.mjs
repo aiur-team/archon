@@ -104,21 +104,45 @@ const DOCUMENT_SENTINEL = "sentinel-payload-cf41d7";
 const TEMP_PREFIX = "archon-pkg-";
 
 /**
- * A temporary directory that is definitely not inside this repository.
+ * Anything above `dir` that would give a consumer a source-checkout fallback,
+ * or `null` when there is nothing.
  *
- * `os.tmpdir()` honours `TMPDIR`, and some sandboxes point it at a scratch
- * directory *within* the checkout. That is fine for a scratch file and fatal
- * here: the builder's `repoRoot()` walks up from its working directory looking
- * for `templates/base/layout.html`, so a consumer nested inside this repository
- * would build from the checkout's assets and the packaging defect this runner
- * exists to catch would pass. Falling back to the platform default keeps the
- * isolation real rather than making the assertion that enforces it optional.
+ * Two fallbacks matter and both are ancestor lookups, which is why they are
+ * checked the same way. The builder's `repoRoot()` walks up from its working
+ * directory for `templates/base/layout.html` and builds from the first one it
+ * finds, and Node's resolution walks up for `node_modules`. A consumer with
+ * either above it is not a clean consumer, and every assertion in this file
+ * would pass for the wrong reason.
+ */
+function checkoutFallbackAbove(dir) {
+  for (let at = resolve(dir); ; at = dirname(at)) {
+    if (statSafe(join(at, "templates", "base", "layout.html")) !== null) {
+      return `${at}/templates/base/layout.html`;
+    }
+    if (statSafe(join(at, "node_modules", "@aiur-team")) !== null) {
+      return `${at}/node_modules/@aiur-team`;
+    }
+    if (dirname(at) === at) return null;
+  }
+}
+
+/**
+ * A temporary directory with no source checkout above it.
+ *
+ * `os.tmpdir()` honours `TMPDIR`, and a sandbox or a git worktree can easily
+ * point it somewhere with a checkout overhead — inside this repository, or
+ * inside the repository this worktree was cut from. Falling back to the
+ * platform default keeps the isolation real rather than turning the assertion
+ * that enforces it into something a run can be configured past.
  */
 function isolatedTmpdir() {
+  const rejected = [];
   for (const candidate of [tmpdir(), "/tmp"]) {
-    if (!`${resolve(candidate)}${sep}`.startsWith(`${ROOT}${sep}`)) return candidate;
+    const fallback = checkoutFallbackAbove(candidate);
+    if (fallback === null) return candidate;
+    rejected.push(`${candidate} (${fallback} is above it)`);
   }
-  throw new Error(`no temporary directory outside ${ROOT} is available; set TMPDIR to one`);
+  throw new Error(`no usable temporary directory: ${rejected.join(", ")}; set TMPDIR to one`);
 }
 
 const roots = [];
@@ -393,19 +417,11 @@ async function installConsumer(consumer, tarball) {
     !`${consumer}${sep}`.startsWith(`${ROOT}${sep}`),
     `the consumer directory ${consumer} is inside this repository`,
   );
-  for (let dir = consumer; ; dir = dirname(dir)) {
-    assert.equal(
-      statSafe(join(dir, "templates", "base", "layout.html")),
-      null,
-      `a templates/base/layout.html above the consumer at ${dir} would let the builder fall back to it`,
-    );
-    assert.equal(
-      statSafe(join(dir, "node_modules", "@aiur-team")),
-      null,
-      `an @aiur-team package above the consumer at ${dir} would be on its resolution path`,
-    );
-    if (dirname(dir) === dir) break;
-  }
+  assert.equal(
+    checkoutFallbackAbove(consumer),
+    null,
+    `the consumer at ${consumer} has a source-checkout fallback above it`,
+  );
 
   writeFileSync(
     join(consumer, "package.json"),
