@@ -434,8 +434,15 @@ section("production origin and registrable-site rules", async () => {
 /* 4. the operator environment example                                 */
 /* ------------------------------------------------------------------ */
 
-section("hosted/.env.example is redacted and defaults to disabled", async () => {
-  const text = await readFile(join(ROOT, "hosted/.env.example"), "utf8");
+section("netlify/.env.example is redacted and defaults to disabled", async () => {
+  /* One site, one deploy tree, one environment -- so one example file, and it
+     sits inside that deploy tree beside the reader that consumes it.
+     `hosted/.env.example` described a site that no longer exists. */
+  const text = await readFile(join(ROOT, "netlify/.env.example"), "utf8");
+  assert.ok(
+    !existsSync(join(ROOT, "hosted/.env.example")),
+    "a second environment example is a second environment to keep in step by hand",
+  );
   const env = Object.fromEntries(
     text
       .split("\n")

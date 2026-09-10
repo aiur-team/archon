@@ -1,9 +1,20 @@
-# `hosted/` — the hosted publishing deployment
+# `hosted/` — the hosted publishing design notes
 
-A second Netlify deployment, separate from the repo-backed `_site` build at the
-repository root. It exists to give an Archon agent a way to hand one
-self-contained HTML document to a person, have that person approve it in their
-own browser, and make the result readable only by them.
+> **The deployment topology and the sign-in flow described below are superseded.**
+> This tree no longer holds code: ACN-003 moved it to `netlify/lib/hosted/` and
+> `netlify/functions/`, ACN-001 merged the three Netlify sites into **one** site
+> answering on two hostnames, and ACN-005 replaced the direct GitHub OAuth app
+> with Auth0 brokering Google and GitHub. Read this for the *reasoning* behind
+> the contracts, the storage model and the approval seam, which are unchanged.
+> For anything an operator acts on — sites, hostnames, environment variables,
+> sign-in registration — the authorities are [`OPERATIONS.md`](OPERATIONS.md)
+> and the "Hosting" section of the repository [`README.md`](../README.md).
+> Wherever this file says `hosted/lib/…` or `hosted/functions/…`, read
+> `netlify/lib/hosted/…` and `netlify/functions/…`.
+
+The service exists to give an Archon agent a way to hand one self-contained HTML
+document to a person, have that person approve it in their own browser, and make
+the result readable only by them.
 
 This directory holds the **service boundary and its contracts**, and the
 **identity-only GitHub sign-in** built on top of them. There is no publication
@@ -721,19 +732,14 @@ through a `Location`.
 
 ## Operator configuration
 
-Every key below is set in the Netlify site environment. None is set in
-`netlify.toml`: a secret there would be a secret in git, and values set there
-are build-scoped rather than available to a function at runtime.
+**The current key list is [`OPERATIONS.md` §2](OPERATIONS.md#2-environment-variables),
+and the copyable template is `netlify/.env.example`.** The `GITHUB_CLIENT_ID` and
+`GITHUB_CLIENT_SECRET` this section used to name are gone; Auth0 replaced them
+with `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID` and `AUTH0_CLIENT_SECRET`. The two origins
+and `HOSTED_PUBLISH_ENABLED` are unchanged in name and meaning.
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `HOSTED_APP_ORIGIN` | yes | The trusted application origin. Exact, lowercase, no trailing slash, no trailing dot. |
-| `HOSTED_RENDER_ORIGIN` | yes | The cookie-free static renderer origin. Must be a **different registrable site**. That deployment lives in `renderer/`. |
-| `GITHUB_CLIENT_ID` | yes | OAuth app client ID. |
-| `GITHUB_CLIENT_SECRET` | yes | OAuth app client secret. Never logged, never formatted, never committed. |
-| `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`. Anything else is a fault; unset means disabled. |
-
-That is the whole list. Three properties are load-bearing:
+Three properties of that list are load-bearing, and they are why it is shaped
+this way:
 
 - **Unset is the strict reading.** Missing publish-enabled means publishing is
   off. There is no configuration a deployment can fall into that is more
@@ -751,7 +757,8 @@ That is the whole list. Three properties are load-bearing:
   enabled, so `a.pages.dev` and `b.pages.dev` are correctly two sites. Comparing
   the last two hostname labels would get both of these wrong.
 
-Reading the client secret is `config.github.readClientSecret()`. It is a call
+Reading the client secret is `config.auth0.readClientSecret()` (it was
+`config.github.…` before Auth0). It is a call
 rather than a property so that no inspector can print it: `JSON.stringify`,
 `util.inspect` — including `{showHidden: true, getters: true, customInspect:
 false}` — spread, `structuredClone` and template interpolation all render
@@ -793,28 +800,21 @@ imports `node:test` or reaches into `test/`, and Netlify would publish
 
 ## Operator setup
 
-### The OAuth app
+### Registering sign-in
 
-Register a **dedicated** OAuth app for this deployment. Not a shared one, and not
-one that has ever been granted a scope — the token exchange refuses any response
-reporting a granted scope, so a reused client ID from an app with `repo` fails
-closed rather than quietly exercising a permission the consent screen never
-showed the visitor.
+**Superseded: sign-in is brokered by Auth0, not by a GitHub OAuth app this
+service registers itself.** The current procedure — one Regular Web App, the
+Google and GitHub connections on your own provider applications, the `user:email`
+scope on the GitHub application, every other connection disabled, and one exact
+callback URL and one exact logout URL — is
+[`OPERATIONS.md` §3](OPERATIONS.md#3-auth0-application-registration). The
+`/api/hosted/auth/github/callback` path this section used to give no longer
+exists; the callback is `/api/hosted/auth/callback`.
 
-1. Create an OAuth app (not a GitHub App, and not a device-flow client).
-2. Set the **Authorization callback URL** to exactly
-   `https://<HOSTED_APP_ORIGIN host>/api/hosted/auth/github/callback`. GitHub now
-   supports multiple redirect URIs, which makes an exact setting material rather
-   than advisory: an extra entry is an extra place a code can be delivered.
-3. Request **no scopes** and do not enable any email or organisation permission.
-   The authorize URL emits no `scope` parameter at all.
-4. Put the client ID and secret into the Netlify site environment as
-   `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`. Never in `netlify.toml`, and
-   never in git.
-
-The callback is derived from `HOSTED_APP_ORIGIN`, never from a request `Host`
-header and never from a marketing hostname, so a misconfigured origin is a
-refused deploy rather than a callback pointing somewhere else.
+What survives the change is the derivation rule: the callback is built from
+`HOSTED_APP_ORIGIN`, never from a request `Host` header and never from a
+marketing hostname, so a misconfigured origin is a refused deploy rather than a
+callback pointing somewhere else.
 
 ### Operator maintenance
 

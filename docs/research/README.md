@@ -12,6 +12,14 @@ discussion, inline editing and change history.
 disagree. The plan reconciles them, rules on 26 contradictions, and turns the result into 22 tickets.
 An area document is background for the plan, not an instruction on its own.
 
+**The plan's deployment topology is superseded and is no longer the ruling document on it.** It describes
+the hosted application and the renderer as separate Netlify sites with their own base directories. There is
+now **one** Netlify site answering on two hostnames, with the host-aware edge gate as the single header
+authority. For anything an operator would act on — sites, hostnames, sign-in, environment variables — read
+the "Hosting" section of the repository [`README.md`](../../README.md) and
+[`hosted/OPERATIONS.md`](../../hosted/OPERATIONS.md) instead. The plan's data model, anchoring ruling and
+ticket decomposition are unaffected.
+
 | Document | Area |
 |---|---|
 | [00-integration-plan.md](00-integration-plan.md) | **The plan.** Six binding decisions, the shared data model, the anchoring ruling, and 43 tickets in 4 phases |
