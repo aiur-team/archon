@@ -27,6 +27,7 @@ import {
   PROBE_AUTHORISATION,
   buildManifest,
   evaluatePreflight,
+  guaranteesWaitingOn,
   headerFaults,
   hostedHeaderPairs,
   main,
@@ -387,6 +388,49 @@ async function run(argv, env, options = {}) {
     process.stderr.write = stderr;
   }
 }
+
+test("every guarantee waits on gate items the preflight actually reports", () => {
+  const gates = new Set(evaluatePreflight({}).items.map((entry) => entry.id));
+  for (const guarantee of LIVE_GUARANTEES) {
+    assert.ok(guarantee.waits.length > 0, `${guarantee.id} names no gate item`);
+    for (const gate of guarantee.waits) {
+      assert.ok(gates.has(gate), `${guarantee.id} waits on ${gate}, which no gate item produces`);
+    }
+  }
+});
+
+test("with nothing supplied every acceptance line names the gates holding it shut", () => {
+  const waiting = guaranteesWaitingOn(evaluatePreflight({}));
+  assert.equal(waiting.length, LIVE_GUARANTEES.length);
+  for (const entry of waiting) {
+    assert.ok(entry.waiting.length > 0, `${entry.id} reads as attemptable with nothing provisioned`);
+  }
+});
+
+test("a met gate stops holding its acceptance lines shut", () => {
+  const waiting = guaranteesWaitingOn(evaluatePreflight(completeEnv()));
+  for (const entry of waiting) {
+    assert.deepEqual(entry.waiting, [], `${entry.id} still waits on ${entry.waiting.join(", ")}`);
+  }
+});
+
+test("a blocked run prints the gate each open acceptance line waits on", async () => {
+  const { err } = await run([], {});
+  assert.match(err, /^BLOCKED {2}L5 .*: waits on G2, G3, G4, G5$/m);
+  assert.match(err, /^BLOCKED {2}L12 .*: waits on G7$/m);
+});
+
+test("the manifest records the unmet gates per guarantee", () => {
+  const manifest = buildManifest({
+    preflight: evaluatePreflight({}),
+    probes: [],
+    now: "2026-09-10T00:00:00.000Z",
+    mode: "preflight",
+  });
+  const l7 = manifest.guarantees.find((entry) => entry.id === "L7");
+  assert.deepEqual(l7.waitingOn, ["G2", "G4"]);
+  assert.match(l7.detail, /waits on G2, G4/);
+});
 
 test("with nothing supplied the run is BLOCKED and exits non-zero", async () => {
   const { code, out, err } = await run([], {});

@@ -54,22 +54,27 @@ findings and only the second one is a fact about the project:
 ## Required live guarantees
 
 Every guarantee is `blocked`. None was attempted, and no fixture result is
-recorded in place of one.
+recorded in place of one. The **waits on** column is the runner's own mapping,
+printed on every blocked run, so each open acceptance line names the gate items
+in "What unblocks this" that would release it — G2 the two deployments, G3 the
+OAuth application, G4 the two test identities, G5 the published release, G6 the
+frozen revisions with a passing AHU-012, G7 the accepted envelope and named
+retention owner.
 
-| ID | Guarantee | Status | Why |
-| --- | --- | --- | --- |
-| L1 | Deployed session endpoint answers anonymously with the hosted header set | blocked | no deployment |
-| L2 | Deployed renderer serves the generated header set and sets no cookie | blocked | no deployment |
-| L3 | Deployed viewer and metadata routes reveal nothing to a signed-out reader | blocked | no deployment |
-| L4 | Real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes | blocked | no OAuth application, no origin to register a callback against |
-| L5 | Installed released package and packaged skill drive a real publish (AE1) | blocked | package not published; no service to publish to |
-| L6 | Owner reads the artifact through the deployed renderer in a real browser | blocked | no deployment |
-| L7 | A second real account is denied the same document | blocked | no deployment, no approved test identities |
-| L8 | Real conditional-write race behaviour against deployed storage | blocked | no deployed storage |
-| L9 | Lost upload response recovers the same receipt | blocked | no deployment |
-| L10 | Publish-disabled transition refuses new work while private reads survive | blocked | no deployment |
-| L11 | Both per-IP rate rules accepted by the deploy and effective | blocked | no deploy log exists |
-| L12 | Cleanup or intentional retention disposition of every generated record | blocked | nothing was created, so there is nothing to dispose of |
+| ID | Guarantee | Status | Waits on | Why |
+| --- | --- | --- | --- | --- |
+| L1 | Deployed session endpoint answers anonymously with the hosted header set | blocked | G2, G6 | no deployment |
+| L2 | Deployed renderer serves the generated header set and sets no cookie | blocked | G2, G6 | no deployment |
+| L3 | Deployed viewer and metadata routes reveal nothing to a signed-out reader | blocked | G2, G6 | no deployment |
+| L4 | Real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes | blocked | G2, G3, G4 | no OAuth application, no origin to register a callback against |
+| L5 | Installed released package and packaged skill drive a real publish (AE1) | blocked | G2, G3, G4, G5 | package not published; no service to publish to |
+| L6 | Owner reads the artifact through the deployed renderer in a real browser | blocked | G2, G4, G5 | no deployment |
+| L7 | A second real account is denied the same document | blocked | G2, G4 | no deployment, no approved test identities |
+| L8 | Real conditional-write race behaviour against deployed storage | blocked | G2, G6 | no deployed storage |
+| L9 | Lost upload response recovers the same receipt | blocked | G2, G5 | no deployment |
+| L10 | Publish-disabled transition refuses new work while private reads survive | blocked | G2, G7 | no deployment |
+| L11 | Both per-IP rate rules accepted by the deploy and effective | blocked | G2, G6 | no deploy log exists |
+| L12 | Cleanup or intentional retention disposition of every generated record | blocked | G7 | nothing was created, so there is nothing to dispose of |
 
 ## What the local evidence does and does not cover
 
@@ -100,6 +105,10 @@ the same revision is the record, not a local re-run.
   the evidence-sanitisation rules, and the cleanup/retention disposition.
 - CI wiring that fails if the runner ever reports a live result without
   prerequisites, which is the state every build runs in.
+- The gate-to-guarantee mapping: every acceptance line declares the gate items it
+  waits on, the runner prints the unmet ones per line on a blocked run, and the
+  manifest carries them as `waitingOn`. A blocked capstone is only actionable if
+  the operator can read which prerequisite releases which guarantee.
 
 ## Mutation proof of the new gate
 
@@ -128,6 +137,10 @@ $ node --test --test-timeout=30000 scripts/test-hosted-live.test.mjs
 | header value comparison | headerFaults names a header that differs; renderer frame-ancestors probe |
 | anonymous session must not authenticate | a session endpoint that authenticates an anonymous request fails |
 | every prerequisite required | three gate tests, including each prerequisite key is individually required |
+| guarantee waits filtered to unmet gates | a met gate stops holding its acceptance lines shut |
+| blocked run prints the waiting lines | a blocked run prints the gate each open acceptance line waits on |
+| manifest records `waitingOn` | the manifest records the unmet gates per guarantee |
+| a guarantee's `waits` names a real gate item | every guarantee waits on gate items the preflight actually reports |
 
 One row is defended twice: the runbook-`pending` rule is expressed both in the
 probe-only lookup and in the status expression, and removing either alone changes

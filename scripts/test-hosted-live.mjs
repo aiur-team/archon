@@ -137,19 +137,38 @@ const CLIENT_ID = /^[A-Za-z0-9._-]{8,128}$/;
  * ticket forbids.
  */
 export const LIVE_GUARANTEES = Object.freeze([
-  { id: "L1", by: "probe", what: "deployed session endpoint answers anonymously with the hosted header set" },
-  { id: "L2", by: "probe", what: "deployed renderer serves the generated header set and sets no cookie" },
-  { id: "L3", by: "probe", what: "deployed viewer and metadata routes reveal nothing to a signed-out reader" },
-  { id: "L4", by: "runbook", what: "real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes" },
-  { id: "L5", by: "runbook", what: "installed released package and packaged skill drive a real publish (AE1)" },
-  { id: "L6", by: "runbook", what: "owner reads the artifact through the deployed renderer in a real browser" },
-  { id: "L7", by: "runbook", what: "a second real account is denied the same document" },
-  { id: "L8", by: "runbook", what: "real conditional-write race behaviour against deployed storage" },
-  { id: "L9", by: "runbook", what: "lost upload response recovers the same receipt" },
-  { id: "L10", by: "runbook", what: "publish-disabled transition refuses new work while private reads survive" },
-  { id: "L11", by: "runbook", what: "both per-IP rate rules accepted by the deploy and effective" },
-  { id: "L12", by: "runbook", what: "cleanup or intentional retention disposition of every generated record" },
+  { id: "L1", by: "probe", waits: ["G2", "G6"], what: "deployed session endpoint answers anonymously with the hosted header set" },
+  { id: "L2", by: "probe", waits: ["G2", "G6"], what: "deployed renderer serves the generated header set and sets no cookie" },
+  { id: "L3", by: "probe", waits: ["G2", "G6"], what: "deployed viewer and metadata routes reveal nothing to a signed-out reader" },
+  { id: "L4", by: "runbook", waits: ["G2", "G3", "G4"], what: "real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes" },
+  { id: "L5", by: "runbook", waits: ["G2", "G3", "G4", "G5"], what: "installed released package and packaged skill drive a real publish (AE1)" },
+  { id: "L6", by: "runbook", waits: ["G2", "G4", "G5"], what: "owner reads the artifact through the deployed renderer in a real browser" },
+  { id: "L7", by: "runbook", waits: ["G2", "G4"], what: "a second real account is denied the same document" },
+  { id: "L8", by: "runbook", waits: ["G2", "G6"], what: "real conditional-write race behaviour against deployed storage" },
+  { id: "L9", by: "runbook", waits: ["G2", "G5"], what: "lost upload response recovers the same receipt" },
+  { id: "L10", by: "runbook", waits: ["G2", "G7"], what: "publish-disabled transition refuses new work while private reads survive" },
+  { id: "L11", by: "runbook", waits: ["G2", "G6"], what: "both per-IP rate rules accepted by the deploy and effective" },
+  { id: "L12", by: "runbook", waits: ["G7"], what: "cleanup or intentional retention disposition of every generated record" },
 ]);
+
+/**
+ * The gate items each still-open guarantee is waiting on.
+ *
+ * A blocked capstone is only actionable if the operator can read, per
+ * acceptance line, which prerequisite would release it. `waits` names the gate
+ * items that must be met before the line can be attempted at all; this returns
+ * the ones that are not met yet, so a line with an empty result is attemptable
+ * and the run's remaining work is the runbook, not provisioning.
+ */
+export function guaranteesWaitingOn(preflight) {
+  const unmet = new Set(preflight.items.filter((entry) => entry.status !== "met").map((entry) => entry.id));
+  return LIVE_GUARANTEES.map(({ id, by, waits, what }) => ({
+    id,
+    by,
+    what,
+    waiting: waits.filter((gate) => unmet.has(gate)),
+  }));
+}
 
 /* ------------------------------------------------------------------ *
  * Preflight.
@@ -573,10 +592,17 @@ export function buildManifest({ preflight, probes = [], now, mode }) {
       items: preflight.items.map(({ id, gate, status, detail }) => ({ id, gate, status, detail })),
     },
     facts: preflight.facts,
-    guarantees: LIVE_GUARANTEES.map(({ id, by, what }) => {
+    guarantees: guaranteesWaitingOn(preflight).map(({ id, by, what, waiting }) => {
       const observed = by === "probe" ? byId.get(id) : undefined;
       const status = by === "runbook" ? "pending" : observed ? observed.status : "blocked";
-      return { id, by, what, status, detail: observed ? observed.detail : "not observed" };
+      return {
+        id,
+        by,
+        what,
+        status,
+        waitingOn: waiting,
+        detail: observed ? observed.detail : waiting.length > 0 ? `waits on ${waiting.join(", ")}` : "not observed",
+      };
     }),
   };
 }
@@ -610,6 +636,16 @@ export async function main(argv, env, { fetchImpl = fetch, now = () => new Date(
     if (entry.status === "met") process.stdout.write(`PASS  ${entry.id} ${entry.gate}\n`);
     else if (entry.status === "blocked") process.stderr.write(`BLOCKED  ${entry.id} ${entry.gate}: ${entry.detail}\n`);
     else process.stderr.write(`FAIL  ${entry.id} ${entry.gate}: ${entry.detail}\n`);
+  }
+
+  if (!preflight.ok) {
+    /* An unmet gate is only useful to the operator alongside the acceptance
+       lines it holds shut, so the two are printed together rather than leaving
+       the mapping to be reconstructed from the runbook. */
+    for (const entry of guaranteesWaitingOn(preflight)) {
+      if (entry.waiting.length === 0) continue;
+      process.stderr.write(`BLOCKED  ${entry.id} ${entry.what}: waits on ${entry.waiting.join(", ")}\n`);
+    }
   }
 
   let probes = [];

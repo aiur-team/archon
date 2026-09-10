@@ -105,6 +105,22 @@ Each item names what to do, what decides it, and what to record. Record `pass`,
 `fail` or `blocked` for every one — there is no fourth answer, and an item nobody
 got to is `blocked`.
 
+Every item also waits on specific §1 gate items, and a blocked run prints that
+mapping per line so an operator can read which prerequisite releases which
+acceptance guarantee. The runner is the authority for it; this table is the same
+mapping in prose.
+
+| Guarantee | Waits on | Released by |
+| --- | --- | --- |
+| L1, L2, L3, L8, L11 | G2, G6 | both deployments at a frozen revision |
+| L4 | G2, G3, G4 | the OAuth application and the two test identities |
+| L5 | G2, G3, G4, G5 | all of the above plus a published release |
+| L6 | G2, G4, G5 | the deployments, an identity and the released package |
+| L7 | G2, G4 | the deployments and a second test identity |
+| L9 | G2, G5 | the deployments and the released package |
+| L10 | G2, G7 | the deployments and the accepted pilot envelope |
+| L12 | G7 | the named retention owner |
+
 ### L1 — deployed session endpoint (probe)
 
 `GET <app>/api/hosted/session` with no cookie answers `{v:1,authenticated:false}`
@@ -236,8 +252,9 @@ containing:
 - the frozen facts: package version and integrity, install source, source
   revision, both deploy identifiers, both origins and their registrable sites, the
   OAuth client id digest, and the account labels;
-- one row per guarantee L1–L12 with `pass`, `fail` or `blocked` and the evidence
-  it was decided from;
+- one row per guarantee L1–L12 with `pass`, `fail` or `blocked`, the evidence it
+  was decided from, and — for a blocked one — the gate items it is still waiting
+  on, copied from the runner's `waits on` lines;
 - the cleanup/retention disposition from L12;
 - anything the run could not observe, stated as such.
 
