@@ -137,8 +137,13 @@ a request `Host` header.
 
 The build therefore generates **no `_headers` file**, and `netlify.toml` declares
 no security header either. `rendererHeaders` and `headersFile` are still exported
-from `scripts/build.mjs`, and the gate is now their one consumer — the policy is
-still expressed here, but it is applied there. A `_headers` file beside the gate
+from `scripts/build.mjs`, but nothing deployed imports them: `netlify/lib/edge-host.mjs`
+carries the same header set copied unchanged in content and order, because
+`renderer/` is outside the deploy tree and every relative import under `netlify/`
+must resolve under `netlify/`. So the policy is authored here and emitted there,
+and the exports remain as the source those copies are held to — the renderer
+oracle in `scripts/test-hosted-live.test.mjs` serves its fixtures under exactly
+them. A `_headers` file beside the gate
 would be a second authority on one deployment: Netlify emits every matching rule,
 and a browser handed two `Content-Security-Policy` headers enforces their
 intersection, so the disagreement would surface as a page that is more dead
