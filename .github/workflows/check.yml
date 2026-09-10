@@ -71,6 +71,25 @@ jobs:
       - name: hosted contract tests
         run: node --test hosted/test/contracts.test.mjs
 
+      # The hosted auth tree. Every one of these runs against injected
+      # dependencies -- an in-memory store with the real conditional-write
+      # semantics, a hand-driven clock and a fake provider -- so the whole of
+      # AHU-003 is verified with no GitHub credential, no network and no
+      # operator secret. A missing secret therefore cannot skip any of it.
+      #
+      # These live in `hosted/test/` rather than beside their sources because
+      # `hosted/lib/` and `hosted/functions/` are deploy directories: the module
+      # gate above refuses a file there that imports `node:test` or reaches into
+      # `hosted/test/`, and Netlify would publish `hosted/functions/*.test.mjs`
+      # as a live route. Same four suites, one directory across.
+      - name: hosted auth tests
+        run: |
+          node --test \
+            hosted/test/identity.test.mjs \
+            hosted/test/auth-store.test.mjs \
+            hosted/test/github-oauth.test.mjs \
+            hosted/test/auth-routes.test.mjs
+
       # AHU-004's publication state. Three suites rather than one because they
       # test four different things: the provider adapter's conditional-write
       # and readback handling, the state machine's races and deadlines, the
@@ -254,6 +273,19 @@ jobs:
           node scripts/test-access-row.mjs
           node --experimental-vm-modules scripts/test-p4-k.mjs contract
           node scripts/test-p4-k-browser.mjs
+          # AHU-005's renderer oracle. It builds `renderer/` into a temporary
+          # root, serves that output on its own loopback origin with the
+          # generated `_headers` applied to every response, and drives the
+          # isolation matrix against a separate account origin and a third
+          # adversary origin. Two engines rather than one: the design rests on a
+          # content-security policy being inherited into a sandboxed `srcdoc`
+          # document, and "one engine does this correctly" is not the same claim
+          # as "browsers do this". It installs its own pinned Playwright,
+          # Chromium and Firefox the way the two runners above do, and it needs
+          # the `hosted` install several steps up, because it holds the
+          # renderer's copy of the render-message contract equal to
+          # `hosted/lib/contracts.mjs` before it starts a browser.
+          node scripts/test-hosted-renderer.mjs
 
       # P4-K's hosted oracle creates and deletes a real Netlify site and needs
       # operator credentials no build has. It is named here so the test
