@@ -45,8 +45,9 @@
 
 import { getStore } from "@netlify/blobs";
 
+import { SessionRequiredError } from "../lib/auth-errors.mjs";
 import { openAuthStore } from "../lib/auth-store.mjs";
-import { encodeArtifactBytes } from "../lib/contracts.mjs";
+import { HostedContractError, encodeArtifactBytes } from "../lib/contracts.mjs";
 import { identifyHosted } from "../lib/identity.mjs";
 import { publicationDependencies, readOwnedPublication } from "../lib/publications.mjs";
 import {
@@ -62,8 +63,6 @@ import {
   notFound,
 } from "../lib/documents.mjs";
 import { errorResponse, jsonResponse } from "../lib/publications-http.mjs";
-import { HostedContractError } from "../lib/contracts.mjs";
-import { SessionRequiredError } from "../lib/auth-errors.mjs";
 
 export const config = { path: [DOCUMENT_METADATA_PATH, DOCUMENT_CONTENT_PATH] };
 

@@ -296,9 +296,23 @@
    * address as a signed-out reader and gets the sign-in redirect, which is the
    * honest confirmation that the session is gone.
    */
+  /**
+   * Report a failure that does not invalidate what is on screen.
+   *
+   * `fail` hides the stage and moves focus, which is right for a document that
+   * could not be loaded and wrong for a sign-out that did not go through: the
+   * document is still there, still authorised and still readable, and taking it
+   * off the screen tells the reader they lost something they did not. The only
+   * thing that failed is the button they pressed, so the message goes to the
+   * live region and the button becomes pressable again.
+   */
+  function warn(message) {
+    say(message, "error");
+  }
+
   async function signOut() {
     if (csrfToken === null) {
-      fail(MESSAGES.signOutFailed);
+      warn(MESSAGES.signOutFailed);
       return;
     }
     signOutButton.disabled = true;
@@ -312,7 +326,7 @@
       window.location.reload();
     } catch {
       signOutButton.disabled = false;
-      fail(MESSAGES.signOutFailed);
+      warn(MESSAGES.signOutFailed);
     }
   }
 
