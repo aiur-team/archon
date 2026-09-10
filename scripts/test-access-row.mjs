@@ -759,6 +759,18 @@ function transpileGate(ts, gateRoot) {
     "utf8",
   );
 
+  /* The gate classifies the request host through `../lib/edge-host.mjs` before
+     it reaches the access-row logic this runner exercises. Its host
+     classification and header helpers are pure and self-contained, so the real
+     module is re-exported rather than stubbed; with no `HOSTED_*` variables set
+     the classifier returns "app" and this matrix runs the application branch
+     exactly as before. */
+  writeFileSync(
+    join(gateRoot, "lib/edge-host.mjs"),
+    `export * from ${JSON.stringify(real("netlify/lib/edge-host.mjs"))};\n`,
+    "utf8",
+  );
+
   const source = readFileSync(join(ROOT, "netlify/edge-functions/gate.ts"), "utf8");
   const emitted = ts.transpileModule(source, {
     fileName: "gate.ts",
