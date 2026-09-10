@@ -197,7 +197,7 @@ completion, and only `readOwnedPublication` ever returns bytes.
 
 ### `lib/publications-http.mjs`
 
-The transport shell the three agent endpoints share: method and browser-header
+The transport shell the agent endpoints share: method and browser-header
 rejection, the bearer grammar, JSON body reading, and the C3 error envelope.
 Every response it builds carries `Cache-Control: private, no-store`,
 `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`, because
@@ -210,11 +210,31 @@ Netlify does not apply `netlify.toml` headers to function output.
 | `/api/hosted/publications` | `POST` | none — it mints the operation secret |
 | `/api/hosted/publications/:publicationId/status` | `POST` | `Authorization: Bearer <agentSecret>` |
 | `/api/hosted/publications/:publicationId/cancel` | `POST` | `Authorization: Bearer <agentSecret>` |
+| `/api/hosted/publications/:publicationId/artifact` | `PUT` | `Authorization: Bearer <agentSecret>` |
 
-All three refuse a request carrying `Cookie` or `Origin`: they authenticate a
+All four refuse a request carrying `Cookie` or `Origin`: they authenticate a
 capability the CLI holds, and ambient browser credentials alongside a capability
 is the confused-deputy shape the two-origin split exists to prevent. There is no
 CORS grant anywhere in the hosted API.
+
+### `PUT /api/hosted/publications/:publicationId/artifact`
+
+The upload takes `Content-Type: text/html; charset=utf-8` and the exact bytes
+the descriptor described. It answers with the same envelope the status route
+returns — `201` for the write that first commits the document, `200` for an
+identical retry of a publication that has already completed.
+
+The bearer is authenticated and the state inspected before a byte of the body is
+read, so an unapproved, denied, cancelled or expired publication is not a free
+upload endpoint. That preflight is advisory: `completePublication` re-checks
+state, owner, digest and deadline on every compare-and-set attempt it makes.
+
+The digest and length are re-derived from the received octets and compared
+against the approved descriptor, so a retry carrying different bytes is a `409
+descriptor_mismatch` rather than a success. Recovering the receipt of an
+already-completed publication is the one case that still works while
+`HOSTED_PUBLISH_ENABLED` is off: disabling new publications must not strand the
+receipt for a document that already exists.
 
 ## Operator configuration
 

@@ -72,9 +72,10 @@ jobs:
         run: node --test hosted/test/contracts.test.mjs
 
       # AHU-004's publication state. Three suites rather than one because they
-      # test three different things: the provider adapter's conditional-write
-      # and readback handling, the state machine's races and deadlines, and the
-      # three agent endpoints' transport rules. Named literally, like every
+      # test four different things: the provider adapter's conditional-write
+      # and readback handling, the state machine's races and deadlines, the
+      # agent endpoints' transport rules, and the artifact upload route's byte
+      # handling and retry protocol. Named literally, like every
       # other test file in this workflow, so a file that stops being emitted
       # fails loudly instead of matching a glob of nothing.
       #
@@ -94,6 +95,7 @@ jobs:
           hosted/test/publication-store.test.mjs
           hosted/test/publications.test.mjs
           hosted/test/publications-agent.test.mjs
+          hosted/test/publications-artifact.test.mjs
 
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and
