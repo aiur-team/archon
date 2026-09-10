@@ -25,14 +25,14 @@
  * second authority for one file. What is left here is this ticket's own: no rate
  * rule may be spelled in TOML, and the build invocation contract.
  *
- * The one thing that cannot be real yet is the renderer build: AHU-005 owns
- * `renderer/scripts/build.mjs` and has not merged at this phase barrier. The
- * *invocation contract* is what this ticket owns and what is asserted here — the
- * command `renderer/netlify.toml` declares, run from the declared base
- * directory, must produce the declared publish directory — and it is asserted
- * against a temporary synthetic build fixture written into a fresh temp
- * directory. Reconnecting that assertion to the real renderer build is
- * AHU-012's.
+ * The renderer build itself is AHU-005's: it owns `renderer/scripts/build.mjs`
+ * and `scripts/test-hosted-renderer.mjs`, which builds that script for real and
+ * serves its output. What this ticket owns, and what is asserted here, is the
+ * *invocation contract* — the command `renderer/netlify.toml` declares, run from
+ * the declared base directory, must produce the declared publish directory. It
+ * is asserted against a temporary synthetic build fixture rather than against
+ * the real build so that this runner does not become a second authority over
+ * AHU-005's output; the fixture isolates the contract from what the build emits.
  *
  * Every identity, origin, secret and document in this file is synthetic.
  *
@@ -493,12 +493,14 @@ section("renderer/netlify.toml declares no rate rule of its own", async () => {
 });
 
 section("the renderer build invocation contract, against a synthetic fixture", async () => {
-  /* AHU-005 owns `renderer/scripts/build.mjs` and has not merged at this phase
-     barrier, so what is asserted here is the contract this ticket owns: the
-     command `renderer/netlify.toml` declares, executed with the declared base
-     directory as its working directory, produces the declared publish
-     directory. The fixture stands in for the real build; reconnecting this to
-     it is AHU-012's, and a fixture pass is not a live acceptance result. */
+  /* AHU-005 owns `renderer/scripts/build.mjs` and exercises it for real in
+     `scripts/test-hosted-renderer.mjs`. What is asserted here is the contract
+     this ticket owns and that runner does not: the command
+     `renderer/netlify.toml` declares, executed with the declared base directory
+     as its working directory, produces the declared publish directory. The
+     fixture stands in for the build deliberately - driving the real one here
+     would put two runners in charge of one output - and a fixture pass is not a
+     live acceptance result either way. */
   const live = await liveToml("renderer/netlify.toml");
   const declaredCommand = live.match(/^\s*command\s*=\s*"([^"]+)"\s*$/m);
   const declaredPublish = live.match(/^\s*publish\s*=\s*"([^"]+)"\s*$/m);
