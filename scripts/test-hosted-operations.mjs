@@ -19,20 +19,20 @@
  * off the TOML and not off prose. The origin matrix goes through
  * `readHostedConfig` and therefore through the pinned public-suffix list.
  *
- * The renderer deployment's fail-closed rules belong to AHU-005's
- * `scripts/test-hosted-renderer.mjs`, which guards the byte-identical copy of
- * `renderer/netlify.toml` this branch carries; restating them here would be a
- * second authority for one file. What is left here is this ticket's own: no rate
- * rule may be spelled in TOML, and the build invocation contract.
+ * There is one deployment now, and one `netlify.toml`. The renderer is not a
+ * second site with a command and a publish directory of its own: its shell is
+ * built into the one publish tree at `_site/_render/`, and the edge gate tells
+ * the render host from the application host. So the invocation contract this
+ * runner asserts is the merged one — one command, one publish directory, no
+ * second TOML anywhere in the tree, and no header authority beside the gate.
  *
  * The renderer build itself is AHU-005's: it owns `renderer/scripts/build.mjs`
  * and `scripts/test-hosted-renderer.mjs`, which builds that script for real and
- * serves its output. What this ticket owns, and what is asserted here, is the
- * *invocation contract* — the command `renderer/netlify.toml` declares, run from
- * the declared base directory, must produce the declared publish directory. It
- * is asserted against a temporary synthetic build fixture rather than against
- * the real build so that this runner does not become a second authority over
- * AHU-005's output; the fixture isolates the contract from what the build emits.
+ * serves its output. Nothing here drives that build, so this runner does not
+ * become a second authority over its output; what it reads off the module is the
+ * one fact that is a *deployment* fact rather than a rendering one — that the
+ * build generates no `_headers`, because a merged site has exactly one place
+ * headers come from.
  *
  * Every identity, origin, secret and document in this file is synthetic.
  *
@@ -109,8 +109,10 @@ const START_ROUTE = "/api/hosted/publications";
 const STATUS_ROUTE = "/api/hosted/publications/:publicationId/status";
 const START_RATE = { windowLimit: 10, windowSize: 60, aggregateBy: ["ip", "domain"] };
 const STATUS_RATE = { windowLimit: 30, windowSize: 60, aggregateBy: ["ip", "domain"] };
-const RENDERER_BUILD_COMMAND = "node scripts/build.mjs";
-const RENDERER_PUBLISH_DIR = "dist";
+const SITE_BUILD_COMMAND = "templates/build --site";
+const SITE_PUBLISH_DIR = "_site";
+/** Where the renderer shell lives inside that one publish tree. */
+const RENDER_DIR = "_render";
 
 /* ------------------------------------------------------------------ */
 /* harness                                                             */
@@ -340,12 +342,10 @@ section("exactly two rate rules, on exactly the start and status routes", async 
   }
 
   /* Netlify has no supported TOML function-rate property, so a rule written
-     there would look configured and do nothing. Neither deployment file may
-     carry one. */
-  for (const file of ["hosted/netlify.toml", "renderer/netlify.toml"]) {
-    const live = await liveToml(file);
-    assert.doesNotMatch(live, /rateLimit|rate_limit|windowLimit/i, `${file} must declare no rate rule`);
-  }
+     there would look configured and do nothing. There is one deployment file
+     now and it may not carry one. */
+  const live = await liveToml("netlify.toml");
+  assert.doesNotMatch(live, /rateLimit|rate_limit|windowLimit/i, "netlify.toml must declare no rate rule");
 });
 
 /* ------------------------------------------------------------------ */
@@ -482,72 +482,84 @@ section("hosted/.env.example is redacted and defaults to disabled", async () => 
 });
 
 /* ------------------------------------------------------------------ */
-/* 5. the renderer deployment definition and its invocation contract   */
+/* 5. the merged deployment definition and its invocation contract     */
 /* ------------------------------------------------------------------ */
 
-section("renderer/netlify.toml declares no rate rule of its own", async () => {
-  /* Deliberately narrow. AHU-005's `scripts/test-hosted-renderer.mjs` owns the
-     renderer deployment's fail-closed assertion - no functions, no edge
-     function, no second header authority, no environment beyond the Node
-     version, and the exact build command and publish directory - and this file
-     is byte-identical to the copy that runner guards. Restating those rules
-     here would be a second authority for the same file, which is the failure
-     mode that assertion exists to prevent.
+section("the repository declares exactly one Netlify site", async () => {
+  /* The consolidation's load-bearing property, and the one a diff review skims.
+     A second `netlify.toml` anywhere in the tree is a second site: a second
+     header authority the gate cannot see, a second build the inventory contract
+     does not describe, and a second origin an operator has to keep in step by
+     hand. `renderer/` and the hosted application both used to carry one. */
+  const tracked = (await run("git", ["-C", ROOT, "ls-files", "*netlify.toml"])).stdout
+    .split("\n")
+    .filter((path) => path !== "");
+  assert.deepEqual(tracked, ["netlify.toml"], "a second netlify.toml is a second site");
 
-     What is left is this ticket's own: a rate rule may not be written in TOML.
-     Netlify has no supported TOML function-rate property, so a rule spelled
-     there would look configured and do nothing.
-
-     The invocation contract is the section below. */
-  const live = await liveToml("renderer/netlify.toml");
-  assert.doesNotMatch(live, /rateLimit|rate_limit|windowLimit/i, "renderer/netlify.toml must declare no rate rule");
+  /* And the renderer is not a site by any other spelling: no manifest, no
+     lockfile, no dependency on the origin that frames hostile HTML. */
+  for (const name of ["netlify.toml", "package.json", "package-lock.json", "node_modules"]) {
+    assert.ok(!existsSync(join(ROOT, "renderer", name)), `renderer/${name} exists`);
+  }
 });
 
-section("the renderer build invocation contract, against a synthetic fixture", async () => {
-  /* AHU-005 owns `renderer/scripts/build.mjs` and exercises it for real in
-     `scripts/test-hosted-renderer.mjs`. What is asserted here is the contract
-     this ticket owns and that runner does not: the command
-     `renderer/netlify.toml` declares, executed with the declared base directory
-     as its working directory, produces the declared publish directory. The
-     fixture stands in for the build deliberately - driving the real one here
-     would put two runners in charge of one output - and a fixture pass is not a
-     live acceptance result either way. */
-  const live = await liveToml("renderer/netlify.toml");
+section("one build command produces one publish tree", async () => {
+  const live = await liveToml("netlify.toml");
   const declaredCommand = live.match(/^\s*command\s*=\s*"([^"]+)"\s*$/m);
   const declaredPublish = live.match(/^\s*publish\s*=\s*"([^"]+)"\s*$/m);
-  assert.ok(declaredCommand, "renderer/netlify.toml declares no build command to invoke");
-  assert.ok(declaredPublish, "renderer/netlify.toml declares no publish directory");
-  assert.equal(declaredCommand[1], RENDERER_BUILD_COMMAND, "the invocation this contract covers");
-  assert.equal(declaredPublish[1], RENDERER_PUBLISH_DIR, "the output directory this contract covers");
+  assert.ok(declaredCommand, "netlify.toml declares no build command to invoke");
+  assert.ok(declaredPublish, "netlify.toml declares no publish directory");
+  assert.equal(declaredCommand[1], SITE_BUILD_COMMAND, "the invocation this contract covers");
+  assert.equal(declaredPublish[1], SITE_PUBLISH_DIR, "the output directory this contract covers");
 
-  const root = await mkdtemp(join(tmpdir(), "archon-renderer-contract-"));
-  try {
-    await mkdir(join(root, "scripts"), { recursive: true });
-    await writeFile(
-      join(root, "scripts", "build.mjs"),
-      [
-        'import { mkdir, writeFile } from "node:fs/promises";',
-        'import { join } from "node:path";',
-        `const out = join(process.cwd(), ${JSON.stringify(RENDERER_PUBLISH_DIR)});`,
-        "await mkdir(out, { recursive: true });",
-        'await writeFile(join(out, "index.html"), "<!doctype html><title>synthetic</title>\\n");',
-        'await writeFile(join(out, "_headers"), "/*\\n  X-Content-Type-Options: nosniff\\n");',
-      ].join("\n"),
-    );
-
-    const [command, ...args] = RENDERER_BUILD_COMMAND.split(" ");
-    assert.equal(command, "node", "the declared build command must be a plain node invocation");
-    await run(process.execPath, args, { cwd: root });
-
-    for (const emitted of ["index.html", "_headers"]) {
-      assert.ok(
-        existsSync(join(root, RENDERER_PUBLISH_DIR, emitted)),
-        `the declared command must emit ${RENDERER_PUBLISH_DIR}/${emitted} into the publish directory`,
-      );
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
+  /* Exactly one of each. A second `command` or `publish` -- in a context block,
+     in a leftover section -- is the shape the merge exists to remove, and TOML
+     would happily carry it. */
+  for (const [key, count] of [
+    ["command", [...live.matchAll(/^\s*command\s*=/gm)].length],
+    ["publish", [...live.matchAll(/^\s*publish\s*=/gm)].length],
+  ]) {
+    assert.equal(count, 1, `netlify.toml declares ${count} ${key} settings; one deployment declares one`);
   }
+
+  /* The renderer shell is published inside that tree rather than beside it, and
+     the builder is what puts it there. Asserted against the declared command's
+     own source, because the publish directory is disposable output that no
+     committed file can stand in for. */
+  const builder = await readFile(join(ROOT, "templates/docbuild/src/site.ts"), "utf8");
+  assert.match(
+    builder,
+    new RegExp(`RENDER_DIR = ${JSON.stringify(RENDER_DIR)}`),
+    `the builder must publish the renderer shell at ${SITE_PUBLISH_DIR}/${RENDER_DIR}/`,
+  );
+});
+
+section("the deployment has exactly one header authority", async () => {
+  /* Netlify emits the headers of every matching rule, and a browser handed two
+     `Content-Security-Policy` headers enforces their intersection. Two
+     authorities therefore cannot make a page more permissive -- they make it
+     dead, in a way that looks like the stricter one working. On one site
+     answering on two hosts, only the edge gate can tell which host it is on, so
+     it is the only place a security header may be decided. */
+  const live = await liveToml("netlify.toml");
+  for (const header of ["X-Frame-Options", "Content-Security-Policy", "Referrer-Policy"]) {
+    assert.doesNotMatch(live, new RegExp(header, "i"), `netlify.toml declares ${header}`);
+  }
+
+  /* And the renderer build writes no `_headers` beside the shell it publishes.
+     This is read off the module's own declaration rather than off a built tree:
+     the file list is what the build copies *and* what it checks its output
+     against, so the declaration is the fact. */
+  const build = await import(pathToFileURL(join(ROOT, "renderer/scripts/build.mjs")).href);
+  assert.deepEqual(
+    [...build.GENERATED_FILES],
+    ["renderer-config.js"],
+    "the renderer build generates a file beside the shell that is not the config",
+  );
+  assert.ok(
+    typeof build.rendererHeaders === "function" && typeof build.headersFile === "function",
+    "the renderer header set must stay exported for the gate to apply",
+  );
 });
 
 /* ------------------------------------------------------------------ */
@@ -732,7 +744,12 @@ section("hosted/OPERATIONS.md matches the deployed configuration", async () => {
   for (const [what, needle] of [
     ["the start rate limit", `| \`POST ${START_ROUTE}\` | ${START_RATE.windowLimit} | 60s |`],
     ["the status rate limit", `| ${STATUS_RATE.windowLimit} | 60s |`],
-    ["the renderer build command", `\`${RENDERER_BUILD_COMMAND}\``],
+    /* The renderer build command was a needle here while `renderer/` was its
+       own site with its own command. It is not one now, and the runbook still
+       describes the three-site deployment: ACN-011 owns rewriting that prose,
+       and pinning a stale command here would hold the old shape in place rather
+       than let it be corrected. The merged command and publish directory are
+       asserted above, against the configuration rather than against prose. */
     ["the publication store name", "archon-hosted-v1"],
     ["the census entry point", "scripts/hosted-census.mjs"],
     ["the pending window", `**${pendingMinutes} minutes** pending`],
