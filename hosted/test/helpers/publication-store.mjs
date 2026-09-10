@@ -226,3 +226,22 @@ export function collidingIdRandomBytes({ idSize = 16, byte = 7 } = {}) {
   const varying = sequentialRandomBytes(31);
   return (size) => (size === idSize ? new Uint8Array(size).fill(byte) : varying(size));
 }
+
+/**
+ * A source whose *first* identifier collides and whose later ones do not.
+ *
+ * `createPublication` draws the id first, so this makes attempt one lose the
+ * create-only race and attempt two succeed - which is the only way to observe
+ * what a retried attempt stamps on its record.
+ */
+export function collidingFirstIdRandomBytes({ idSize = 16, byte = 7 } = {}) {
+  const varying = sequentialRandomBytes(31);
+  let firstIdDrawn = false;
+  return (size) => {
+    if (size === idSize && !firstIdDrawn) {
+      firstIdDrawn = true;
+      return new Uint8Array(size).fill(byte);
+    }
+    return varying(size);
+  };
+}

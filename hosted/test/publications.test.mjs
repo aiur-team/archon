@@ -51,6 +51,7 @@ import {
   VALID_DESCRIPTOR,
 } from "./fixtures/publications.mjs";
 import {
+  collidingFirstIdRandomBytes,
   collidingIdRandomBytes,
   createClock,
   createProviderDouble,
@@ -226,6 +227,36 @@ test("a create that collides on every attempt fails and preserves the original r
   assert.doesNotMatch(error.message, new RegExp(first.agentSecret.slice(0, 12)));
   assert.deepEqual(stored(), original, "the winning record is untouched");
   assert.equal(provider.keys().length, 1, "a collision never creates a second document");
+});
+
+test("a retried start is stamped with its own attempt's clock, not the first attempt's", async () => {
+  const { publications, provider, clock } = harness({
+    randomBytes: collidingFirstIdRandomBytes(),
+  });
+
+  /* Seed the id the first attempt will propose, so that attempt loses the
+     create-only race for real, and make the retry cost wall-clock time the way a
+     provider round trip does. */
+  const collidingId = "07".repeat(16);
+  provider.put(`publications/${collidingId}`, JSON.stringify(RECORDS.pending));
+  const startedAt = clock.now();
+  provider.beforeWrite(async () => clock.advanceSeconds(30));
+
+  const started = await publications.createPublication(VALID_DESCRIPTOR);
+  assert.notEqual(started.publicationId, collidingId);
+
+  const record = JSON.parse(provider.raw(`publications/${started.publicationId}`).data);
+  /* The losing attempt cost 30 seconds, which is what a provider round trip
+     does. A `createdAt` captured before the loop would still read `startedAt`,
+     and the approver would get 30 seconds less than the contract promises. */
+  assert.equal(clock.now(), startedAt + 30_000);
+  assert.equal(Date.parse(record.createdAt), clock.now(), "the retry stamps its own time");
+  assert.equal(
+    Date.parse(record.pendingExpiresAt) - Date.parse(record.createdAt),
+    HOSTED_LIMITS.PENDING_TTL_SECONDS * 1000,
+    "and gets the full approval window measured from that time",
+  );
+  assert.equal(started.expiresAt, record.pendingExpiresAt);
 });
 
 /* ------------------------------------------------------------------ */
