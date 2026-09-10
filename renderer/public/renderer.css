@@ -1,0 +1,90 @@
+/*
+ * The renderer's own presentation, which is deliberately almost nothing.
+ *
+ * Two audiences see this file. Framed by the trusted viewer, the renderer is
+ * meant to be invisible: it fills the box the application gave it and the
+ * artifact fills the renderer, so the reader sees the document and never a
+ * second chrome inside the first. Opened directly, it is a plain public page
+ * explaining that there is nothing here.
+ *
+ * The explanatory block is visible by default and hidden once the module has
+ * mounted. That order matters: a page that hid the explanation until script
+ * decided otherwise would show a blank white document to anyone whose script
+ * did not run, which is the reader most in need of the explanation.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.artifact-root {
+  block-size: 100%;
+  display: flow-root;
+}
+
+/*
+ * The frame is the reader's whole view of the document. It carries no border of
+ * its own: a visible seam here would be renderer chrome around content that the
+ * application has already framed, and the application owns the boundary the
+ * reader is meant to see. Keyboard focus is a different question -- the frame is
+ * a tab stop, and an unstyled focus ring inside a full-bleed element is easy to
+ * miss -- so the focus outline is drawn deliberately, inset so it is not clipped.
+ */
+.artifact-frame {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+  background: Canvas;
+}
+
+.artifact-frame:focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: -3px;
+}
+
+.standalone {
+  max-inline-size: 42rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+}
+
+.standalone h1 {
+  font-size: 1.5rem;
+  margin-block: 0 0.75rem;
+}
+
+.status {
+  margin: 0;
+  padding: 1.25rem;
+}
+
+.status:empty {
+  display: none;
+  padding: 0;
+}
+
+/* Mounted means the module is running and has decided what this page is. */
+html[data-archon-state="waiting"] .standalone,
+html[data-archon-state="rendered"] .standalone,
+html[data-archon-state="refused"] .standalone {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-frame {
+    scroll-behavior: auto;
+  }
+}
