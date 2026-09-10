@@ -145,6 +145,11 @@ stands today:
   `503` with `{"error":{"code":"publishing_disabled", ...}}`. This is checked
   inside `createPublication`, not in the route handler, so no future route can
   start a publication by forgetting to ask.
+- **New uploads are refused too**, including for a publication that was already
+  approved. `PUT /api/hosted/publications/<id>/artifact` answers the same `503`.
+  It is checked inside `completePublication` for the same reason: a route cannot
+  commit bytes by forgetting to ask. Together these two are the whole tap — with
+  the flag off, no new bytes reach the store.
 - **Status and receipt recovery keep working.** `POST
   /api/hosted/publications/<id>/status` deliberately does not consult the flag.
   An agent that already published can still recover its receipt for the
@@ -156,14 +161,21 @@ stands today:
 
 ### What it does *not* do
 
-It is a tap, not a valve. **Authorization already granted is not revoked.** A
-publication that had already started can still be approved by its browser and can
-still commit its bytes — for up to the pending window plus the upload window
-after the flag change, currently **15 minutes + 10 minutes**. That is deliberate:
-making the switch retroactive would turn a human's approval into a `503` after
-they gave it and would strand uploads already in flight.
+**It does not revoke an approval.** A publication that had already started can
+still be approved by its browser, and it can still be cancelled or left to
+expire. What it cannot do is commit bytes. So an in-flight operation is stopped
+rather than erased: if you re-enable publishing while that publication is still
+inside its windows — currently **15 minutes** pending plus **10 minutes** to
+upload — its agent can retry the upload and it will succeed.
 
-It also takes effect only for functions deployed *after* the change (§2).
+**It does not affect a document that already completed.** An identical retry of a
+completed upload is receipt recovery, not a new publication, and it keeps
+answering with the receipt it earned.
+
+**It is not instant.** It takes effect only for functions deployed *after* the
+change (§2). Until that deploy publishes, the running functions still carry the
+old value. The verification step below, not the environment variable, is what
+tells you the change has landed.
 
 ### Procedure
 
@@ -180,14 +192,16 @@ It also takes effect only for functions deployed *after* the change (§2).
 
    Expect `HTTP/2 503` and `"code":"publishing_disabled"`. A `201` means the
    deploy did not pick up the change; repeat step 2.
-4. Wait **25 minutes** (pending + upload window) before asserting that no new
-   bytes can land.
+4. That `503` is the whole proof. Because the upload is gated on the same flag,
+   there is no window to wait out: once the deploy carrying the change is live,
+   no new bytes can be committed, whatever was approved beforehand.
 
 ### Immediate stop
 
-If a 25-minute tail is not acceptable, take the deployment down: unpublish the
-production deploy, or lock the site, in the Netlify UI. That refuses everything,
-including owner reads, which is the trade being made.
+The flag stops publishing, not the service. If you need the *service* down —
+because you are responding to an incident rather than pausing a pilot — unpublish
+the production deploy, or lock the site, in the Netlify UI. That refuses
+everything, including owner reads, which is the trade being made.
 
 ### Rollback
 
@@ -299,11 +313,11 @@ still read.
 2. **Choose exact targets.** Derive an explicit list of publication ids from the
    census rows, filtered to non-complete states past their deadlines. Never a
    prefix, never a wildcard, never "everything older than X".
-3. **Stop the writers.** Set `HOSTED_PUBLISH_ENABLED=false`, deploy, verify per
-   §4, and wait the full 25-minute tail so no in-flight approval or upload can
-   land on a record you are about to remove. For a stricter pause, take the
-   deployment down for the maintenance window.
-4. **Re-census, and re-derive.** State changes during the wait. Confirm every id
+3. **Stop the writers.** Set `HOSTED_PUBLISH_ENABLED=false`, deploy, and verify
+   per §4. Once that `503` is confirmed, no upload can land on a record you are
+   about to remove. Approvals and cancellations can still change state, so for a
+   fully frozen store take the deployment down for the maintenance window.
+4. **Re-census, and re-derive.** State can still change between steps. Confirm every id
    on your list is still non-complete and still expired. Discard any that is now
    `complete`.
 5. **Back up.** Export each target record before removing it. There is no undo.

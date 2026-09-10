@@ -19,6 +19,12 @@
  * off the TOML and not off prose. The origin matrix goes through
  * `readHostedConfig` and therefore through the pinned public-suffix list.
  *
+ * The renderer deployment's fail-closed rules belong to AHU-005's
+ * `scripts/test-hosted-renderer.mjs`, which guards the byte-identical copy of
+ * `renderer/netlify.toml` this branch carries; restating them here would be a
+ * second authority for one file. What is left here is this ticket's own: no rate
+ * rule may be spelled in TOML, and the build invocation contract.
+ *
  * The one thing that cannot be real yet is the renderer build: AHU-005 owns
  * `renderer/scripts/build.mjs` and has not merged at this phase barrier. The
  * *invocation contract* is what this ticket owns and what is asserted here — the
@@ -49,7 +55,7 @@ import {
   readHostedConfig,
 } from "../hosted/lib/config.mjs";
 import { HOSTED_LIMITS, validateWireError } from "../hosted/lib/contracts.mjs";
-import { publicationDependencies } from "../hosted/lib/publications.mjs";
+import { completePublication, publicationDependencies } from "../hosted/lib/publications.mjs";
 import startHandler, {
   handleStart,
   config as startConfig,
@@ -180,6 +186,74 @@ section("publish-disable policy runs against AHU-004's real handlers", async () 
     off.resolve,
   );
   assert.equal(garbage.status, 503, "an invalid descriptor must still be refused for the flag");
+});
+
+section("disabled publishing refuses a new upload but not an earned receipt", async () => {
+  /* C6 gates start *and* upload. AHU-004 landed the start half; this is the
+     upload half, and the distinction that matters is between committing new
+     bytes - which the flag refuses - and recovering a receipt for bytes already
+     committed, which it must not touch. */
+  /* Inside the approved record's upload window: the fixture is stamped at a
+     fixed instant, so the wall clock would have it expired and every case below
+     would answer authorization_expired instead of exercising the flag. */
+  const beforeUploadDeadline = () => Date.parse(RECORDS.approved.uploadExpiresAt) - 1000;
+
+  const approved = deployment({ publishEnabled: "false", seed: "approved" });
+  const before = approved.provider.raw(FIXTURE_KEY);
+  await assert.rejects(
+    () =>
+      completePublication(
+        {
+          publicationId: FIXTURE_PUBLICATION_ID,
+          agentSecret: FIXTURE_RECORD_AGENT_SECRET,
+          html: FIXTURE_HTML,
+          contentSha256: VALID_DESCRIPTOR.contentSha256,
+          contentBytes: VALID_DESCRIPTOR.contentBytes,
+        },
+        { ...approved.resolve(), now: beforeUploadDeadline },
+      ),
+    (error) => {
+      assert.equal(error.code, "publishing_disabled", `upload must be refused for the flag, got ${error.code}`);
+      return true;
+    },
+    "an approved publication must not commit bytes while publishing is disabled",
+  );
+  assert.deepEqual(
+    approved.provider.raw(FIXTURE_KEY),
+    before,
+    "a refused upload must not write to the record",
+  );
+
+  /* The negative control: the same call with publishing on must commit, so the
+     refusal above is the flag and not a broken upload path. */
+  const on = deployment({ publishEnabled: "true", seed: "approved" });
+  const committed = await completePublication(
+    {
+      publicationId: FIXTURE_PUBLICATION_ID,
+      agentSecret: FIXTURE_RECORD_AGENT_SECRET,
+      html: FIXTURE_HTML,
+      contentSha256: VALID_DESCRIPTOR.contentSha256,
+      contentBytes: VALID_DESCRIPTOR.contentBytes,
+    },
+    { ...on.resolve(), now: beforeUploadDeadline },
+  );
+  assert.equal(committed.created, true, "publishing enabled must commit the approved bytes");
+
+  /* And receipt recovery survives the tap: an identical retry against an
+     already-complete record answers with its receipt, not a 503. */
+  const recovered = deployment({ publishEnabled: "false", seed: "complete" });
+  const retry = await completePublication(
+    {
+      publicationId: FIXTURE_PUBLICATION_ID,
+      agentSecret: FIXTURE_RECORD_AGENT_SECRET,
+      html: RECORDS.complete.html,
+      contentSha256: RECORDS.complete.descriptor.contentSha256,
+      contentBytes: RECORDS.complete.descriptor.contentBytes,
+    },
+    { ...recovered.resolve(), now: () => Date.parse(RECORDS.complete.completedAt) + 1000 },
+  );
+  assert.equal(retry.created, false, "an identical retry is a recovery, not a creation");
+  assert.deepEqual(retry.result, FIXTURE_RESULT, "the earned receipt must survive disabled publishing");
 });
 
 section("disabled publishing preserves completed receipts and bytes", async () => {
@@ -400,41 +474,22 @@ section("hosted/.env.example is redacted and defaults to disabled", async () => 
 /* 5. the renderer deployment definition and its invocation contract   */
 /* ------------------------------------------------------------------ */
 
-section("renderer/netlify.toml deploys static files and no functions", async () => {
+section("renderer/netlify.toml declares no rate rule of its own", async () => {
+  /* Deliberately narrow. AHU-005's `scripts/test-hosted-renderer.mjs` owns the
+     renderer deployment's fail-closed assertion - no functions, no edge
+     function, no second header authority, no environment beyond the Node
+     version, and the exact build command and publish directory - and this file
+     is byte-identical to the copy that runner guards. Restating those rules
+     here would be a second authority for the same file, which is the failure
+     mode that assertion exists to prevent.
+
+     What is left is this ticket's own: a rate rule may not be written in TOML.
+     Netlify has no supported TOML function-rate property, so a rule spelled
+     there would look configured and do nothing.
+
+     The invocation contract is the section below. */
   const live = await liveToml("renderer/netlify.toml");
-
-  assert.match(
-    live,
-    new RegExp(`^\\s*command\\s*=\\s*"${RENDERER_BUILD_COMMAND}"\\s*$`, "m"),
-    "the renderer must invoke its own build",
-  );
-  assert.match(
-    live,
-    new RegExp(`^\\s*publish\\s*=\\s*"${RENDERER_PUBLISH_DIR}"\\s*$`, "m"),
-    "the renderer must publish the build's output directory",
-  );
-  assert.match(live, /^\s*NODE_VERSION\s*=\s*"[^"]+"\s*$/m, "the renderer must pin NODE_VERSION");
-
-  /* The absences are the security property, and an absence is exactly what a
-     diff review skims. */
-  assert.doesNotMatch(live, /\[functions\]/, "the renderer runs no server code");
-  assert.doesNotMatch(live, /\[\[edge_functions\]\]/, "the renderer carries no edge function");
-  assert.doesNotMatch(live, /included_files/, "included_files would widen the deploy tree");
-  assert.doesNotMatch(
-    live,
-    /\[\[headers\]\]/,
-    "the renderer's headers are generated by its build; a second authority here could disagree",
-  );
-
-  const environment = live.match(/^\[build\.environment\]$([\s\S]*?)(?=^\[|\Z)/m);
-  assert.ok(environment, "renderer/netlify.toml is missing [build.environment]");
-  const keys = [...environment[1].matchAll(/^\s*([A-Za-z_][\w]*)\s*=/gm)].map((match) => match[1]);
-  assert.deepEqual(keys, ["NODE_VERSION"], "no secret or C6 key belongs in git");
-
-  /* The renderer directory itself must hold no server code and no private
-     fixture, whatever the TOML says. */
-  assert.ok(!existsSync(join(ROOT, "renderer/functions")), "renderer/functions must not exist");
-  assert.ok(!existsSync(join(ROOT, "renderer/.env")), "renderer/.env must not exist");
+  assert.doesNotMatch(live, /rateLimit|rate_limit|windowLimit/i, "renderer/netlify.toml must declare no rate rule");
 });
 
 section("the renderer build invocation contract, against a synthetic fixture", async () => {
@@ -444,6 +499,14 @@ section("the renderer build invocation contract, against a synthetic fixture", a
      directory as its working directory, produces the declared publish
      directory. The fixture stands in for the real build; reconnecting this to
      it is AHU-012's, and a fixture pass is not a live acceptance result. */
+  const live = await liveToml("renderer/netlify.toml");
+  const declaredCommand = live.match(/^\s*command\s*=\s*"([^"]+)"\s*$/m);
+  const declaredPublish = live.match(/^\s*publish\s*=\s*"([^"]+)"\s*$/m);
+  assert.ok(declaredCommand, "renderer/netlify.toml declares no build command to invoke");
+  assert.ok(declaredPublish, "renderer/netlify.toml declares no publish directory");
+  assert.equal(declaredCommand[1], RENDERER_BUILD_COMMAND, "the invocation this contract covers");
+  assert.equal(declaredPublish[1], RENDERER_PUBLISH_DIR, "the output directory this contract covers");
+
   const root = await mkdtemp(join(tmpdir(), "archon-renderer-contract-"));
   try {
     await mkdir(join(root, "scripts"), { recursive: true });
@@ -590,8 +653,9 @@ section("hosted/OPERATIONS.md matches the deployed configuration", async () => {
     ["the renderer build command", `\`${RENDERER_BUILD_COMMAND}\``],
     ["the publication store name", "archon-hosted-v1"],
     ["the census entry point", "scripts/hosted-census.mjs"],
-    ["the disable tail", `${pendingMinutes} minutes + ${uploadMinutes} minutes`],
-    ["the total disable tail", `${pendingMinutes + uploadMinutes} minutes`],
+    ["the pending window", `**${pendingMinutes} minutes** pending`],
+    ["the upload window", `**${uploadMinutes} minutes** to`],
+    ["that the upload is gated too", "New uploads are refused too"],
     ["the receipt window", `${HOSTED_LIMITS.RECEIPT_TTL_SECONDS / 3600}-hour`],
   ]) {
     assert.ok(runbook.includes(needle), `the runbook must state ${what} (${JSON.stringify(needle)})`);
