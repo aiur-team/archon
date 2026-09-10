@@ -15,7 +15,7 @@
  * loaded, never called, so nothing here runs a handler, reads a credential,
  * opens a store or contacts a provider.
  *
- * On top of linking, five rules hold the boundary. Each exists because a
+ * On top of linking, seven rules hold the boundary. Each exists because a
  * plausible mistake would otherwise deploy:
  *
  *  1. **Nothing resolves outside `hosted/`.** A hosted module that reached into
@@ -65,9 +65,29 @@
  *     namespace without going through the resolver at all - `createRequire`
  *     itself and `process.getBuiltinModule` - are refused lexically, like rule
  *     4 and for the same reason: an acquisition inside a function body the gate
- *     never calls is invisible to any hook. And the hook is synchronous, so a
- *     `require()` that does execute is journaled and judged by rules 1 to 3
- *     like any other edge.
+ *     never calls is invisible to any hook. The lexical half reads the source
+ *     twice, once as written and once with `\uXXXX` and `\u{...}` escapes
+ *     decoded, because JavaScript lets an identifier be spelled in escapes:
+ *     `create\u0052equire` and `process.getBuiltin\u004dodule` are the same two
+ *     names to the parser and were different text to a raw scan. And the hook
+ *     is synchronous, so a `require()` that does execute is journaled and
+ *     judged by rules 1 to 3 like any other edge.
+ *  7. **The capability boundary covers everything the hosted tree loads, not
+ *     just the files in it.** Rules 4 and 6 read first-party source, so they
+ *     say nothing about a declared dependency that imports `createRequire`
+ *     itself and re-exports it under an innocuous name for a hosted handler to
+ *     call from a body this gate never invokes: no hosted file spells a banned
+ *     name and no require executes here, so every rule above passed it. What
+ *     does execute is the dependency's own top-level `import ... from
+ *     "node:module"`, at the moment the hosted module links against it, and
+ *     that resolution is a fact the hook already sees. So every module reached
+ *     transitively from a hosted module is judged too - narrowly, on the one
+ *     capability rather than on its internals: it may not resolve
+ *     `node:module`, and it may not resolve a file outside `hosted/`. The
+ *     second door, `process.getBuiltinModule`, goes through no resolver at all,
+ *     so it is closed by capability rather than by text: the function is
+ *     wrapped for the duration of the load and a request for `node:module`
+ *     records a fault whoever makes it and however the call is spelled.
  *
  * The import graph comes from a `module.registerHooks` resolution hook that
  * records what Node actually resolved. An earlier version of this gate scanned
@@ -84,10 +104,24 @@
  * module systems, which is what makes rule 6's third door a fault rather than a
  * blind spot. They need Node 22.15 or newer; on anything older `registerHooks`
  * is not a function, which the handler at the foot of this file turns into a
- * one-line FAIL. That is the right answer and it needs no guard of its own: a
- * gate that cannot see the whole graph must not report PASS, and an explicit
- * version check here would be a branch no test on a supported Node could ever
- * reach.
+ * one-line FAIL. That is the right answer for the runtime *running* this gate
+ * and needs no guard of its own - a gate that cannot see the whole graph must
+ * not report PASS, and a version check on the interpreter would be a branch no
+ * test on a supported Node could reach. What does get a check is the manifest,
+ * which is a claim rather than a fact: `hosted/package.json` must not declare
+ * an `engines.node` floor below `MECHANISM_SINCE`, or the package advertises a
+ * runtime on which the gate can only crash.
+ *
+ * Where rule 7 stops, stated so nobody has to rediscover it: a dependency that
+ * acquires the require capability without resolving or calling anything at load
+ * time - constructing the name at runtime inside a function only production
+ * invokes - is reached by no load-time gate, because nothing it does happens
+ * while this process is watching. That residue is the dependency trust
+ * boundary, owned by the lockfile and by review of `hosted/package.json`, which
+ * is where adding a package is visible; a package the hosted tree installs
+ * already runs its own code at cold start. What rule 7 removes is the part that
+ * *was* observable and was being ignored: the resolution edge, and the global
+ * call.
  *
  * Functions must also present the shape Netlify invokes - a callable default
  * export and a `config` object - and must be routed under `/api/hosted/`,
@@ -118,7 +152,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The repository root, derived from this file's own location. */
@@ -197,6 +231,31 @@ const ALLOWED_BUILTINS = Object.freeze(["node:buffer", "node:crypto", "node:url"
  * the text-scanning version of this gate was replaced for.
  */
 const REQUIRE_ESCAPES = Object.freeze(["createRequire", "getBuiltinModule"]);
+
+/**
+ * The builtins that hand out a CommonJS `require`, refused to every module the
+ * hosted tree loads - first-party or dependency.
+ *
+ * This is the dependency half of rule 7, and it is deliberately one entry
+ * rather than the allowlist above. A dependency's own use of `node:fs` or
+ * `node:stream` is its business and policing it would be a boundary this gate
+ * cannot honestly hold; `node:module` is the single capability whose whole
+ * purpose is to reach a module system this gate cannot see.
+ */
+const REQUIRE_GRANTING_BUILTINS = Object.freeze(["node:module"]);
+
+/**
+ * The oldest Node that provides `module.registerHooks`, and therefore the
+ * oldest runtime on which this gate can see the whole import graph.
+ *
+ * Synchronous hooks landed in 22.15.0. On anything older `registerHooks` is not
+ * a function and this gate fails loudly, which is the right answer - but a
+ * manifest that *permits* such a runtime is a claim the deploy does not keep,
+ * and the failure would surface as a mysterious gate crash on a Node the
+ * package said was supported. So the floor is checked rather than assumed, and
+ * `hosted/package.json` is where the claim lives.
+ */
+const MECHANISM_SINCE = "22.15.0";
 
 /** Extensions the placement and shape rules apply to at all. */
 const SCANNED = Object.freeze([LOADABLE, ...Object.keys(REFUSED)]);
@@ -287,6 +346,38 @@ function usesDynamicImport(source) {
 }
 
 /**
+ * `source` with every `\uXXXX` and `\u{...}` escape replaced by the character it
+ * denotes, or `null` when the source spells none.
+ *
+ * JavaScript allows an identifier to be written in escapes, so
+ * `create\u0052equire` and `process.getBuiltin\u004dodule` are the two banned
+ * names to the parser while being different text to a raw scan - a bypass of
+ * rules 4 and 6 that costs one backslash. Decoding first and scanning the
+ * result gives the scans the parser's spelling of every identifier without
+ * either of them learning anything about escapes.
+ *
+ * The decode is as over-approximate as the scans it feeds: it runs on strings
+ * and comments too, and it does not track whether a backslash was itself
+ * escaped, so the literal text `\\u0052equire` decodes to a hit. That fails
+ * closed, which is the direction this gate is wrong in everywhere else, and the
+ * cost in a tree this size is a sentence rewritten.
+ */
+function decodeEscapes(source) {
+  if (!source.includes("\\u")) return null;
+  const decoded = source.replace(/\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})/g, (whole, braced, plain) => {
+    const code = Number.parseInt(braced ?? plain, 16);
+    return code > 0x10ffff ? whole : String.fromCodePoint(code);
+  });
+  return decoded === source ? null : decoded;
+}
+
+/** Every spelling of `source` the lexical rules are read against. */
+function spellings(source) {
+  const decoded = decodeEscapes(source);
+  return decoded === null ? [source] : [source, decoded];
+}
+
+/**
  * The require-granting names `source` spells, as whole identifiers.
  *
  * Whole identifiers, so a property named `createRequireToken` is not one, and
@@ -336,15 +427,60 @@ function filesUnder(directory, faults, repoRoot) {
   return found;
 }
 
-/** The names a deployed hosted module may import from the registry. */
-function runtimeDependencies(hostedRoot, faults) {
+/** A dotted version as numbers, so two of them compare a field at a time. */
+function versionParts(version) {
+  return version.split(".").map((part) => Number.parseInt(part, 10));
+}
+
+/** Whether `version` is at or above `floor`, both dotted and numeric. */
+function atLeast(version, floor) {
+  const left = versionParts(version);
+  const right = versionParts(floor);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) return a > b;
+  }
+  return true;
+}
+
+/**
+ * The lowest Node `range` admits, or `null` when the range is not a plain
+ * `>=` floor.
+ *
+ * Anything cleverer than a floor is refused rather than approximated: this gate
+ * has one question to ask of the field and no business implementing semver.
+ */
+function declaredFloor(range) {
+  const match = /^>=\s*(\d+(?:\.\d+){0,2})$/.exec(String(range ?? "").trim());
+  return match === null ? null : match[1];
+}
+
+/**
+ * The names a deployed hosted module may import from the registry, plus the
+ * manifest's claim about the runtime it supports.
+ */
+function readManifest(hostedRoot, faults) {
+  let manifest;
   try {
-    const manifest = JSON.parse(readFileSync(join(hostedRoot, "package.json"), "utf8"));
-    return new Set(Object.keys(manifest.dependencies ?? {}));
+    manifest = JSON.parse(readFileSync(join(hostedRoot, "package.json"), "utf8"));
   } catch (error) {
     faults.push(`${HOSTED}/package.json could not be read: ${error.message.split("\n")[0]}`);
     return new Set();
   }
+
+  const range = manifest.engines?.node;
+  const floor = declaredFloor(range);
+  if (floor === null) {
+    faults.push(
+      `${HOSTED}/package.json declares engines.node ${JSON.stringify(range ?? null)}; it must be a \`>=\` floor this gate can compare against ${MECHANISM_SINCE}`,
+    );
+  } else if (!atLeast(floor, MECHANISM_SINCE)) {
+    faults.push(
+      `${HOSTED}/package.json permits Node ${floor}, below the ${MECHANISM_SINCE} that provides module.registerHooks; this gate cannot see a require() edge on an older runtime`,
+    );
+  }
+  return new Set(Object.keys(manifest.dependencies ?? {}));
 }
 
 /**
@@ -384,17 +520,68 @@ function entryPointFaults(module) {
 }
 
 /**
+ * Every module the hosted tree pulls in, transitively: the first-party modules
+ * plus everything reached from one of them, and from one of those.
+ *
+ * Rule 7 needs this set because the boundary is a property of the graph the
+ * deploy loads, not of the files that happen to live in `hosted/`. The fixpoint
+ * is cheap - the records are already in memory and a hosted tree's graph is
+ * small - and it is a fixpoint rather than one pass because a resolution can be
+ * recorded before the record that puts its parent in the set.
+ */
+function reachableFrom(records, hostedModules) {
+  const reached = new Set(hostedModules);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const record of records) {
+      if (record.parentURL === null || !record.parentURL.startsWith("file:")) continue;
+      if (!record.url.startsWith("file:")) continue;
+      if (!reached.has(fileURLToPath(record.parentURL))) continue;
+      const target = fileURLToPath(record.url);
+      if (reached.has(target)) continue;
+      reached.add(target);
+      grew = true;
+    }
+  }
+  return reached;
+}
+
+/**
+ * Rule 7 for a module the hosted tree loaded but does not own.
+ *
+ * A dependency is judged on the capability and on nothing else: it may not
+ * reach `node:module`, whose export list is how an ESM module obtains a
+ * CommonJS `require`, and it may not resolve a file outside `hosted/`. Its
+ * internals are its own business - refusing a dependency's `node:fs` would be a
+ * boundary this gate has no standing to hold.
+ */
+function dependencyFault(record, { hostedRoot, repoRoot }) {
+  const { specifier, parentURL, url } = record;
+  const from = relative(repoRoot, fileURLToPath(parentURL));
+  if (REQUIRE_GRANTING_BUILTINS.includes(url)) {
+    return `${from}, loaded by the hosted tree, imports ${url}, which hands out a CommonJS require the hosted boundary cannot see`;
+  }
+  if (url.startsWith("file:") && !isInside(hostedRoot, fileURLToPath(url))) {
+    return `${from}, loaded by the hosted tree, imports ${specifier}, which resolves outside ${HOSTED}/`;
+  }
+  return null;
+}
+
+/**
  * Turn one resolution record into a fault, or nothing.
  *
- * Only records whose parent is a hosted deploy module are judged: the gate's own
- * imports and anything a dependency resolves internally are not this boundary's
+ * Records whose parent is a hosted deploy module get the full boundary; records
+ * from anything else the hosted tree loaded get rule 7's narrow capability
+ * check. The gate's own imports are neither, and are not this boundary's
  * business.
  */
-function resolutionFault(record, { hostedRoot, hostedModules, fixtureDir, dependencies, repoRoot }) {
+function resolutionFault(record, { hostedRoot, hostedModules, reached, fixtureDir, dependencies, repoRoot }) {
   const { specifier, parentURL, url } = record;
   if (parentURL === null || !parentURL.startsWith("file:")) return null;
   const parent = fileURLToPath(parentURL);
-  if (!hostedModules.has(parent)) return null;
+  if (!hostedModules.has(parent)) {
+    return reached.has(parent) ? dependencyFault(record, { hostedRoot, repoRoot }) : null;
+  }
 
   const from = relative(repoRoot, parent);
   if (url.startsWith("node:")) {
@@ -446,11 +633,17 @@ function resolutionFault(record, { hostedRoot, hostedModules, fixtureDir, depend
 
 async function main(argv) {
   const rootFlag = argv.indexOf("--root");
-  const repoRoot = rootFlag === -1 ? DEFAULT_ROOT : argv[rootFlag + 1];
-  if (rootFlag !== -1 && (repoRoot === undefined || !existsSync(repoRoot))) {
-    process.stderr.write(`FAIL hosted modules: --root ${repoRoot ?? ""} does not exist\n`);
+  const given = rootFlag === -1 ? DEFAULT_ROOT : argv[rootFlag + 1];
+  if (rootFlag !== -1 && (given === undefined || !existsSync(given))) {
+    process.stderr.write(`FAIL hosted modules: --root ${given ?? ""} does not exist\n`);
     return 1;
   }
+  /* Absolute, always. Every scanned path is derived from this root, while the
+     resolution records come back from Node as absolute file URLs, so a relative
+     `--root` made the two vocabularies disagree: no scanned module matched its
+     own resolution record, every boundary rule quietly judged nothing, and the
+     gate reported PASS on a tree it had already read the escape out of. */
+  const repoRoot = resolve(given);
 
   const hostedRoot = join(repoRoot, HOSTED);
   if (!existsSync(hostedRoot)) {
@@ -459,7 +652,7 @@ async function main(argv) {
   }
 
   const faults = [];
-  const dependencies = runtimeDependencies(hostedRoot, faults);
+  const dependencies = readManifest(hostedRoot, faults);
   const fixtureDir = join(hostedRoot, FIXTURE_DIRECTORY);
   const assetDir = join(hostedRoot, ASSET_DIRECTORY);
 
@@ -496,10 +689,11 @@ async function main(argv) {
        the only spelling of either rule that a template literal cannot slip
        past, and the only one that reaches a function body nothing calls. */
     const source = readFileSync(path, "utf8");
-    if (usesDynamicImport(source)) {
+    const written = spellings(source);
+    if (written.some(usesDynamicImport)) {
       faults.push(`${shown} uses dynamic import; the hosted deploy tree is static imports only`);
     }
-    for (const name of requireEscapes(source)) {
+    for (const name of new Set(written.flatMap(requireEscapes))) {
       faults.push(`${shown} names ${name}; the hosted deploy tree may not acquire a CommonJS require`);
     }
 
@@ -534,6 +728,27 @@ async function main(argv) {
   const routes = new Map();
   let loaded = 0;
 
+  /* Rule 7's second door. `process.getBuiltinModule` reaches `node:module` off
+     a global, so no resolver is consulted and no import is written down; the
+     only thing that can observe it is the function itself. Wrapping it for the
+     duration of the load catches the call whoever makes it - a dependency's own
+     top level as readily as a hosted module - and whatever the spelling, since
+     a computed property name or an escaped identifier still arrives here. It is
+     restored afterwards so nothing else in this process inherits it. */
+  const original = process.getBuiltinModule;
+  const capabilityFaults = [];
+  if (typeof original === "function") {
+    process.getBuiltinModule = function getBuiltinModule(id) {
+      const name = String(id).startsWith("node:") ? String(id) : `node:${String(id)}`;
+      if (REQUIRE_GRANTING_BUILTINS.includes(name)) {
+        capabilityFaults.push(
+          `something the hosted tree loaded called process.getBuiltinModule(${JSON.stringify(id)}), which hands out a CommonJS require the hosted boundary cannot see`,
+        );
+      }
+      return original.call(this, id);
+    };
+  }
+
   for (const path of deployModules) {
     const shown = relative(repoRoot, path);
     let module;
@@ -558,6 +773,10 @@ async function main(argv) {
     }
   }
 
+  if (typeof original === "function") process.getBuiltinModule = original;
+  for (const fault of capabilityFaults) faults.push(fault);
+
+  const reached = reachableFrom(records, hostedModules);
   const seen = new Set();
   for (const record of records) {
     /* NUL joins the two halves because neither a URL nor a specifier can
@@ -568,6 +787,7 @@ async function main(argv) {
     const fault = resolutionFault(record, {
       hostedRoot,
       hostedModules,
+      reached,
       fixtureDir,
       dependencies,
       repoRoot,

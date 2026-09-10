@@ -61,8 +61,28 @@ the build if it ever does. Nothing about the root deployment or
   `node:crypto`, `node:url`, `node:util`) that `node:module` can never join, and
   the names `createRequire` and `getBuiltinModule` are refused anywhere in the
   source for the same reason dynamic `import(` is: an acquisition inside a
-  function body nothing calls is invisible to any hook. Needing another builtin
-  is a one-line reviewed change to `ALLOWED_BUILTINS`.
+  function body nothing calls is invisible to any hook. Both names are matched
+  on the source as written *and* on the source with `\uXXXX` escapes decoded,
+  because `create\u0052equire` is the same identifier to the parser. Needing
+  another builtin is a one-line reviewed change to `ALLOWED_BUILTINS`.
+- **The rule above covers what the tree loads, not just the files in it.** A
+  declared dependency that imports `createRequire` and re-exports it under
+  another name, for a handler to call from a body nothing executes, spells no
+  banned name in any hosted file — but its own `import ... from "node:module"`
+  happens when the hosted module links against it. So every module reached
+  transitively from a hosted one is judged on that one capability: it may not
+  resolve `node:module`, and it may not resolve a file outside `hosted/`. Its
+  other internals are its own business. The second route to the same capability,
+  `process.getBuiltinModule`, goes through no resolver, so the gate wraps the
+  function while the tree loads and records a request for `node:module` whoever
+  makes it. What remains is a dependency that acquires the capability without
+  resolving or calling anything at load time: that is the dependency trust
+  boundary, owned by the lockfile and by review of `package.json`.
+- **`engines.node` is a `>=` floor of at least 22.15.0.** That is where
+  `module.registerHooks` arrives, and the whole boundary is read off a
+  synchronous resolution hook; a manifest permitting an older Node is a claim
+  the deploy does not keep, so the gate refuses one. `netlify.toml` pins
+  `NODE_VERSION = "22"`, which Netlify resolves to the newest 22.x.
 
 ## Modules
 

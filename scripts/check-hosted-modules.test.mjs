@@ -24,7 +24,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -45,11 +46,25 @@ function write(path, contents) {
   writeFileSync(path, contents);
 }
 
-/** A tiny installed package, so dependency resolution has something to find. */
-function installPackage(nodeModules, name) {
+/**
+ * A tiny installed package, so dependency resolution has something to find.
+ *
+ * `source` exists for rule 7: the cases below need a dependency that does
+ * something, not just one that resolves.
+ */
+function installPackage(nodeModules, name, source = "export const value = 1;\n") {
   write(join(nodeModules, name, "package.json"), JSON.stringify({ name, version: "1.0.0", main: "index.mjs" }));
-  write(join(nodeModules, name, "index.mjs"), "export const value = 1;\n");
+  write(join(nodeModules, name, "index.mjs"), source);
 }
+
+/**
+ * The runtime floor a fixture manifest declares.
+ *
+ * The gate refuses a hosted manifest that permits a Node without
+ * `module.registerHooks`, so every fixture carries a real floor and the one
+ * test that cares plants a lower one.
+ */
+const FIXTURE_ENGINES = { node: ">=22.15.0" };
 
 /**
  * A checkout-shaped tree that the gate should pass.
@@ -70,7 +85,13 @@ function cleanTree() {
 
   write(
     join(hosted, "package.json"),
-    JSON.stringify({ name: "hosted", private: true, type: "module", dependencies: { "allowed-pkg": "1.0.0" } }),
+    JSON.stringify({
+      name: "hosted",
+      private: true,
+      type: "module",
+      engines: FIXTURE_ENGINES,
+      dependencies: { "allowed-pkg": "1.0.0" },
+    }),
   );
   write(join(root, "netlify", "lib", "identity.mjs"), "export const legacy = true;\n");
   write(join(hosted, "test", "fixtures.mjs"), "export const FIXTURE = 1;\n");
@@ -488,4 +509,204 @@ test("a missing --root is a failure, not an empty successful scan", () => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /does not exist/);
+});
+
+test("a dependency cannot launder a require to a handler nothing calls", () => {
+  /* Rule 7, and the exact tree that passed every rule before it: no hosted file
+     spells `createRequire` or `getBuiltinModule`, the require is built inside a
+     handler this gate never invokes, and the package is properly declared - so
+     the lexical rules saw nothing and the resolution rules judged only
+     first-party parents. What the dependency cannot hide is its own top-level
+     import of `node:module`, which happens the moment the hosted module links
+     against it, and that edge is now judged like any other. */
+  assertRejected(
+    (root, hosted) => {
+      write(join(root, "netlify", "lib", "legacy.cjs"), "module.exports = { legacy: true };\n");
+      installPackage(
+        join(hosted, "node_modules"),
+        "loader-pkg",
+        'import { createRequire } from "node:module";\nexport const makeLoader = createRequire;\n',
+      );
+      write(
+        join(hosted, "package.json"),
+        JSON.stringify({
+          name: "hosted",
+          private: true,
+          type: "module",
+          engines: FIXTURE_ENGINES,
+          dependencies: { "allowed-pkg": "1.0.0", "loader-pkg": "1.0.0" },
+        }),
+      );
+      write(
+        join(hosted, "lib", "launder.mjs"),
+        'import { makeLoader as build } from "loader-pkg";\n' +
+          "export async function onRequest() {\n" +
+          "  return build(import.meta.url)(\"../../netlify/lib/legacy.cjs\");\n" +
+          "}\n",
+      );
+    },
+    /loader-pkg\/index\.mjs, loaded by the hosted tree, imports node:module, which hands out a CommonJS require/,
+  );
+});
+
+test("a dependency that fetches node:module off the global is caught by capability, not by text", () => {
+  /* `process.getBuiltinModule` consults no resolver, so rule 7's first half
+     cannot see it and the dependency's source is not something this gate reads.
+     The call itself is the only observer, so the function is wrapped while the
+     tree loads. The name is assembled at runtime here on purpose: any check
+     that read the package's text would miss this, and the point of the door is
+     that it does not read text. */
+  assertRejected(
+    (root, hosted) => {
+      installPackage(
+        join(hosted, "node_modules"),
+        "sneaky-pkg",
+        'const name = "mod" + "ule";\nexport const mod = process.getBuiltinModule(name);\n',
+      );
+      write(
+        join(hosted, "package.json"),
+        JSON.stringify({
+          name: "hosted",
+          private: true,
+          type: "module",
+          engines: FIXTURE_ENGINES,
+          dependencies: { "allowed-pkg": "1.0.0", "sneaky-pkg": "1.0.0" },
+        }),
+      );
+      write(join(hosted, "lib", "uses.mjs"), 'import { mod } from "sneaky-pkg";\nexport const held = mod;\n');
+    },
+    /called process\.getBuiltinModule\("module"\), which hands out a CommonJS require/,
+  );
+});
+
+test("a dependency cannot resolve out of the hosted tree either", () => {
+  assertRejected(
+    (root, hosted) => {
+      installPackage(
+        join(hosted, "node_modules"),
+        "climber-pkg",
+        'export { legacy } from "../../../netlify/lib/identity.mjs";\n',
+      );
+      write(
+        join(hosted, "package.json"),
+        JSON.stringify({
+          name: "hosted",
+          private: true,
+          type: "module",
+          engines: FIXTURE_ENGINES,
+          dependencies: { "allowed-pkg": "1.0.0", "climber-pkg": "1.0.0" },
+        }),
+      );
+      write(join(hosted, "lib", "climbs.mjs"), 'import { legacy } from "climber-pkg";\nexport const held = legacy;\n');
+    },
+    /climber-pkg\/index\.mjs, loaded by the hosted tree, imports \.\.\/\.\.\/\.\.\/netlify\/lib\/identity\.mjs, which resolves outside hosted\//,
+  );
+});
+
+test("an identifier spelled in escapes is the same identifier", () => {
+  /* `createRequire` and `process.getBuiltinModule` are what the
+     parser reads as the two banned names, and were different text to a raw
+     scan - the whole bypass costs one backslash. Both spellings are written
+     here as escapes on purpose; the assertion is that the gate reports the
+     decoded name. */
+  for (const [name, source] of [
+    [
+      "createRequire",
+      "export async function onRequest(here, mod) {\n" +
+        '  const { create\\u0052equire: build } = mod;\n' +
+        '  return build(here)("../../netlify/lib/legacy.cjs");\n' +
+        "}\n",
+    ],
+    [
+      "getBuiltinModule",
+      "export async function onRequest(here) {\n" +
+        '  const m = process.getBuiltin\\u004dodule("node:module");\n' +
+        '  return m.mk(here)("../../netlify/lib/legacy.cjs");\n' +
+        "}\n",
+    ],
+  ]) {
+    assertRejected(
+      (root, hosted) => write(join(hosted, "lib", "escaped.mjs"), source),
+      new RegExp(`escaped\\.mjs names ${name}; the hosted deploy tree may not acquire a CommonJS require`),
+    );
+  }
+});
+
+test("a relative --root is judged, not silently skipped", () => {
+  /* Every scanned path is derived from `--root` while the resolution records
+     come back as absolute file URLs, so a relative root made no scanned module
+     match its own record: each boundary rule judged an empty set and the gate
+     printed PASS over a tree it had already read the escape out of. */
+  const root = cleanTree();
+  write(
+    join(root, HOSTED_DIR, "lib", "leak.mjs"),
+    'import { legacy } from "../../netlify/lib/identity.mjs";\nexport const leak = legacy;\n',
+  );
+  const result = spawnSync(process.execPath, [GATE, "--root", "."], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1, `expected the gate to fail; it printed:\n${result.stdout}${result.stderr}`);
+  assert.match(result.stderr, /resolves outside hosted\//);
+});
+
+test("the hosted manifest may not permit a Node the gate cannot run on", () => {
+  /* The mechanism the whole gate rests on - synchronous resolution hooks -
+     arrived in Node 22.15.0. A manifest that permits an older runtime is a
+     claim the deploy does not keep, and the symptom on such a Node would be
+     this gate crashing rather than a readable answer. */
+  assertRejected(
+    (root, hosted) =>
+      write(
+        join(hosted, "package.json"),
+        JSON.stringify({
+          name: "hosted",
+          private: true,
+          type: "module",
+          engines: { node: ">=22.12.0" },
+          dependencies: { "allowed-pkg": "1.0.0" },
+        }),
+      ),
+    /permits Node 22\.12\.0, below the 22\.15\.0 that provides module\.registerHooks/,
+  );
+  assertRejected(
+    (root, hosted) =>
+      write(
+        join(hosted, "package.json"),
+        JSON.stringify({
+          name: "hosted",
+          private: true,
+          type: "module",
+          engines: { node: "^22" },
+          dependencies: { "allowed-pkg": "1.0.0" },
+        }),
+      ),
+    /declares engines\.node "\^22"; it must be a `>=` floor/,
+  );
+});
+
+test("the real hosted manifest, lockfile and deploy runtime agree on that floor", () => {
+  /* The checks above are planted trees; this one is the shipping tree. All
+     three places that name a runtime have to admit only Nodes that carry the
+     mechanism, or a green gate here says nothing about the runtime the deploy
+     actually gets. */
+  const repo = dirname(HERE);
+  const manifest = JSON.parse(readFileSync(join(repo, "hosted", "package.json"), "utf8"));
+  assert.match(manifest.engines.node, /^>=22\.15\.0$/);
+
+  const lock = JSON.parse(readFileSync(join(repo, "hosted", "package-lock.json"), "utf8"));
+  assert.deepEqual(lock.packages[""].engines, manifest.engines);
+
+  const toml = readFileSync(join(repo, "hosted", "netlify.toml"), "utf8");
+  const declared = /^\s*NODE_VERSION\s*=\s*"([^"]+)"/m.exec(toml);
+  assert.notEqual(declared, null, "hosted/netlify.toml declares no NODE_VERSION");
+  const [major, minor] = declared[1].split(".");
+  assert.ok(Number(major) > 22 || (Number(major) === 22 && (minor === undefined || Number(minor) >= 15)),
+    `hosted/netlify.toml pins NODE_VERSION ${declared[1]}, which can resolve below 22.15.0`);
+
+  /* And the interpreter running this suite satisfies the same floor, so a
+     passing run is evidence about a supported runtime rather than about
+     whatever happened to be installed. */
+  assert.equal(typeof registerHooks, "function");
+  assert.ok(Number(process.versions.node.split(".")[0]) >= 22);
 });

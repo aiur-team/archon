@@ -2,7 +2,7 @@
   "name": "archon-hosted",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.12.0" },
+  "engines": { "node": ">=22.15.0" },
   "dependencies": {
     "@netlify/blobs": "11.0.2",
     "tldts": "7.4.12"
