@@ -95,11 +95,15 @@ async function readBoundedBody(request) {
 
   const chunks = [];
   let total = 0;
+  let arrived = false;
   const reader = stream.getReader();
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        arrived = true;
+        break;
+      }
       if (value === undefined) continue;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
@@ -119,8 +123,16 @@ async function readBoundedBody(request) {
     if (error instanceof HostedContractError) throw error;
     throw fail("invalid_request", "the artifact body could not be read", "body");
   } finally {
-    /* Releasing the lock lets the runtime discard the rest of a body we refused
-       instead of holding a half-consumed stream for the life of the request. */
+    /* A body we refused is cancelled, not merely unlocked. Releasing the lock
+       hands a half-read stream back to a caller that has already decided not to
+       read it, so the rest of the upload stays queued against this invocation;
+       `cancel` propagates the refusal to the underlying source. It does not
+       release the lock - that is a separate step in the streams spec - so both
+       happen, in that order. Cancelling is only worth doing on the refusal path,
+       since a body that arrived in full has nothing left to discard, and a
+       source that rejects the cancellation cannot change the answer already
+       computed. */
+    if (!arrived) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 

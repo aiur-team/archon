@@ -69,6 +69,38 @@ function stateRejection(state) {
 }
 
 /**
+ * How many times the post-commit envelope read is attempted.
+ *
+ * Two, not one, and not a general retry policy: this read happens *after* the
+ * document is durably stored, so a single transient provider fault would
+ * otherwise turn a committed upload into a reported failure. Two, not more,
+ * because the caller's own retry is the real recovery path - it answers 200 with
+ * the same receipt - and a handler that kept trying would only spend the
+ * caller's request budget getting there.
+ */
+const ENVELOPE_READ_ATTEMPTS = 2;
+
+/**
+ * The status envelope for a publication that has just committed.
+ *
+ * Only a storage fault is retried. A contract answer - a receipt that expired
+ * between the write and the read, say - is the record's own verdict and repeats
+ * identically, so retrying one would just read twice to print the same thing.
+ */
+async function envelopeAfterCommit(capability, dependencies) {
+  let lastError = null;
+  for (let attempt = 0; attempt < ENVELOPE_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await statusPublication(capability, dependencies);
+    } catch (error) {
+      if (!(error instanceof HostedContractError) || error.code !== "unavailable") throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/**
  * The route's whole behaviour, with its dependency set resolved lazily.
  *
  * Split out from the default export so a test drives the real handler against an
@@ -117,8 +149,10 @@ export async function handleArtifact(request, resolveDependencies) {
        is only known to the record - so the envelope is re-read rather than
        assembled here from a `result` and a guess. It is one strongly consistent
        read of a record that has just committed, and it keeps this route from
-       owning a second opinion about what a complete publication looks like. */
-    const envelope = await statusPublication({ publicationId, agentSecret }, dependencies);
+       owning a second opinion about what a complete publication looks like. The
+       document exists by this point, so the read is the one place in the handler
+       that retries: see `envelopeAfterCommit`. */
+    const envelope = await envelopeAfterCommit({ publicationId, agentSecret }, dependencies);
     return jsonResponse(created ? 201 : 200, envelope);
   } catch (error) {
     return errorResponse(error);

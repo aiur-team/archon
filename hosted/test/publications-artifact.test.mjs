@@ -309,15 +309,20 @@ test("a body arriving in several chunks is reassembled exactly", async () => {
 /* ------------------------------------------------------------------ */
 
 test("an identical retry is 200 with the same receipt, and writes nothing", async () => {
-  const { resolve, stored } = harness({ seed: "approved" });
+  const { resolve, stored, writes } = harness({ seed: "approved" });
   const first = await handleArtifact(upload(FIXTURE_HTML), resolve);
   const committed = stored();
   assert.equal(first.status, 201);
+  assert.equal(writes().length, 1, "the first upload is the only write");
 
   const second = await handleArtifact(upload(FIXTURE_HTML), resolve);
   assert.equal(second.status, 200);
   assert.deepEqual(await read(second), await read(first));
   assert.deepEqual(stored(), committed, "a retry never rewrites the record");
+  /* The record comparison alone would still pass against a route that rewrote
+     the same bytes under a fresh ETag, which is exactly the compare-and-set a
+     retry must not spend. */
+  assert.equal(writes().length, 1, "a retry issues no conditional write at all");
 });
 
 test("a retry carrying different bytes is refused, and the document is untouched", async () => {
@@ -350,6 +355,43 @@ test("a write the provider committed without proving it is 200, never a second 2
   assert.equal(response.status, 200, "an unproven write must not claim to have created");
   assert.deepEqual((await read(response)).result, FIXTURE_RESULT);
   assert.equal(stored().html, FIXTURE_HTML);
+});
+
+/**
+ * The read that builds the response envelope happens *after* the document is
+ * stored, so a fault there is not a failed upload - the bytes are committed and
+ * owned. These two tests pin the handler's answer on either side of that line.
+ */
+test("a transient fault reading the receipt does not lose a committed 201", async () => {
+  const { resolve, provider, stored, writes } = harness({ seed: "approved" });
+  /* Reads: the preflight, `completePublication`'s own read, then the envelope. */
+  provider.failNextRead({ skip: 2, throws: true });
+
+  const response = await handleArtifact(upload(FIXTURE_HTML), resolve);
+  assert.equal(response.status, 201, "the creation is still the caller's creation");
+  const body = await read(response);
+  assert.deepEqual(body.result, FIXTURE_RESULT);
+  assert.equal(body.expiresAt, stored().receiptExpiresAt);
+  assert.equal(writes().length, 1, "the retry re-reads; it never re-writes");
+  provider.assertFaultsConsumed();
+});
+
+test("a receipt that stays unreadable is a retryable error over a document that exists", async () => {
+  const { resolve, provider, stored } = harness({ seed: "approved" });
+  provider.failNextRead({ skip: 2, throws: true });
+  provider.failNextRead({ throws: true });
+
+  const body = await assertError(await handleArtifact(upload(FIXTURE_HTML), resolve), 503, "unavailable");
+  assert.equal(body.error.retryable, true, "the caller's retry is the recovery path");
+  /* The document is durably stored regardless, which is what makes that retry
+     answer 200 with the same receipt rather than starting anything over. */
+  assert.equal(stored().state, "complete");
+  assert.equal(stored().html, FIXTURE_HTML);
+  provider.assertFaultsConsumed();
+
+  const recovered = await handleArtifact(upload(FIXTURE_HTML), resolve);
+  assert.equal(recovered.status, 200);
+  assert.deepEqual((await read(recovered)).result, FIXTURE_RESULT);
 });
 
 /* ------------------------------------------------------------------ */
@@ -535,4 +577,70 @@ test("readArtifactBody stops at the ceiling instead of draining an endless body"
     delivered <= ceilingChunks + 2,
     `read ${delivered} chunks for a ${ceilingChunks}-chunk ceiling`,
   );
+});
+
+test("readArtifactBody cancels a body it refuses rather than only unlocking it", async () => {
+  const chunk = new TextEncoder().encode("p".repeat(256 * 1024));
+  let cancelled = null;
+  const stub = {
+    headers: new Headers({ "content-type": MEDIA_TYPE }),
+    body: new ReadableStream({
+      pull(controller) {
+        controller.enqueue(chunk);
+      },
+      cancel(reason) {
+        cancelled = reason ?? "cancelled";
+      },
+    }),
+  };
+
+  await assert.rejects(readArtifactBody(stub), (error) => {
+    assert.equal(error.code, "artifact_too_large");
+    return true;
+  });
+  /* Releasing the lock would leave `cancelled` null and the source still
+     enqueueing against this invocation, which is the resource leak the refusal
+     is supposed to end. */
+  assert.notEqual(cancelled, null, "a refused body must be cancelled, not merely released");
+  assert.equal(stub.body.locked, false, "and the lock is released as well");
+});
+
+test("a body accepted in full is not cancelled", async () => {
+  let cancelled = false;
+  const stub = {
+    headers: new Headers({ "content-type": MEDIA_TYPE }),
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(FIXTURE_HTML));
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }),
+  };
+
+  const body = await readArtifactBody(stub);
+  assert.equal(body.contentSha256, VALID_DESCRIPTOR.contentSha256);
+  assert.equal(cancelled, false, "a body that arrived in full has nothing to cancel");
+});
+
+test("a content-length that is not a usable number falls through to the streaming bound", async () => {
+  /* A chunked upload has no `Content-Length` at all, and a proxy can leave a
+     malformed one; neither may reject a body the bytes themselves permit, and
+     neither may let an oversize one through. */
+  for (const header of ["", "  ", "not-a-number", "-1", "1.5", "12,13"]) {
+    const { resolve, stored } = harness({ seed: "approved" });
+    const request = upload(FIXTURE_HTML);
+    request.headers.set("content-length", header);
+    const response = await handleArtifact(request, resolve);
+    assert.equal(response.status, 201, `content-length: "${header}" should not decide the answer`);
+    assert.equal(stored().html, FIXTURE_HTML);
+  }
+
+  const { resolve, writes } = harness({ seed: "approved" });
+  const oversize = upload("p".repeat(HOSTED_LIMITS.HTML_MAX_BYTES + 1));
+  oversize.headers.set("content-length", "not-a-number");
+  await assertError(await handleArtifact(oversize, resolve), 413, "artifact_too_large");
+  assert.deepEqual(writes(), [], "an unusable header still leaves the byte bound in charge");
 });

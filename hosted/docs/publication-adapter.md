@@ -50,14 +50,22 @@ A dependency set is:
 | `randomBytes` | `(size) => Uint8Array`, defaulting to `node:crypto` |
 
 `publishEnabled` gating only `createPublication` is a decision, not an omission.
-Turning publishing off stops new publications from starting; it does not revoke
-authorisation users already hold, so for up to
-`PENDING_TTL_SECONDS + UPLOAD_TTL_SECONDS` (25 minutes) an already-started
-publication can still be approved and can still commit its bytes. The
-alternative — a human's approval becoming a 503 after they gave it, and documents
-stranded mid-upload — is worse. An operator who needs the harder stop takes the
-deployment down. `statusPublication` skips the flag for a different reason: a
-receipt for an already-published document must survive the switch.
+No adapter operation other than `createPublication` reads the flag, so an
+already-started publication can still be approved, cancelled and polled after
+publishing is switched off, and a receipt for an already-published document
+survives the switch. There is deliberately no second flag check inside
+`completePublication`: the compare-and-set is about state, ownership, digest and
+deadline, and an operator switch is none of those.
+
+The artifact route is where the flag's stop is actually enforced for an upload.
+`PUT .../artifact` refuses a *new* completion with `publishing_disabled` while
+the flag is off, and still serves receipt recovery for a publication that has
+already completed — the C3 upload contract this deployment publishes. That gate
+lives in the handler rather than the adapter precisely so it stays an operator
+policy about accepting new bytes, not a new terminal state the record has to
+model. An operator who needs the harder stop still takes the deployment down;
+the difference the flag makes is that an approval granted before the switch does
+not become a stored document after it.
 
 `publicationDependencies({ env, getStore, mode })` builds the first four from
 `readHostedConfig`. It does not open the store — `createPublicationStore` opens
