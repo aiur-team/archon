@@ -878,10 +878,12 @@ async function runMatrix(chromium) {
        Dropping the remembered id before the request - which is where it used to
        happen - stranded that operation behind a "no pending publication" no
        reload could clear, with the visitor already signed in and the server
-       still holding their binding. */
-    /* Away first: navigating from `/publish/authorize` to the same path with a
-       fragment is a same-document navigation, so the bootstrap would never run
-       a second time and the case would assert against the first load. */
+       still holding their binding.
+
+       Away from the page first: navigating from `/publish/authorize` to the
+       same path with a fragment is a same-document navigation, so the bootstrap
+       would never run a second time and this would assert against the first
+       load. */
     await page.goto(`${app.origin}/login/`);
     await open(page, link(app, null, "not-the-browser-secret-but-long-enough-to-be-well-formed"));
     check(
@@ -892,7 +894,15 @@ async function runMatrix(chromium) {
 
     /* Back to the page with no fragment, which is all the visitor has left. */
     await open(page, `${app.origin}/publish/authorize`);
-    await page.waitForSelector("#review:not([hidden])");
+    /* Named, and returned on, rather than left to a selector wait: a throw here
+       escapes `runMatrix` and takes every failure it had already collected with
+       it, so the run would report a timeout instead of what went wrong. */
+    if (!(await page.isVisible("#review"))) {
+      check(false,
+        "a refused bind must not strand the operation the browser is still bound to " +
+          `(saw ${JSON.stringify(await statusOf(page))})`);
+      return;
+    }
     eq(await page.textContent("#user-code"), RECORDS.pending.userCode,
       "the operation the refused link never touched must still be the bound one");
 
