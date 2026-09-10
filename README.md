@@ -18,7 +18,8 @@ near-real-time presence.
 3. Commit and push to the repository that holds your documents.
 4. Create a Netlify site from that repository. `netlify.toml` already sets the build command to
    `templates/build --site` and publishes `_site`.
-5. Set the site environment variables below, scoped to Functions rather than Builds.
+5. Set the site environment variables below. They are site-wide: Netlify's free plan cannot scope a
+   variable to Functions only, so mark the secret ones **secret** instead.
 6. Deploy. The build walks the repository for every directory containing a `doc.json` and writes `_site`
    from scratch, so each such directory becomes a route: `/<slug>/`, its `aliases`, and `/d/<id>` as a
    permanent link that survives a slug change.
@@ -37,7 +38,8 @@ exhaustive component reference, built by this template so it cannot drift from t
 | `AUTH0_CLIENT_ID` | The Auth0 application's client ID. |
 | `AUTH0_CLIENT_SECRET` | The Auth0 application's client secret. Never logged and never sent to a caller. |
 | `DOC_OWNERS` | Comma-separated document-owner seeds in `<document>:<email>` form. |
-| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | Off unless set to exactly `true`. Lets a document list a public mailbox provider — `gmail.com` and eleven others — on its domain list. Listing one admits everyone on earth who can sign up for an address, so it is refused by default and the override is site-wide. Any value other than `true` or `false` refuses the whole deployment rather than being read as "on". |
+| `HOSTED_PUBLISH_ENABLED` | The publishing tap. Spelled exactly `true` or `false`; anything else is a configuration error, and unset means disabled. A deployment that ships with it unset refuses to start a publication or commit uploaded bytes. |
+| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | Optional. Whether a document owner may list a public mailbox provider — `gmail.com`, `outlook.com` and the rest of the frozen list — as a domain that may read their document. Spelled exactly `true` or `false`; unset means refused. Enforced when an owner writes a list, not when a reader is admitted by one. Applies to hosted documents and collaboration documents alike. |
 | `ABLY_API_KEY` | Optional Ably API key for realtime presence and events. |
 | `SLACK_WEBHOOK_URL` | Optional Slack webhook for notifications. |
 | `DOCS_REPO` | Source repository in `<owner>/<repository>` form for repository-backed edits. |
@@ -142,3 +144,54 @@ under `netlify/` may resolve outside `netlify/`.** `netlify/lib/anchor-core.mjs`
 `templates/docbuild/src/anchor-core.ts` or `templates/docbuild/src/inline_md.ts`, run
 `npm --prefix templates/docbuild run build && node scripts/vendor-netlify-lib.mjs --write` and commit the
 result with the source.
+
+## Hosting
+
+One repository, **one Netlify site**, two hostnames, one Auth0 application. There is no second site to
+create: the renderer is the same site answering on its own `*.netlify.app` name, and the host-aware edge
+gate in `netlify/edge-functions/gate.ts` is the only authority on which host a request arrived on and which
+headers it gets. Every value below is a placeholder under a reserved documentation domain;
+[`netlify/.env.example`](netlify/.env.example) is the copyable template and
+[`hosted/OPERATIONS.md`](hosted/OPERATIONS.md) is the full runbook.
+
+1. **Reuse the existing Netlify site** rather than creating one. Point it at this repository and let it read
+   the repository build settings: build command `templates/build --site`, publish directory `_site`, base
+   directory empty.
+2. **Confirm the site's `<name>.netlify.app` hostname answers `200` with no redirect.** Netlify does not
+   redirect it to the primary custom domain, and that non-redirect is the renderer hostname's whole basis.
+   If it redirects — because someone added a rule — stop: the renderer hostname is not available and the
+   topology needs an operator decision. Never add such a redirect afterwards.
+3. **Bind your custom domain as the site's primary domain**, leaving the `*.netlify.app` name serving. The
+   two are different registrable sites, which is what satisfies the cookie-separation rule the configuration
+   reader enforces.
+4. **Create the Auth0 application as a Regular Web App.**
+5. **Enable the Google and GitHub connections on it, using your own provider applications.** Auth0's
+   developer keys are not for production. Give the GitHub application the **`user:email`** scope: without it
+   a GitHub sign-in can carry no email at all, and a document gated by email domain then refuses everyone
+   who signed in with GitHub, with no error an operator can see.
+6. **Disable every other connection on the application**, including the default
+   `Username-Password-Authentication` database. Archon never sees a password and has no form to type one in.
+7. **Register the callback and logout URLs**, both exact and both on the application hostname — no wildcard,
+   no second entry: Allowed Callback URL `https://app.example.com/api/hosted/auth/callback`, Allowed Logout
+   URL `https://app.example.com/` (the trailing slash is part of it; `/v2/logout` refuses a `returnTo` that
+   is not an exact match).
+8. **Set the environment variables** in the site environment, marking the secret ones secret:
+
+   | Key | Secret | Value |
+   |---|---|---|
+   | `HOSTED_APP_ORIGIN` | no | `https://app.example.com` — the primary custom domain |
+   | `HOSTED_RENDER_ORIGIN` | no | `https://render.example.net` — in a real setup, the site's own `*.netlify.app` name |
+   | `AUTH0_DOMAIN` | no | The tenant host, bare |
+   | `AUTH0_CLIENT_ID` | no | The application's client id |
+   | `AUTH0_CLIENT_SECRET` | **yes** | The application's client secret |
+   | `ABLY_API_KEY` | **yes** | Optional; presence and realtime events |
+   | `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`; unset means disabled |
+   | `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | no | Optional; exactly `true` or `false`; unset means refused |
+
+   The free plan has no per-scope environment variables, so every value here is site-wide and the client
+   secret is readable by the build step. The mitigation is that no build-time code reads it: only the
+   deployed functions call `config.auth0.readClientSecret()`.
+9. **Deploy.** Changing a variable does not change an already-deployed function — Netlify captures the
+   environment when a deploy is built — so every change to this list ends with a deploy.
+10. **Run the live acceptance:**
+    [`docs/builds/agent-hosted-upload/live-acceptance.md`](docs/builds/agent-hosted-upload/live-acceptance.md).

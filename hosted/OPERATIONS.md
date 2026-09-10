@@ -1,61 +1,87 @@
 # Hosted publishing: operator runbook
 
-This is the runbook for the **hosted** publishing service: the `hosted/`
-application and the `renderer/` static origin. It covers the settings an operator
-enters, how to stop new publishing safely, how to inspect what is retained, and
-what has to be true before a live pilot can start.
+This is the runbook for the Archon deployment: **one Netlify site**, answering on
+two hostnames. It covers the settings an operator enters, how to stop new
+publishing safely, how to inspect what is retained, and what has to be true
+before a live pilot can start.
 
 Nothing in this document has been performed. No provider account exists, no
-OAuth application is registered, no domain is bought, no secret is installed and
-nothing is deployed. Every value shown is a placeholder. The last section lists
-what an operator must supply and approve before the live acceptance ticket can
-run.
+Auth0 tenant is registered, no domain is bought, no secret is installed and
+nothing is deployed. Every value shown is a placeholder. §8 lists what an
+operator must supply and approve before the live acceptance ticket can run.
 
-The root deployment (`netlify.toml`, `netlify/`, `scripts/connect.mjs`, Netlify
-Identity, `DOC_OWNERS`) is the **self-hosted** product and is untouched by any of
-this. It is a different site with a different security model; do not merge the
-two configurations or copy environment values between them.
+`README.md`'s "Hosting" section is the same setup in ten numbered steps, for a
+first run through. This document is the reference behind it.
 
 ---
 
-## 1. Topology: three deployments
+## 1. Topology: one site, two hostnames
 
-| | Base directory | Build command | Publish | Functions | Origin |
-|---|---|---|---|---|---|
-| Legacy self-hosted site | *(repo root)* | `templates/build --site` | `_site` | `netlify/functions` | operator's existing site |
-| **Hosted application** | `hosted` | *(none)* | `public` | `functions` | `HOSTED_APP_ORIGIN` |
-| **Renderer** | `renderer` | `node scripts/build.mjs` | `dist` | *(none)* | `HOSTED_RENDER_ORIGIN` |
+There is one `netlify.toml` in this repository, one build command and one publish
+directory. The collaboration documents, the hosted publishing application, the
+renderer shell and the served agent files are all produced by that one build.
 
-Create the hosted application and the renderer as **two separate Netlify sites**,
-each with its own base directory set in the site's build settings. The base
-directory is what selects `hosted/netlify.toml` or `renderer/netlify.toml`; a
-site left at the repository root reads the *legacy* configuration and would
-deploy the legacy edge gate.
+| | Value |
+|---|---|
+| Base directory | *(repository root)* |
+| Build command | `templates/build --site` |
+| Publish directory | `_site` |
+| Functions | `netlify/functions` |
+| Edge function | `gate`, on `/*`, with no excluded path |
 
-The application deploys with **no build command**. `public/` is served as
-committed and the functions bundle from `hosted/package-lock.json`, so a deploy
-never compiles the docbuild TypeScript. The renderer runs one Node script with no
-dependencies, which generates its own security headers — including the
-`frame-ancestors` rule that names the application origin — into the published
-tree. Neither `netlify.toml` declares those headers, because only the build knows
-the configured origin.
+The site answers on **two hostnames**:
 
-### The two origins must be two registrable sites
+| Hostname | Configured as | What it serves |
+|---|---|---|
+| The primary custom domain | `HOSTED_APP_ORIGIN` | The application: sign-in, the session, `/docs/<id>`, every `/api/` route |
+| The site's own `<name>.netlify.app` name | `HOSTED_RENDER_ORIGIN` | The renderer shell under `/_render/`, cookie-free |
+
+**Do not create a second Netlify site.** The renderer used to be one; it is not
+one now, and a second site would be a second header authority the gate cannot
+see, a second build the inventory contract does not describe, and a second origin
+to keep in step by hand.
+
+### The gate is the header authority
+
+Only the edge function can tell which of the two hostnames a request arrived on,
+so it is the only place a security header may be decided. `netlify.toml` declares
+no `X-Frame-Options`, no `Content-Security-Policy` and no `Referrer-Policy`, and
+the renderer build writes no `_headers` file beside the shell it publishes.
+Netlify emits every matching rule, and a browser handed two
+`Content-Security-Policy` headers enforces their intersection — so two
+authorities could only make a page more dead, never more permissive, in a way
+that looks like the stricter one working.
+
+The gate classifies by host, and a host it does not recognise gets neither
+application nor renderer treatment. The `frame-ancestors` rule that names the
+application origin is emitted there, from `HOSTED_APP_ORIGIN`, and never from a
+request `Host` header.
+
+### The two origins must still be two registrable sites
 
 `app.example.com` and `render.example.com` are **not** acceptable: sibling
 subdomains share cookies and count as one site for `SameSite` purposes, and a
-cookie-free renderer is the property the whole design rests on. Use two different
-registrable sites — for example `app.example.com` and `render.example.net`.
+cookie-free renderer is the property the whole design rests on. That rule is
+unchanged, and one site satisfies it because a `*.netlify.app` name is a
+different registrable site from a custom domain — `netlify.app` is on the public
+suffix list, so two `*.netlify.app` names are two sites, which a "compare the
+last two labels" check would get exactly backwards.
 
-This is enforced in code. `hosted/lib/config.mjs` resolves both origins through
-the public-suffix list (pinned `tldts`, private suffixes enabled) and refuses to
-start the application when they resolve to the same site. Platform subdomains are
-handled correctly by that rule: `a.pages.dev` and `b.pages.dev` are two sites,
-not one, which a "compare the last two labels" check would get exactly backwards.
+This is enforced in code. `netlify/lib/hosted/config.mjs` resolves both origins
+through the public-suffix list (pinned `tldts`, private suffixes enabled) and
+refuses to start the application when they resolve to the same site.
 
 Production also requires `https://` on both origins, with no path, no trailing
 slash, no credentials in the URL and no wildcard. There is no wildcard callback
 and no cross-origin CORS grant anywhere in this service.
+
+### The `*.netlify.app` hostname must keep answering directly
+
+Netlify does **not** redirect `<name>.netlify.app` to the primary custom domain.
+That non-redirect is the renderer hostname's whole basis. Before configuring
+anything else, confirm the name answers `200` on its own; if it redirects, the
+renderer hostname is not available and the topology needs an operator decision.
+Adding such a redirect later breaks the renderer.
 
 ### Staging is a separate project, not a branch
 
@@ -65,38 +91,55 @@ production, branch deploys, deploy previews — reads and writes the same
 therefore share production's publication records and could complete or cancel
 them.
 
-Create staging as a **separate Netlify site** (a separate project) with its own
-origins, its own OAuth application and its own credentials. In addition:
+Staging, if you run one, is a **separate Netlify project**: its own copy of this
+same one-site topology, with its own two hostnames, its own Auth0 application and
+its own credentials. It is not a second site *within* the production topology,
+which stays exactly one. In addition:
 
 - Do not give a **deploy-preview** context production secrets. A preview that
-  carries `GITHUB_CLIENT_SECRET` is an alternate login origin for the production
-  OAuth application, reachable from any pull request.
-- Scope every secret to the production context of the site it belongs to.
+  carries `AUTH0_CLIENT_SECRET` is an alternate login origin for the production
+  Auth0 application, reachable from any pull request.
+- Scope every secret to the production context of the project it belongs to.
 
 ---
 
 ## 2. Environment variables
 
-`hosted/.env.example` is the redacted template. The keys below are read by
-`netlify/lib/hosted/config.mjs` and by nothing else. Set them in the Netlify
-**site environment** (Site configuration → Environment variables), never in
-`netlify.toml` and never in the repository: a value in `netlify.toml` is
-build-scoped rather than available to a function at runtime, and a value in git
-is a value in git.
+`netlify/.env.example`, beside the reader that consumes it, is the redacted
+template. The keys below are read by `netlify/lib/hosted/config.mjs` and by
+nothing else; the collaboration layer's own keys — `ABLY_API_KEY`, `DOC_OWNERS`,
+`SLACK_WEBHOOK_URL` and the four `DOCS_*` names — are in
+the "Configuration" table of the repository `README.md`.
 
-| Key | Site | Secret | Notes |
-|---|---|---|---|
-| `HOSTED_APP_ORIGIN` | application, renderer | no | Exact origin, `https://` in production. |
-| `HOSTED_RENDER_ORIGIN` | application, renderer | no | Different registrable site from the app. |
-| `GITHUB_CLIENT_ID` | application | no | Public; appears in the authorization URL. |
-| `GITHUB_CLIENT_SECRET` | application | **yes** | Production context only. Never on the renderer. |
-| `HOSTED_PUBLISH_ENABLED` | application | no | Exactly `true` or `false`. Unset means disabled. |
-| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | application | no | Exactly `true` or `false`. Unset means refused. See §9. |
+Set them in the Netlify **site environment** (Site configuration → Environment
+variables), never in `netlify.toml` and never in the repository: a value in
+`netlify.toml` is build-scoped rather than available to a function at runtime,
+and a value in git is a value in git.
 
-The renderer reads only the two origins and holds no secret at all.
+| Key | Secret | Notes |
+|---|---|---|
+| `HOSTED_APP_ORIGIN` | no | Exact origin, `https://` in production. The primary custom domain. |
+| `HOSTED_RENDER_ORIGIN` | no | Exact origin. The site's `*.netlify.app` name; a different registrable site from the app. |
+| `AUTH0_DOMAIN` | no | The tenant host, bare: no scheme, port, path or trailing slash. |
+| `AUTH0_CLIENT_ID` | no | Public; it appears in the authorization URL. |
+| `AUTH0_CLIENT_SECRET` | **yes** | Production context only. Mark it secret in the Netlify UI. |
+| `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`. Unset means disabled. |
+| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | no | Exactly `true` or `false`. Unset means refused. See §9. |
+
+One site means one set of values, read the same way on both hostnames. There is
+no per-hostname environment and nothing to keep in step.
+
 `HOSTED_PUBLISH_ENABLED` and `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` are both spelled
 strictly: `1`, `yes` and `TRUE` are configuration *errors*, not falsy defaults,
 so a typo fails loudly instead of silently changing what the deployment does.
+
+**Every value here is site-wide.** Netlify's free plan has no per-scope
+environment variables, so `AUTH0_CLIENT_SECRET` is readable by the build step as
+well as by functions. Marking it secret stops it being read back out of the UI,
+the API and the deploy log; the reason that is enough is that **no build-time
+code reads it** — `templates/build --site` never imports
+`netlify/lib/hosted/config.mjs`, and the secret is reachable only through
+`config.auth0.readClientSecret()` in a deployed function.
 
 **Changing an environment variable does not change a running function.**
 Netlify captures the environment when a deploy is built; already-deployed
@@ -107,33 +150,56 @@ stop, see §4.
 
 ---
 
-## 3. GitHub OAuth registration
+## 3. Auth0 application registration
 
-Register a **dedicated** OAuth application. Do not reuse an existing one, and do
-not use a GitHub App: this service wants identity and nothing else.
+Sign-in is brokered by Auth0. Archon never sees a password, never stores a
+provider token and never acts on a user's behalf; it reads an identity and stops.
 
-- **Scopes: none.** Request the empty scope. Do not request `user:email`, `repo`,
-  `read:org` or any installation permission. The service fetches `/user`,
-  reads the numeric account id, and then discards the GitHub access and refresh
-  tokens; it never stores a GitHub token and never acts on a user's behalf.
-  Unexpected granted scopes are rejected at callback.
-- **Authorization callback URL: exactly one, exact.**
-  `https://<HOSTED_APP_ORIGIN host>/api/hosted/auth/github/callback` — for the
-  placeholder origin, `https://app.example.com/api/hosted/auth/github/callback`.
-  No wildcard, no second entry, no `http://`, no trailing path variation.
-- **Homepage URL:** the application origin.
-- Register a **separate** OAuth application for staging, with staging's callback.
-  Sharing one application between staging and production makes staging a valid
-  login origin for production accounts.
-- The numeric GitHub user id is the ownership key. A user who renames their
-  GitHub account keeps their documents; a user who deletes their account and
-  another who later claims the freed username do **not** inherit them.
+Register **one Regular Web App** per environment. Do not reuse an application
+between staging and production: sharing one makes staging a valid login origin
+for production accounts.
 
-Install `GITHUB_CLIENT_SECRET` through the Netlify UI or `netlify env:set` (the
+- **Connections: Google and GitHub, using your own provider applications.**
+  Auth0's developer keys are explicitly not for production, so they are not an
+  option to configure. Create a Google OAuth client and a GitHub OAuth
+  application of your own and give Auth0 their credentials.
+- **The GitHub application needs the `user:email` scope.** Without it the
+  identity Auth0 returns can carry no `email` claim at all — GitHub does not
+  publish a private address otherwise. A document gated by verified email domain
+  then refuses everyone who signed in with GitHub, silently, with no error an
+  operator can see and nothing in a log that names the cause.
+- **Disable every other connection**, including the default
+  `Username-Password-Authentication` database. A connection left enabled is a
+  sign-in path nobody designed for, and there is no password form in this
+  product.
+- **Allowed Callback URLs: exactly one, exact.**
+  `<HOSTED_APP_ORIGIN>/api/hosted/auth/callback` — for the placeholder origin,
+  `https://app.example.com/api/hosted/auth/callback`. No wildcard, no second
+  entry, no `http://`, no trailing path variation. The value is derived in code
+  from the configured origin, never from a request `Host` header, so a marketing
+  hostname cannot become a callback.
+- **Allowed Logout URLs: exactly one, exact.** `<HOSTED_APP_ORIGIN>/` — for the
+  placeholder origin, `https://app.example.com/`. The trailing slash is part of
+  it: `/v2/logout` compares `returnTo` against the allow-list exactly, and a
+  value that differs by one character is a logout that ends on an Auth0 error
+  page. The `returnTo` this application sends is built from configuration and
+  never from the request.
+- **Requested scopes: `openid profile email`, and no more.** In particular no
+  `offline_access`: the application keeps its own server-side session, so a
+  refresh token would be a stored credential with no caller and every risk.
+- **Application Login URI**, if you set one (it is optional): the application
+  origin's `/login/`, which is the one sign-in page.
+
+The ownership key is the Auth0 subject (`sub`), not an email address. A user who
+changes their address keeps their documents; an address is what an *invitation*
+and a *domain rule* are matched against, and only when the provider has marked it
+verified.
+
+Install `AUTH0_CLIENT_SECRET` through the Netlify UI or `netlify env:set` (the
 Netlify CLI is an operator prerequisite installed separately — neither lockfile
-in this repository provides it), into
-the production context of the application site only. Rotating it is a normal
-operation: set the new value, deploy, then delete the old credential at GitHub.
+in this repository provides it), into the production context of the site only,
+marked secret. Rotating it is a normal operation: set the new value, deploy, then
+rotate the credential at Auth0.
 
 ---
 
@@ -311,8 +377,8 @@ reads them and passes them to `getStore` as `siteID`/`token`, because
 Omitting either fails immediately, naming the one that is missing. Use a
 personal access token scoped to the account that owns the application site.
 
-Run it from the repository root with `hosted/node_modules` installed
-(`npm --prefix hosted ci`); it resolves `@netlify/blobs` from there.
+Run it from the repository root with the root `node_modules` installed
+(`npm ci`); it resolves `@netlify/blobs` from there.
 
 It prints a JSON summary: `total`, `byState`, `byAgeBucket`, `retainedBytes` and
 a `rows` array of `{id, state, artifactBytes, ageSeconds, ageBucket}`.
@@ -379,14 +445,18 @@ of the following. None of it is authorized by this repository.
 
 **Materials**
 
-- Two HTTPS origins on two different registrable sites, and the two Netlify
-  sites configured with `hosted` and `renderer` as their base directories.
-- A separate staging project with its own origins and its own OAuth application.
-- A dedicated GitHub OAuth application per environment, empty scope, one exact
-  callback URL each (§3).
-- `GITHUB_CLIENT_SECRET` installed in the production context of each application
-  site.
-- Two GitHub test accounts, to prove owner and non-owner read isolation.
+- One Netlify site with two hostnames on two different registrable sites: a
+  primary custom domain and the site's own `*.netlify.app` name, confirmed to
+  answer `200` without redirecting (§1).
+- A separate staging project with its own hostnames and its own Auth0
+  application.
+- A dedicated Auth0 Regular Web App per environment, with the Google and GitHub
+  connections enabled against your own provider applications, `user:email` on
+  the GitHub application, every other connection disabled, and one exact
+  callback URL and one exact logout URL each (§3).
+- `AUTH0_CLIENT_SECRET` installed and marked secret in the production context of
+  each project.
+- Two test accounts, to prove owner and non-owner read isolation.
 
 **Approvals**
 
@@ -401,8 +471,9 @@ of the following. None of it is authorized by this repository.
 
 **What the live capstone must record**, since no fixture can stand in for it:
 deploy-log acceptance of *both* rate rules, the publish flag actually taking
-effect on deployed functions, the deployed response headers and routing, the real
-GitHub callback and granted scopes, conditional-write race behaviour against real
+effect on deployed functions, the deployed response headers and routing on
+*each* of the two hostnames, the real Auth0 callback and the email claim each
+connection actually returns, conditional-write race behaviour against real
 Blobs, owner/other-account read isolation, lost-response receipt recovery, and
 staging/production isolation.
 
