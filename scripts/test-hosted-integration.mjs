@@ -2071,7 +2071,45 @@ async function authBinding(world, browser) {
    * `decidePublication` is therefore untestable from outside, and this calls the
    * real producer with the real dependencies and the real record and presents
    * exactly that combination. No owner may be fixed.
+   *
+   * Everything the call is judged against is created here rather than inherited
+   * from a case above: its own publication, its own browser bound to that
+   * publication through the real page bootstrap, and the record's real digest
+   * read back from the real `bindPublication`. A proof whose kill depends on
+   * what an earlier case left behind is not a proof, so the three ways this
+   * could be refused for a reason other than the guard -- a record that is not
+   * pending, a binding malformed in some second way, a digest that happens to
+   * match -- are each asserted away before the call, and the rejection is
+   * matched on the guard's own message rather than on a code that four other
+   * checks in this module also raise.
    */
+  const adapter = await startPublication(world, {
+    title: "Adapter binding check",
+    html: "<!doctype html><title>adapter</title><p>adapter</p>",
+  });
+  const adapterContext = await openContext(world, browser);
+  const adapterPage = await adapterContext.newPage();
+  await adapterPage.goto(adapter.verificationUriComplete);
+  /* The sign-in offer is the page saying its bootstrap bound this operation:
+     the bind call precedes it, and a link that failed to bind is refused
+     instead (2.6). */
+  await adapterPage.locator("#signin").waitFor({ state: "visible", timeout: 30_000 });
+
+  const adapterSecret = new URL(adapter.verificationUriComplete).hash.slice(1).split(".")[1];
+  const realBinding = await world.modules.publicationsModule.bindPublication(
+    { publicationId: adapter.publicationId, browserSecret: adapterSecret },
+    world.publications(),
+  );
+  const wrongDigest = "f".repeat(realBinding.browserSecretHash.length);
+  assert.match(realBinding.browserSecretHash, /^[0-9a-f]{64}$/, "the record's browser digest is not a stored hash");
+  assert.notEqual(realBinding.browserSecretHash, wrongDigest, "the wrong digest is this record's real one");
+  const adapterBefore = await publicationStatus(world, adapter);
+  assert.equal(
+    (await adapterBefore.json()).state,
+    "pending",
+    "this case's own publication was not pending when the call was made",
+  );
+
   const principal = {
     accountId: `gh_${provider.identities.first.id}`,
     provider: "github.com",
@@ -2081,27 +2119,31 @@ async function authBinding(world, browser) {
   await assert.rejects(
     () => world.modules.publicationsModule.decidePublication(
       {
-        publicationId: other.publicationId,
+        publicationId: adapter.publicationId,
         /* This publication's id, under a digest that is not its browser
-           secret's. */
-        browserBinding: { publicationId: other.publicationId, browserSecretHash: "f".repeat(64) },
+           secret's. Everything else about the binding is well formed. */
+        browserBinding: { publicationId: adapter.publicationId, browserSecretHash: wrongDigest },
         principal,
         decision: "approve",
         displayedAccountId: principal.accountId,
       },
       world.publications(),
     ),
-    (error) => error.code === "invalid_capability",
+    (error) =>
+      error.code === "invalid_capability" &&
+      error.message === "browser binding does not match this publication",
     "a decision carrying a binding for another secret was accepted",
   );
-  const otherAfter = await publicationStatus(world, other);
+  const adapterAfter = await publicationStatus(world, adapter);
   assert.equal(
-    (await otherAfter.json()).state,
+    (await adapterAfter.json()).state,
     "pending",
     "a refused binding fixed an owner anyway",
   );
   record("auth: a binding that names this publication under another secret is refused before any owner is fixed");
 
+  await adapterPage.close();
+  await adapterContext.close();
   await otherPage.close();
   await otherContext.close();
   await unboundPage.close();

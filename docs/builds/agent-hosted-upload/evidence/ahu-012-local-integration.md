@@ -209,41 +209,46 @@ Each case ran:
 node scripts/test-hosted-integration.mjs   # from the worktree root
 ```
 
-| # | Guard removed | Result |
+| Guard removed | Where | Result |
 | --- | --- | --- |
-| M1 | the owner equality check in `readOwnedPublication` (`hosted/lib/publications.mjs`) | **fails** — `stranger metadata was answered 200` |
-| M2 | the exact-source check in the renderer's message listener (`renderer/public/renderer.js`, `event.source !== parentWindow`) | **fails** — `the renderer did not record refusing the artifact's forged messages: wrong-origin` |
-| M3 | the descriptor recheck in `completePublication`'s approved branch | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
-| M3b | the descriptor recheck in `completePublication`'s already-complete branch | **fails** — `a completed publication accepted other bytes with status 200` |
-| M4 | the ambiguous-write readback in `createPublicationStore.update` (`return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}`) | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
-| M5 | the browser-secret check in `bindPublication` (`hosted/lib/publications.mjs`) | **fails** — `timed out waiting for the approval page to refuse a mutated link` |
-| M6 | the bound-id check in `requireBrowserBinding` (`hosted/lib/publication-browser-binding.mjs`) | **fails** — `a decision for a publication this browser never bound was answered 401` |
-| M7 | both `consumedAt` guards in `AuthStore` (`readTransient` and `consumeTransient`) | **fails** — `a replay carrying the captured binding cookie was exchanged with the provider a second time` |
-| M8 | the binding digest check in `requireBinding` (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a decision carrying a binding for another secret was accepted` |
-| C0 | nothing; the restored tree | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)` |
+| owner equality | `readOwnedPublication` (`hosted/lib/publications.mjs`) | **fails** — `stranger metadata was answered 200` |
+| renderer exact source | the message listener's `event.source !== parentWindow` (`renderer/public/renderer.js`) | **fails** — `the renderer did not record refusing the artifact's forged messages: wrong-origin` |
+| descriptor recheck, approved | `completePublication`'s approved branch (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a completion whose claimed digest and length disagree with the approved descriptor was accepted` |
+| descriptor recheck, already complete | `completePublication`'s already-complete branch (`hosted/lib/publications.mjs`) | **fails** — `a completed publication accepted other bytes with status 200` |
+| ambiguous-write readback | `createPublicationStore.update` (`hosted/lib/publication-store.mjs`), `return resolveUpdate(validated)` replaced with a blind `{outcome: "refused"}` | **fails** — `the person was told their approval failed on a publication that is in fact theirs (the decision route answered 409: "This publication already has an answer.")` |
+| bind browser-secret check | `bindPublication` (`hosted/lib/publications.mjs`) | **fails** — `timed out waiting for the approval page to refuse a mutated link` |
+| binding bound-id check | `requireBrowserBinding` (`hosted/lib/publication-browser-binding.mjs`) | **fails** — `a decision for a publication this browser never bound was answered 401` |
+| OAuth single-use guards | both `consumedAt` checks in `AuthStore` (`readTransient` and `consumeTransient`) | **fails** — `a replay carrying the captured binding cookie was exchanged with the provider a second time` |
+| binding digest check | `requireBinding` (`hosted/lib/publications.mjs`) | **fails** — `Missing expected rejection: a decision carrying a binding for another secret was accepted`, in five runs of five |
+| nothing — the restored tree | control | **passes** — `PASS  hosted integration matrix (chromium 140.0.7339.16; 102 cases)` |
 
-M1-M4 were measured in the first round, against `848edd9` and its 97 cases;
-M5-M8 and the C0 control were measured against the current head and its 102.
-Each of the four new rows ran in a detached worktree that was clean before the
-mutation and clean again after the restore.
+The first five rows were measured in the first round, against `848edd9` and its
+97 cases; the four binding, OAuth and control rows were measured against the
+current head and its 102. Every row ran in a detached worktree that was clean
+before the mutation and clean again after the restore. Rows are named by the
+guard they remove rather than numbered, because the numbering drifted between
+rounds and a row that cannot be matched to a guard by reading it is not
+evidence.
 
 ### What the first run caught, and what it cost
 
-The first mutation run found a real hole rather than confirming the gate: M1 and
-M2 failed, and **M3 and M4 both left the gate green at 90/90**. Two cases exist
-because of that, and they are the two most interesting in the file.
+The first mutation run found a real hole rather than confirming the gate: owner
+equality and renderer exact source failed, and **the approved-branch descriptor
+recheck and the ambiguous-write readback both left the gate green at 90/90**.
+Two cases exist because of that, and they are the two most interesting in the
+file.
 
-- **M3 was unreachable over HTTP.** `handleArtifact` derives the digest and the
-  length from the bytes it read, so a client cannot present the state machine
+- **The descriptor recheck was unreachable over HTTP.** `handleArtifact` derives
+  the digest and the length from the bytes it read, so a client cannot present the state machine
   with facts that disagree with its own body — the guard inside
   `completePublication` had no wire-level input that could trip it. The case now
   calls the real producer with the real dependencies and the real record and
   presents exactly that combination, and asserts no write reached storage.
-  M3b covers the same guard on the already-complete branch, which *is* reachable
-  over HTTP: a retry carrying other bytes must be refused rather than handed the
+  A sibling case covers the same guard on the already-complete branch, which
+  *is* reachable over HTTP: a retry carrying other bytes must be refused rather than handed the
   receipt the first upload earned.
-- **M4 needed a non-idempotent transition.** A completion is idempotent, so a
-  lost write answer resolves to the same document whether the state machine
+- **The ambiguous-write readback needed a non-idempotent transition.** A
+  completion is idempotent, so a lost write answer resolves to the same document whether the state machine
   reads back or retries — which is why the completion case could not see the
   difference. An approval is not idempotent: a state machine that reads a lost
   answer as a refusal re-reads an already-approved record and reports
@@ -254,29 +259,29 @@ because of that, and they are the two most interesting in the file.
   leaves the same shape on screen with a different sentence.
 
 A third correction came out of the same work: the ambiguous-approval case
-originally asserted the absence of failure words in the status line, and M4
-survived it because "This publication already has an answer." contains none of
-them. Asserting the response rather than the prose is what made it a proof.
+originally asserted the absence of failure words in the status line, and the
+blind-refusal mutation survived it because "This publication already has an
+answer." contains none of them. Asserting the response rather than the prose is what made it a proof.
 
 ### What the second round caught
 
-M5-M8 were added after review found that the browser half of the capability
-chain was not owned: the gate stayed green at 97/97 with `bindPublication`'s
-browser-secret check gone, and again with `requireBinding`'s digest check gone.
+The four binding and OAuth rows were added after review found that the browser
+half of the capability chain was not owned: the gate stayed green at 97/97 with
+`bindPublication`'s browser-secret check gone, and again with `requireBinding`'s digest check gone.
 Both are now killed, and the shape of the fix repeats the first round's lesson.
 
-- **M5 and M6 are ordinary wire cases.** A link whose fragment secret is altered
-  by one character never reaches the review card, and a browser holding a
+- **The bind secret check and the bound-id check are ordinary wire cases.** A
+  link whose fragment secret is altered by one character never reaches the review card, and a browser holding a
   binding for one publication is refused a decision on another. Neither existed
   before: every prior binding case started from a legitimately bound session.
-- **M8 is unreachable over HTTP, for the same structural reason M3 was.** The
-  browser's proof is an opaque `__Host-` cookie whose operation string lives
+- **The binding digest check is unreachable over HTTP, for the same structural
+  reason the descriptor recheck was.** The browser's proof is an opaque `__Host-` cookie whose operation string lives
   server-side, so no client can present the adapter with a binding that names
   this publication under another secret's digest — the route refuses the id
   mismatch first. The case calls the real producer with the real dependencies
   and the real record, and asserts no owner was fixed.
-- **M7 took two attempts, and the first one was the interesting failure.** The
-  OAuth-replay case had been passing for the *fixture's* reason: its codes are
+- **The OAuth single-use guards took two attempts, and the first one was the
+  interesting failure.** The OAuth-replay case had been passing for the *fixture's* reason: its codes are
   single use, so the replay was refused whether or not the application still
   held its own guard. The obvious fix — assert the provider's `tokenCalls` did
   not move — did not close it either, and the mutation run said so: a completed
@@ -288,6 +293,37 @@ Both are now killed, and the shape of the fix repeats the first round's lesson.
   outside the browser. Under the mutated tree the state is redeemed a second
   time and the provider is called again; under the restored tree the handler
   refuses before the exchange.
+
+### What the third round caught
+
+Review reported that the binding-digest row was not a reliable kill: with
+`requireBinding`'s digest check removed the gate failed in three runs of four
+and passed once. Four runs of the reviewed head here all killed it, so the
+mechanism was never observed directly and no explanation is claimed. What was
+true either way is that the case leaned on state it did not create — it decided
+on the publication case 2.8 had started and bound — and a proof whose kill can
+depend on what an earlier case left behind is not a proof.
+
+The case now creates everything it is judged against: its own publication, its
+own browser context bound to that publication through the real page bootstrap,
+and the record's real digest read back from the real `bindPublication`. Each way
+the call could be refused for a reason other than the guard is closed before it
+runs — the record is asserted pending, the presented binding is asserted well
+formed in every other respect, and the wrong digest is asserted to differ from
+the record's real one — and the rejection is matched on the guard's own message
+rather than on a code four other checks in the module also raise. So a pass
+under the mutated tree can no longer come from somewhere else, and a refusal
+from somewhere else fails loudly instead of reading like a kill.
+
+Measured five consecutive times with the digest check removed, in a detached
+worktree clean before the mutation and clean again after the restore:
+
+```sh
+node scripts/test-hosted-integration.mjs   # from the worktree root, five times
+```
+
+All five failed on `Missing expected rejection: a decision carrying a binding
+for another secret was accepted`; the restored tree passes at 102 cases.
 
 ## Reproducing it
 
