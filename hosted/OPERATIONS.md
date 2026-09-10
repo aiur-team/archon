@@ -268,6 +268,13 @@ Understand what these are:
   a counter. The `429` carries `Retry-After` and the client honours it; there is
   no bypass, and adding one is not a supported operation.
 - The five-second client poll interval is pacing, not a security boundary.
+- **The document read routes carry no rule, deliberately.** `/docs/<id>`,
+  `/api/hosted/docs/<id>` and `/api/hosted/docs/<id>/content` refuse every
+  request that does not carry a valid browser session, and refuse it identically
+  whether or not the document exists — so there is no unauthenticated volume to
+  bound and no oracle to grind. The two rules above exist because their routes
+  are reachable without a session. If a pilot shows an authenticated reader
+  driving real cost, that is a quota question (§8), not a rate-limit one.
 
 An invalid rule is **dropped by the platform without failing the deploy**, which
 is the failure mode to watch for: the route would be silently unprotected. Check
