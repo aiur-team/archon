@@ -6,7 +6,8 @@
   "license": "MIT",
   "private": false,
   "bin": {
-    "docbuild": "./dist/cli.js"
+    "docbuild": "./dist/cli.js",
+    "archon-publish": "./dist/publish-cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
