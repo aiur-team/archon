@@ -678,30 +678,56 @@ async function runMatrix(chromium) {
     await signIn(page);
     await page.waitForSelector("#review:not([hidden])");
 
-    /* Safari's cross-site modes, storage-partitioned embeds, private modes and
-       an exhausted quota all make this throw. Reading the id back out of storage
-       as its *only* source turned that into a permanent dead end: the bind had
-       succeeded and the server was holding a real binding, but the page said
-       "no pending publication" and every re-open of the link repeated it. */
-    await context.addInitScript(() => {
-      const refuse = () => {
-        throw new Error("site data is blocked");
-      };
-      Object.defineProperty(window, "sessionStorage", {
-        configurable: true,
-        get: () => ({ getItem: refuse, setItem: refuse, removeItem: refuse }),
-      });
+    /* A second context carrying the same cookies, with the init script in place
+       *before* any page exists. Adding it to a context that already had a page
+       silently did not take, and a case that quietly stops blocking anything is
+       worse than no case at all - the mutation run caught exactly that as a
+       survivor, which is why the probe below now proves the premise. */
+    const carried = await context.storageState();
+    const blocked = await browser.newContext({
+      storageState: { cookies: carried.cookies, origins: [] },
+    });
+    await refuseTheInternet(blocked, app.origin);
+    await blocked.addInitScript(() => {
+      /* Safari's cross-site modes, storage-partitioned embeds, private modes and
+         an exhausted quota all make these throw. Reading the id back out of
+         storage as its *only* source turned that into a permanent dead end: the
+         bind had succeeded and the server was holding a real binding, but the
+         page said "no pending publication" and every re-open repeated it. */
+      for (const method of ["getItem", "setItem", "removeItem", "clear", "key"]) {
+        Storage.prototype[method] = () => {
+          throw new Error("site data is blocked");
+        };
+      }
     });
 
-    /* The same link again, on a load that can persist nothing. The fragment is
-       the id's source here, which is the whole point. */
-    await open(page, link(app));
-    await page.waitForSelector("#review:not([hidden])");
-    await page.click("#approve");
-    await page.waitForSelector("#review", { state: "hidden" });
-    await settled(page, "the decision");
-    eq(app.stored().state, "approved",
-      "a signed-in visitor whose browser blocks site data must still be able to approve");
+    const denied = await blocked.newPage();
+    try {
+      /* The same link again, on a load that can persist nothing. The fragment is
+         the id's source here, which is the whole point. */
+      await open(denied, link(app));
+
+      check(
+        await denied.evaluate(() => {
+          try {
+            window.sessionStorage.setItem("probe", "1");
+            return false;
+          } catch {
+            return true;
+          }
+        }),
+        "this case must actually run with site data blocked",
+      );
+
+      await denied.waitForSelector("#review:not([hidden])");
+      await denied.click("#approve");
+      await denied.waitForSelector("#review", { state: "hidden" });
+      await settled(denied, "the decision");
+      eq(app.stored().state, "approved",
+        "a signed-in visitor whose browser blocks site data must still be able to approve");
+    } finally {
+      await blocked.close();
+    }
   });
 
   /* -------- 6b. the account changed under an open tab -------- */
