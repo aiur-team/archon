@@ -1,0 +1,123 @@
+/*
+ * The trusted chrome, and the box the document is not allowed out of.
+ *
+ * Every rule here is about one of two things: keeping the trusted controls
+ * visibly and structurally separate from the artifact, or keeping the artifact
+ * inside its frame. The artifact cannot reach this stylesheet -- it is two
+ * origins away and one sandbox down -- so nothing here defends against it. What
+ * these rules do is make sure a reader can always tell which part of the page is
+ * Archon: the header sits above the frame, in its own band, and the frame never
+ * grows past the area allotted to it.
+ */
+
+:root {
+  color-scheme: light dark;
+  --chrome-border: rgba(128, 128, 128, 0.4);
+  --error: #b3261e;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* The trusted band. It is a sibling of the frame, never a parent, so no
+   stacking or layout inside the frame can put anything on top of it. */
+.chrome {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--chrome-border);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+}
+
+.identity {
+  min-width: 0;
+}
+
+.doc-title {
+  font-size: 1.1rem;
+  margin: 0;
+  /* A 160-scalar title is deliberately allowed to be long. Clamping it to one
+     line keeps it from pushing the sign-out control off the screen, which is
+     the one way a chosen title could affect a trusted region. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owner {
+  font-size: 0.85rem;
+  margin: 0.15rem 0 0;
+  opacity: 0.75;
+}
+
+.signout {
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+}
+
+.signout[disabled] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.status {
+  margin: 0;
+  padding: 0.75rem 1.25rem;
+}
+
+.status:empty {
+  display: none;
+}
+
+.status[data-tone="error"] {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.retry {
+  margin: 0;
+  padding: 0 1.25rem 0.75rem;
+}
+
+.retry button {
+  cursor: pointer;
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+}
+
+/* The frame fills what is left and no more. `border: 0` is cosmetic; the height
+   and the `flex` are what stop a document from deciding how much of the window
+   it occupies -- an artifact cannot resize its own frame, and there is no
+   message protocol by which it could ask. */
+.stage {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.stage[hidden] {
+  display: none;
+}
+
+.renderer {
+  border: 0;
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+/* A visible focus ring on every control, in both schemes. Sign-out and retry
+   are the two things a keyboard reader needs to find, and the default ring is
+   easy to lose against the frame below it. */
+:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}

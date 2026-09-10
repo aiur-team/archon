@@ -45,19 +45,24 @@ A dependency set is:
 | `store` | a `createPublicationStore({ getStore })` adapter |
 | `appOrigin` | the configured app origin; receipts and the approval URL are built on it |
 | `production` | `false` only for the loopback-only local-test mode |
-| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; `createPublication` is the only operation that reads it (see below) |
+| `publishEnabled` | `HOSTED_PUBLISH_ENABLED`; read by `createPublication` and `completePublication`, and by nothing else (see below) |
 | `now` | `() => epochMilliseconds`, defaulting to `Date.now` |
 | `randomBytes` | `(size) => Uint8Array`, defaulting to `node:crypto` |
 
-`publishEnabled` gating only `createPublication` is a decision, not an omission.
-Turning publishing off stops new publications from starting; it does not revoke
-authorisation users already hold, so for up to
-`PENDING_TTL_SECONDS + UPLOAD_TTL_SECONDS` (25 minutes) an already-started
-publication can still be approved and can still commit its bytes. The
-alternative — a human's approval becoming a 503 after they gave it, and documents
-stranded mid-upload — is worse. An operator who needs the harder stop takes the
-deployment down. `statusPublication` skips the flag for a different reason: a
-receipt for an already-published document must survive the switch.
+`publishEnabled` gating exactly two operations is a decision, not an omission.
+`createPublication` refuses a new start; `completePublication` refuses a new
+upload, from below its already-complete branch, so the two together are the whole
+tap while an earned receipt still comes back. Nothing else reads the flag:
+approval, cancellation, polling and owner reads all keep working with publishing
+off, because none of them writes new bytes. An operator who needs the harder stop
+takes the deployment down.
+
+Both checks live in this module rather than in a route for the same reason: a
+handler cannot start a publication or commit bytes by forgetting to ask. `PUT
+.../artifact` does refuse a disabled upload before it reads the body, but that is
+the same kind of advisory pre-check as its state gate — it can only make the
+refusal cheaper, never different, and deleting it would change when the `503`
+arrives and nothing else.
 
 `publicationDependencies({ env, getStore, mode })` builds the first four from
 `readHostedConfig`. It does not open the store — `createPublicationStore` opens

@@ -116,6 +116,15 @@ function runGate(root) {
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
+/** Build a clean tree, apply `plant`, and assert the gate still passes. */
+function assertAccepted(plant) {
+  const root = cleanTree();
+  plant(root, join(root, HOSTED_DIR));
+  const { status, stdout, stderr } = runGate(root);
+  assert.equal(status, 0, `expected the gate to pass; it printed:\n${stderr}`);
+  return stdout;
+}
+
 /** Build a clean tree, apply `plant`, and assert the gate fails with `pattern`. */
 function assertRejected(plant, pattern) {
   const root = cleanTree();
@@ -361,6 +370,29 @@ test("a route outside the hosted API namespace is refused, arrays included", () 
       ),
     /is routed at \/admin\/secret/,
   );
+});
+
+test("the page-route allowlist is a closed list, not a second prefix", () => {
+  /* The contract-frozen document address is allowed to sit outside the API
+     namespace. Nothing else under `/docs/` is, because the allowlist holds exact
+     strings: a prefix rule would have let any future page route appear with no
+     review, which is the whole reason the exception is spelled as a literal. */
+  assertAccepted((root, hosted) =>
+    write(
+      join(hosted, "functions", "page.mjs"),
+      'export default async () => new Response();\nexport const config = { path: "/docs/:documentId" };\n',
+    ),
+  );
+  for (const path of ["/docs/:id", "/docs/", "/docs/:documentId/raw", "/docs"]) {
+    assertRejected(
+      (root, hosted) =>
+        write(
+          join(hosted, "functions", "page.mjs"),
+          `export default async () => new Response();\nexport const config = { path: ${JSON.stringify(path)} };\n`,
+        ),
+      new RegExp(`is routed at ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, outside the`),
+    );
+  }
 });
 
 test("two functions cannot claim the same route", () => {

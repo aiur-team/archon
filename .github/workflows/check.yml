@@ -91,9 +91,10 @@ jobs:
             hosted/test/auth-routes.test.mjs
 
       # AHU-004's publication state. Three suites rather than one because they
-      # test three different things: the provider adapter's conditional-write
-      # and readback handling, the state machine's races and deadlines, and the
-      # three agent endpoints' transport rules. Named literally, like every
+      # test four different things: the provider adapter's conditional-write
+      # and readback handling, the state machine's races and deadlines, the
+      # agent endpoints' transport rules, and the artifact upload route's byte
+      # handling and retry protocol. Named literally, like every
       # other test file in this workflow, so a file that stops being emitted
       # fails loudly instead of matching a glob of nothing.
       #
@@ -115,6 +116,8 @@ jobs:
           hosted/test/publications-agent.test.mjs
           hosted/test/publication-browser-binding.test.mjs
           hosted/test/publications-browser.test.mjs
+          hosted/test/document-routes.test.mjs
+          hosted/test/publications-artifact.test.mjs
 
       # The approval page is defined in terms of `location.hash`, `history`, a
       # `__Host-` cookie surviving a real navigation out to a provider and back,
@@ -335,6 +338,17 @@ jobs:
           # renderer's copy of the render-message contract equal to
           # `hosted/lib/contracts.mjs` before it starts a browser.
           node scripts/test-hosted-renderer.mjs
+          # AHU-009's private-document oracle. It runs the real viewer, read,
+          # session and logout handlers on one loopback origin over a
+          # deterministic identity store and AHU-004 complete records, serves
+          # the renderer build on a second, and gives an artifact an adversary
+          # origin to try to reach on a third. Half of its cases are HTTP -- the
+          # owner/stranger/missing/malformed matrix, HEAD, conditional requests,
+          # and the rule that a denial's whole response carries no marker of the
+          # document it refused -- and half are browser: the artifact has no
+          # authority over the account page, a forged readiness message from the
+          # renderer origin gets nothing, and sign-out revokes server-side.
+          node scripts/test-hosted-owner-viewer.mjs
 
       # AHU-010's clean-consumer proof. Every other gate above runs inside this
       # checkout, where `templates/base/`, `templates/skeleton/` and
