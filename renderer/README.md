@@ -55,8 +55,25 @@ unknown types, unknown versions, extra keys and oversized payloads are refused
 rather than guessed at, and a refusal does not settle the instance — the real
 message still renders.
 
+**The viewer owes the same two checks in the other direction.** Readiness is the
+half of the handshake an attacker gets to speak first: a second frame on the
+renderer origin produces a flawless `event.origin` from the wrong window, and a
+frame on any other origin produces a flawless `event.source` from the wrong
+origin. A viewer that checks one and not the other will hand a private document
+to whichever one it forgot. Check `event.origin === HOSTED_RENDER_ORIGIN` **and**
+`event.source === frame.contentWindow`, and send with an exact `targetOrigin` —
+never `"*"`.
+
 No document identifier, title, owner, session or CSRF token is ever sent. There
 is nothing here for a compromised artifact to steal.
+
+**The renderer's address must carry nothing either.** An `about:srcdoc` document
+inherits its parent's base URL, so anything in the renderer's query or fragment
+is readable by the artifact as `document.baseURI` — and the artifact's
+`base-uri 'none'` means it cannot be neutralised afterwards. The renderer
+therefore refuses to mount at all when its own URL carries a query or a
+fragment, so a viewer that grows a `?doc=<id>` is a visibly broken renderer on
+the first try rather than a silent leak later.
 
 ## What is here
 
@@ -79,6 +96,13 @@ HOSTED_APP_ORIGIN=https://app.example.com \
 HOSTED_RENDER_ORIGIN=https://render.example.net \
 node renderer/scripts/build.mjs --out dist
 ```
+
+The output directory is generated and gitignored; `netlify.toml` publishes
+`dist`, and the build refuses a target that is the renderer tree or a directory
+containing it, because `--out .` would otherwise delete the sources it is about
+to copy. It also refuses to run when `public/` holds a file the build does not
+declare, so adding one is a build failure rather than a page that quietly 404s
+its stylesheet.
 
 `--local-test` relaxes the HTTPS requirement for loopback testing. It is an
 argument rather than an environment variable, exactly as it is in
@@ -126,6 +150,13 @@ own `meta` element adds. That inheritance decides the whole header set:
   nested frames and every remote subresource. Because policies intersect, an
   artifact that ships a more permissive `meta` policy of its own loosens nothing.
 
+Every directive the srcdoc declares is also declared, more strictly, by the
+response the artifact inherits — so on a normal page the inner policy is
+invisible. It is there for the day the shell's own headers are loosened for some
+reason of the shell's own, and one case in the runner exists solely to keep it
+honest: the shell is served under a policy that grants everything, and the
+artifact has to be contained by its own `meta` element alone.
+
 The authored HTML is appended as markup and never interpolated into a script, a
 string or an attribute, and it reaches the frame through the `srcdoc` IDL
 property rather than an assembled attribute. Nothing escapes anything, because
@@ -148,7 +179,15 @@ where it is.
 The sandbox removes the artifact's authority over the account origin. It does not
 make hostile HTML harmless, and nothing here should ever be described as
 network-proof or end-to-end encrypted: an artifact can still spend the reader's
-CPU, draw whatever it likes inside its own frame and navigate itself.
+CPU and draw whatever it likes inside its own frame.
+
+Self-navigation is worth naming precisely, because it is the one escape neither
+the sandbox nor the artifact's own policy speaks to: a frame may always navigate
+itself. What stops it reaching an attacker's page is the shell's `frame-src
+'self'`, which both tested engines enforce — the request never leaves the
+browser. The artifact can still destroy its own view that way. It cannot replace
+it with someone else's, which is what would turn the trusted viewer's chrome
+into a phishing surface.
 
 There is no owner or session API, no document fetch, no token bridge, no content
 storage, no sharing, no clipboard permission, no artifact-driven resizing or
