@@ -286,7 +286,16 @@ section("production origin and registrable-site rules", async () => {
     ["two sites under a multi-label suffix", "https://archon-app.co.uk", "https://archon-render.co.uk"],
   ];
   for (const [name, app, render] of accepted) {
-    const result = config(app, render);
+    let result;
+    try {
+      result = config(app, render);
+    } catch (error) {
+      /* Named rather than propagated: the two rows above fail exactly when the
+         site comparison stops consulting the public-suffix list, and a bare
+         "must be a different registrable site" gives no clue which row that
+         was. */
+      assert.fail(`${name}: must be accepted, but was refused: ${error.message}`);
+    }
     assert.equal(result.appOrigin, app, `${name}: must be accepted`);
     assert.notEqual(result.appSite, result.renderSite, `${name}: must resolve to two sites`);
   }
