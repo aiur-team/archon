@@ -109,10 +109,16 @@ test("a successful exchange yields a principal and nothing else", async () => {
   assert.deepEqual(principal, PRINCIPAL_ALPHA);
   assert.deepEqual(Object.keys(principal).sort(), [
     "accountId",
+    "email",
+    "emailVerified",
     "login",
     "provider",
     "providerUserId",
   ]);
+  /* The adapter reads no address, so it claims no verification. Anything else
+     here would be a domain grant this exchange cannot substantiate. */
+  assert.equal(principal.email, null);
+  assert.equal(principal.emailVerified, false);
   const rendered = JSON.stringify(principal);
   assert.ok(!rendered.includes("fixture-provider-access-token"));
   assert.ok(!rendered.includes("fixture-provider-refresh-token"));
@@ -224,12 +230,18 @@ test("the numeric id is the identity, and an unsafe one cannot collide with a va
   }
 });
 
-test("a login that is not a login cannot become a principal", async () => {
-  for (const login of ["alpha@example.com", "-leading", "way".repeat(20), "", null, "a b"]) {
+test("a login that is not display text cannot become a principal", async () => {
+  /* `login` is display text under C1 v2, so a hyphen and a space are legal in a
+     name. An address in the display position is not, and neither is text that is
+     unbounded, untrimmed or empty. */
+  for (const login of ["alpha@example.com", "way".repeat(20), "", null, " padded ", "a\u200Bb"]) {
     await assert.rejects(
       () => exchange(githubProvider({ user: { id: 1010, login } })),
       AuthRequestError,
     );
+  }
+  for (const login of ["-leading", "a b"]) {
+    assert.equal((await exchange(githubProvider({ user: { id: 1010, login } }))).login, login);
   }
 });
 

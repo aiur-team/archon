@@ -1,5 +1,21 @@
 /**
- * Executable form of the hosted upload contracts v1 (blocks C1-C6).
+ * Executable form of the hosted upload contracts (blocks C1-C6), with identity
+ * at C1 v2.
+ *
+ * ## `accountId` is tenant-scoped, and `ownerEmail` is how ownership is recovered
+ *
+ * An `accountId` is a digest of the identity tenant's subject. Subjects are the
+ * tenant's to issue, so a tenant that is recreated - a new Auth0 domain, a
+ * restored-from-nothing directory - issues different subjects to the same
+ * people, and every previously stored owner key becomes unmatchable. Nothing in
+ * this module can prevent that, and pretending otherwise by linking identities
+ * would be worse: two providers reaching one person are two identities here, on
+ * purpose, and are documented as such rather than merged.
+ *
+ * What the contract does instead is keep the approver's verified email on the
+ * publication record beside the owner key, as `ownerEmail`. It is recovery
+ * metadata for an operator, is never consulted for access, and is the reason a
+ * document is not orphaned by a tenant migration.
  *
  * Every later hosted trust boundary - identity (AHU-003), publication state
  * (AHU-004), the renderer (AHU-005), the CLI (AHU-006), browser approval
@@ -112,10 +128,23 @@ export const HOSTED_LIMITS = Object.freeze({
   SHA256_HEX_LENGTH: 64,
   SECRET_HASH_HEX_LENGTH: 64,
   PUBLICATION_ID_HEX_LENGTH: 32,
-  /** C1: `accountId` is the GitHub numeric ID behind a provider prefix. */
-  ACCOUNT_ID_PREFIX: "gh_",
-  /** C1: the only identity provider v1 accepts. */
-  IDENTITY_PROVIDER: "github.com",
+  /** C1 v2: `accountId` is a truncated digest of the subject behind this prefix. */
+  ACCOUNT_ID_PREFIX: "a0_",
+  /** C1 v2: the only identity provider the hosted tree accepts. */
+  IDENTITY_PROVIDER: "auth0",
+  /** C1 v2: the widest subject the identity tenant may hand us. */
+  SUBJECT_MAX_LENGTH: 256,
+  /**
+   * C1 v2: how much of the subject digest `accountId` carries.
+   *
+   * Fixed, not tunable. Shortening it widens the space in which two subjects
+   * share one ownership key; lengthening it renames every stored owner. The
+   * derivation is asserted against a literal worked example in
+   * `netlify/test/hosted/contracts.test.mjs`, so a change here fails there first.
+   */
+  ACCOUNT_ID_HASH_HEX_LENGTH: 32,
+  /** C1 v2: the widest stored email, matching the collaboration layer's bound. */
+  EMAIL_MAX_LENGTH: 254,
   /** C1/C4: the two app paths a contract record may address. */
   DOCUMENT_PATH_PREFIX: "/docs/",
   AUTHORIZE_PATH: "/publish/authorize",
@@ -130,7 +159,7 @@ export const HOSTED_LIMITS = Object.freeze({
   /** Bounds for opaque bearer/CSRF material carried on the wire (base64url-ish). */
   OPAQUE_TOKEN_MIN_LENGTH: 32,
   OPAQUE_TOKEN_MAX_LENGTH: 256,
-  /** C1: GitHub login syntax, used to reject an email or a display name. */
+  /** C1 v2: the display-name bound on `login`, which is display text only. */
   LOGIN_MAX_LENGTH: 39,
   /**
    * The pairing-code grammar this producer recommends AHU-004 mint: two groups
@@ -376,29 +405,104 @@ function requireOrder(earlier, later, earlierField, laterField) {
   }
 }
 
-/** C1: the GitHub numeric ID in decimal, with no leading zero. */
+/**
+ * C1 v2: the raw identity-tenant subject, `<connection>|<id>`.
+ *
+ * The subject is carried verbatim rather than split: the connection half and the
+ * id half only mean anything together, and a rule that parsed them would invite
+ * a caller to key on one of them. It is not an ownership key on its own - the
+ * digest below is - and it is never a display value.
+ *
+ * An email address in this position has no `|` and is refused by the pattern,
+ * which matters because an email is the one value a careless producer is most
+ * likely to put here.
+ */
 function requireProviderUserId(value, field) {
   requireWellFormedString(value, field);
-  if (!/^[1-9][0-9]{0,19}$/.test(value)) {
-    throw invalid(field, "must be a decimal provider user id with no leading zero");
+  if (value !== value.trim()) throw invalid(field, "must not begin or end with whitespace");
+  if (value.length > HOSTED_LIMITS.SUBJECT_MAX_LENGTH) {
+    throw invalid(field, `must be at most ${HOSTED_LIMITS.SUBJECT_MAX_LENGTH} characters`);
+  }
+  if (!/^[a-z0-9-]+\|.+$/.test(value)) {
+    throw invalid(field, "must be a provider subject spelled <connection>|<id>");
   }
   return value;
 }
 
 /**
- * C1: an account ID is the provider prefix and the GitHub numeric ID in
- * decimal. Usernames and email addresses are not ownership keys and cannot be
+ * The one derivation of an account identifier from a subject.
+ *
+ * Exported so the identity adapters construct the ownership key by calling this
+ * rather than by restating it. A second spelling of the hash anywhere else is a
+ * second derivation, and the cross-reference in `validatePrincipal` exists
+ * precisely because there must only be one.
+ *
+ * @param {string} providerUserId a subject that has passed `requireProviderUserId`
+ * @returns {string} `a0_` followed by 32 lowercase hex characters
+ */
+export function deriveAccountId(providerUserId) {
+  requireProviderUserId(providerUserId, "providerUserId");
+  const digest = createHash("sha256").update(Buffer.from(providerUserId, "utf8")).digest("hex");
+  return `${HOSTED_LIMITS.ACCOUNT_ID_PREFIX}${digest.slice(0, HOSTED_LIMITS.ACCOUNT_ID_HASH_HEX_LENGTH)}`;
+}
+
+/**
+ * C1 v2: an account ID is the provider prefix and a fixed-width lowercase hex
+ * digest of the subject. Logins, display names and email addresses cannot be
  * spelled here at all, which is the point of validating the shape rather than
  * only its presence.
+ *
+ * Shape only. Whether the digest is the digest *of this record's own subject* is
+ * a cross-reference, and `validatePrincipal` owns it: this function is also
+ * called where no subject is present - a stored owner, a receipt result - and
+ * there is nothing to recompute from at those call sites.
  */
 function requireAccountId(value, field) {
   requireWellFormedString(value, field);
-  const { ACCOUNT_ID_PREFIX } = HOSTED_LIMITS;
+  const { ACCOUNT_ID_PREFIX, ACCOUNT_ID_HASH_HEX_LENGTH } = HOSTED_LIMITS;
   if (!value.startsWith(ACCOUNT_ID_PREFIX)) {
     throw invalid(field, `must begin with ${ACCOUNT_ID_PREFIX}`);
   }
-  requireProviderUserId(value.slice(ACCOUNT_ID_PREFIX.length), field);
+  requireLowerHex(value.slice(ACCOUNT_ID_PREFIX.length), ACCOUNT_ID_HASH_HEX_LENGTH, field);
   return value;
+}
+
+/**
+ * C1 v2: a stored email address, in the one normalized spelling.
+ *
+ * This validates the *stored form* and normalizes nothing: a caller handing over
+ * `Ann@Example.COM` has not normalized it, and silently lowercasing it here
+ * would make two spellings of one address both valid at this boundary and
+ * different everywhere downstream. The grammar is the collaboration layer's,
+ * restated as a check rather than copied as a transform - bounded ASCII, a
+ * 1-64 character unquoted local part, exactly one `@`, and a domain of at least
+ * two DNS labels. ACN-007 owns the shared normalizer both trees will call; until
+ * then this tree only ever receives an already-normalized value.
+ */
+function requireNormalizedEmail(value, field) {
+  requireWellFormedString(value, field);
+  if (/[^\x20-\x7e]/.test(value)) throw invalid(field, "must be printable ASCII");
+  if (value !== value.toLowerCase()) throw invalid(field, "must be lowercase");
+  if (value.length === 0 || value.length > HOSTED_LIMITS.EMAIL_MAX_LENGTH) {
+    throw invalid(field, `must be 1-${HOSTED_LIMITS.EMAIL_MAX_LENGTH} characters`);
+  }
+  const at = value.indexOf("@");
+  if (at === -1 || value.indexOf("@", at + 1) !== -1) {
+    throw invalid(field, "must contain exactly one @");
+  }
+  if (!/^[a-z0-9.!#$%&'*+=?^_`{|}~-]{1,64}$/.test(value.slice(0, at))) {
+    throw invalid(field, "must have an unquoted ASCII local part");
+  }
+  const labels = value.slice(at + 1).split(".");
+  if (labels.length < 2 || !labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+    throw invalid(field, "must have a domain of at least two DNS labels");
+  }
+  return value;
+}
+
+/** `requireNormalizedEmail`, or `null` where the identity carries no address. */
+function requireNullableEmail(value, field) {
+  return value === null ? null : requireNormalizedEmail(value, field);
 }
 
 /**
@@ -448,21 +552,34 @@ function requireOpaqueToken(value, field) {
 /* C1: identity                                                        */
 /* ------------------------------------------------------------------ */
 
-const PRINCIPAL_KEYS = Object.freeze(["accountId", "provider", "providerUserId", "login"]);
+const PRINCIPAL_KEYS = Object.freeze([
+  "accountId",
+  "provider",
+  "providerUserId",
+  "login",
+  "email",
+  "emailVerified",
+]);
 
 /**
- * Validate a `HostedPrincipal`, returning a frozen copy.
+ * Validate a `HostedPrincipal` (v2), returning a frozen copy.
  *
- * The load-bearing check is the cross-reference: `accountId` must be exactly the
- * provider prefix followed by `providerUserId`. C1 defines it as a derived
- * value, and a record where the two disagree is a record where the ownership
- * key and the identity it claims to encode are two different subjects - which
- * is the whole failure this identity model exists to prevent. `login` is
- * carried for display only and is never an ownership key.
+ * The load-bearing check is the cross-reference: `accountId` must be the digest
+ * this module derives from `providerUserId`, recomputed here rather than
+ * inspected for shape. C1 v2 defines it as a derived value, and a record where
+ * the two disagree is a record where the ownership key and the identity it
+ * claims to encode are two different subjects - which is the whole failure this
+ * identity model exists to prevent. A shape check would accept any well-formed
+ * `a0_` value, which is to say any caller-chosen owner.
+ *
+ * `login` is carried for display only. `email` is what later domain decisions
+ * read and is never an ownership key. `emailVerified` is a strict boolean: a
+ * string `"true"` is a refusal, because "not verified" must never arrive spelled
+ * as something truthy.
  *
  * @param {unknown} value
  * @param {{field?: string}} [options]
- * @returns {Readonly<{accountId: string, provider: string, providerUserId: string, login: string}>}
+ * @returns {Readonly<{accountId: string, provider: string, providerUserId: string, login: string, email: string | null, emailVerified: boolean}>}
  * @throws {HostedContractError} `invalid_request`
  */
 export function validatePrincipal(value, { field = "principal" } = {}) {
@@ -474,13 +591,23 @@ export function validatePrincipal(value, { field = "principal" } = {}) {
   }
   requireProviderUserId(value.providerUserId, `${field}.providerUserId`);
   requireAccountId(value.accountId, `${field}.accountId`);
-  if (value.accountId !== `${HOSTED_LIMITS.ACCOUNT_ID_PREFIX}${value.providerUserId}`) {
-    throw invalid(`${field}.accountId`, "must be the provider prefix followed by providerUserId");
+  if (value.accountId !== deriveAccountId(value.providerUserId)) {
+    throw invalid(`${field}.accountId`, "must be the derived account id of providerUserId");
   }
 
-  requireWellFormedString(value.login, `${field}.login`);
-  if (!new RegExp(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,${HOSTED_LIMITS.LOGIN_MAX_LENGTH - 1}})$`).test(value.login)) {
-    throw invalid(`${field}.login`, "must be a GitHub login, not an email address or display name");
+  requireDisplayText(value.login, 1, HOSTED_LIMITS.LOGIN_MAX_LENGTH, `${field}.login`);
+  if (value.login.includes("@")) {
+    throw invalid(`${field}.login`, "must be a display name, not an email address");
+  }
+
+  const email = requireNullableEmail(value.email, `${field}.email`);
+  if (typeof value.emailVerified !== "boolean") {
+    throw invalid(`${field}.emailVerified`, "must be a boolean");
+  }
+  /* The other direction is legal: an identity with no address is not verified,
+     and that is the ordinary case for a connection that publishes no email. */
+  if (value.emailVerified && email === null) {
+    throw invalid(`${field}.email`, "is required while emailVerified is true");
   }
 
   return Object.freeze({
@@ -488,11 +615,17 @@ export function validatePrincipal(value, { field = "principal" } = {}) {
     provider: value.provider,
     providerUserId: value.providerUserId,
     login: value.login,
+    email,
+    emailVerified: value.emailVerified,
   });
 }
 
 /**
- * Validate the C1 session-endpoint body, returning a frozen copy.
+ * Validate the C1 v2 session-endpoint body, returning a frozen copy.
+ *
+ * The authenticated body reports `email` and `emailVerified` because every later
+ * domain decision reads them, and a page that had to infer a verified address
+ * from a display name would infer it wrongly.
  *
  * The two shapes are disjoint on purpose: a signed-out body carries no account
  * fields at all, so a consumer cannot read `accountId` off a response that never
@@ -517,17 +650,28 @@ export function validateSessionResponse(value, { field = "session" } = {}) {
     return Object.freeze({ v: 1, authenticated: false });
   }
 
-  requireExactKeys(value, ["v", "authenticated", "accountId", "login", "csrfToken"], field);
-  requireAccountId(value.accountId, `${field}.accountId`);
-  validatePrincipal(
-    {
-      accountId: value.accountId,
-      provider: HOSTED_LIMITS.IDENTITY_PROVIDER,
-      providerUserId: value.accountId.slice(HOSTED_LIMITS.ACCOUNT_ID_PREFIX.length),
-      login: value.login,
-    },
-    { field },
+  requireExactKeys(
+    value,
+    ["v", "authenticated", "accountId", "login", "email", "emailVerified", "csrfToken"],
+    field,
   );
+  /* Each field is checked against the principal's own rule, and the subject is
+     not reconstructed from `accountId`: the v2 derivation is a one-way digest, so
+     there is nothing to slice off and no subject to invent. The fields the body
+     shares with a principal are therefore validated with the same helpers, and
+     the fields it does not carry are simply absent rather than faked. */
+  requireAccountId(value.accountId, `${field}.accountId`);
+  requireDisplayText(value.login, 1, HOSTED_LIMITS.LOGIN_MAX_LENGTH, `${field}.login`);
+  if (value.login.includes("@")) {
+    throw invalid(`${field}.login`, "must be a display name, not an email address");
+  }
+  const email = requireNullableEmail(value.email, `${field}.email`);
+  if (typeof value.emailVerified !== "boolean") {
+    throw invalid(`${field}.emailVerified`, "must be a boolean");
+  }
+  if (value.emailVerified && email === null) {
+    throw invalid(`${field}.email`, "is required while emailVerified is true");
+  }
   requireOpaqueToken(value.csrfToken, `${field}.csrfToken`);
 
   return Object.freeze({
@@ -535,6 +679,8 @@ export function validateSessionResponse(value, { field = "session" } = {}) {
     authenticated: true,
     accountId: value.accountId,
     login: value.login,
+    email,
+    emailVerified: value.emailVerified,
     csrfToken: value.csrfToken,
   });
 }
@@ -708,6 +854,7 @@ const PUBLICATION_KEYS = Object.freeze([
   "createdAt",
   "pendingExpiresAt",
   "ownerAccountId",
+  "ownerEmail",
   "uploadExpiresAt",
   "completedAt",
   "receiptExpiresAt",
@@ -776,6 +923,15 @@ export function validatePublication(value, { field = "publication" } = {}) {
     value.ownerAccountId === null
       ? null
       : requireAccountId(value.ownerAccountId, `${field}.ownerAccountId`);
+  /* Recovery metadata, never an access key: `accountId` is scoped to the identity
+     tenant, so a tenant recreated from scratch issues new subjects and therefore
+     new owner keys. The approver's verified address is what an operator matches
+     a stored document back to a person by. It is `null` whenever there is no
+     owner, and may also be `null` for an owner who had no address. */
+  const ownerEmail = requireNullableEmail(value.ownerEmail, `${field}.ownerEmail`);
+  if (ownerAccountId === null && ownerEmail !== null) {
+    throw invalid(`${field}.ownerEmail`, "must be null while there is no owner");
+  }
   const uploadExpiresAt = requireNullableTimestamp(value.uploadExpiresAt, `${field}.uploadExpiresAt`);
   const completedAt = requireNullableTimestamp(value.completedAt, `${field}.completedAt`);
   const receiptExpiresAt = requireNullableTimestamp(
@@ -841,6 +997,7 @@ export function validatePublication(value, { field = "publication" } = {}) {
     createdAt: value.createdAt,
     pendingExpiresAt: value.pendingExpiresAt,
     ownerAccountId,
+    ownerEmail,
     uploadExpiresAt,
     completedAt,
     receiptExpiresAt,

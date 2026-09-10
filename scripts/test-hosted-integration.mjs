@@ -664,6 +664,20 @@ const IDENTITIES = Object.freeze({
 });
 
 /**
+ * The C1 v2 ownership key a numeric provider id becomes.
+ *
+ * Spelled out here rather than imported from the contracts module, for the same
+ * reason the provider itself is a fixture: this runner asserts what the assembled
+ * producers agree on, and asking one of them for the expected answer would make
+ * the agreement unfalsifiable. The rule is the contract's - `a0_` plus the first
+ * 32 hex characters of SHA-256 of the subject `github|<id>`.
+ */
+function accountIdFor(id) {
+  const digest = createHash("sha256").update(Buffer.from(`github|${id}`, "utf8")).digest("hex");
+  return `a0_${digest.slice(0, 32)}`;
+}
+
+/**
  * A loopback GitHub.
  *
  * It is a fixture because a real provider cannot be part of an untrusted
@@ -1744,7 +1758,7 @@ async function happyPath(world, browser, client) {
   );
   assert.equal(
     resumed.result.ownerAccountId,
-    `gh_${provider.identities.first.id}`,
+    accountIdFor(provider.identities.first.id),
     "the stored owner is not the canonical numeric GitHub identity of the account that approved",
   );
   assert.equal(resumed.result.contentSha256, before, "the receipt digest is not the artifact's digest");
@@ -1959,7 +1973,7 @@ async function authBinding(world, browser) {
 
   const session = await currentSession(page);
   assert.equal(session.authenticated, true);
-  assert.equal(session.accountId, `gh_${provider.identities.second.id}`);
+  assert.equal(session.accountId, accountIdFor(provider.identities.second.id));
   const decisionPath = `/api/hosted/publications/${publication.publicationId}/decision`;
 
   /* 2.2 Approving as the account that is no longer signed in. The displayed
@@ -1968,7 +1982,7 @@ async function authBinding(world, browser) {
          whoever happens to be signed in now. */
   const stale = await browserJson(page, decisionPath, {
     method: "POST",
-    body: JSON.stringify({ decision: "approve", displayedAccountId: `gh_${provider.identities.first.id}` }),
+    body: JSON.stringify({ decision: "approve", displayedAccountId: accountIdFor(provider.identities.first.id) }),
     headers: { "content-type": "application/json", "x-archon-csrf": session.csrfToken },
   });
   assert.equal(stale.status, 403, `a stale displayed account was answered ${stale.status}`);
@@ -2155,10 +2169,12 @@ async function authBinding(world, browser) {
   );
 
   const principal = {
-    accountId: `gh_${provider.identities.first.id}`,
-    provider: "github.com",
-    providerUserId: String(provider.identities.first.id),
+    accountId: accountIdFor(provider.identities.first.id),
+    provider: "auth0",
+    providerUserId: `github|${provider.identities.first.id}`,
     login: provider.identities.first.login,
+    email: null,
+    emailVerified: false,
   };
   await assert.rejects(
     () => world.modules.publicationsModule.decidePublication(
@@ -2412,7 +2428,7 @@ async function uploadAndReceipt(world, browser) {
       contentSha256: createHash("sha256").update(Buffer.from(html, "utf8")).digest("hex"),
       contentBytes: Buffer.byteLength(html, "utf8"),
       artifactFormat: "html",
-      ownerAccountId: "gh_1",
+      ownerAccountId: accountIdFor(1),
     }),
     headers: { "content-type": "application/json" },
   });
@@ -2587,7 +2603,7 @@ async function ownerRead(world, browser) {
   assert.equal(metadata.status, 200, `the owner's metadata read was answered ${metadata.status}`);
   const body = await metadata.json();
   assert.equal(body.title, title);
-  assert.equal(body.ownerAccountId, `gh_${provider.identities.first.id}`);
+  assert.equal(body.ownerAccountId, accountIdFor(provider.identities.first.id));
   assert.equal(body.contentSha256, digest);
   record("read: the owner's metadata names the document that was approved");
 
@@ -2940,7 +2956,7 @@ async function storageAndRaces(world, browser) {
   assert.equal(approvedUpload.status, 201);
   assert.equal(
     (await approvedUpload.json()).result.ownerAccountId,
-    `gh_${world.provider.identities.first.id}`,
+    accountIdFor(world.provider.identities.first.id),
   );
   record("storage: an approval whose write answer was lost is reported as the success it was");
 

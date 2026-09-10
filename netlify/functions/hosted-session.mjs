@@ -4,7 +4,7 @@
  * C1 freezes the two bodies exactly:
  *
  *   {v: 1, authenticated: false}
- *   {v: 1, authenticated: true, accountId, login, csrfToken}
+ *   {v: 1, authenticated: true, accountId, login, email, emailVerified, csrfToken}
  *
  * and this route validates its own response against `validateSessionResponse`
  * before sending it. Checking one's own output looks redundant until you
@@ -83,6 +83,8 @@ export function createSessionRoute({ store }) {
           authenticated: true,
           accountId: principal.accountId,
           login: principal.login,
+          email: principal.email,
+          emailVerified: principal.emailVerified,
           csrfToken: deriveCsrfToken(token),
         }),
         { cookies },

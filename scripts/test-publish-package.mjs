@@ -387,7 +387,9 @@ async function startFixture() {
       const receipt = () => ({
         documentId: publicationId,
         url: `${origin}${DOCUMENT_PATH_PREFIX}${publicationId}`,
-        ownerAccountId: "gh_4242",
+        /* The C1 v2 owner key for the subject `github|4242`: `a0_` plus the
+           first 32 hex characters of its SHA-256. */
+        ownerAccountId: "a0_544f653ee5809566d36b495075e710a7",
         contentSha256: record.descriptor.contentSha256,
         contentBytes: record.descriptor.contentBytes,
       });
