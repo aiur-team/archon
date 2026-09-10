@@ -41,6 +41,27 @@
  * of two concurrent callbacks can observe `modified === true`, which is the
  * property C1's "consume OAuth state once" actually needs.
  *
+ * ## Why `{modified: true}` is not believed
+ *
+ * `@netlify/blobs@11.0.2` maps **every non-412 status** of a conditional PUT to
+ * `{modified: true}` (`dist/main.js`: `res.status === 412 ? {modified:false} :
+ * {etag, modified:true}`), and its retry helper returns a 5xx response rather
+ * than throwing once the attempts are used up. So a store answering 500 - or 403
+ * - reports a guarded write as having succeeded. Believing it would make logout
+ * return 200 for a session that is still live, and would let two callbacks
+ * replaying one state both observe "I won the compare-and-set".
+ *
+ * Every write here therefore carries a random `writeId`, and a write counts as
+ * having landed only when the record reads back carrying that exact id. The
+ * read-back is one extra strongly consistent GET on operations that happen once
+ * per sign-in or sign-out, which is a cheap price for the only confirmation that
+ * does not depend on how a client library maps HTTP statuses.
+ *
+ * For the same reason a `onlyIfMatch` write is refused outright when the read
+ * carried no ETag: the library applies the condition only when the value is
+ * truthy, so `onlyIfMatch: undefined` is silently an *unconditional* write, and
+ * the whole single-use property would evaporate without a single error.
+ *
  * The consumed record is left in place rather than removed, so a replay is
  * refused by a record that says why, and expiry is enforced on lookup instead of
  * by a cleanup job. Nothing here schedules anything: physical records outlive
@@ -84,6 +105,20 @@ export const TRANSIENT_TTL_SECONDS = 15 * 60;
 /** A store operation that failed for any reason at all. Never a null. */
 function unavailable() {
   return new AuthUnavailableError("storage");
+}
+
+/**
+ * The ETag a compare-and-set needs, or an outage.
+ *
+ * `Store.getConditions` applies `onlyIfMatch` only when the value is truthy, so
+ * an absent ETag turns the guarded write into an unconditional one that reports
+ * success. Refusing here is fail-closed: a store that cannot supply the atomic
+ * primitive this design rests on must stop the operation, not quietly perform a
+ * weaker one.
+ */
+function requireEtag(etag) {
+  if (typeof etag !== "string" || etag === "") throw unavailable();
+  return etag;
 }
 
 /** ISO-8601 UTC, the one timestamp spelling the hosted contracts use. */
@@ -153,9 +188,48 @@ export class AuthStore {
   async #write(key, value, conditions) {
     try {
       return await this.store.setJSON(key, value, conditions);
-    } catch {
+    } catch (error) {
+      /* A `TypeError` here is this module calling the store wrongly - mutually
+         exclusive conditions, a non-string ETag - and reporting a programming
+         error as a storage outage would hide it behind a retryable 503 forever. */
+      if (error instanceof TypeError) throw error;
       throw unavailable();
     }
+  }
+
+  /**
+   * Write `value` and report whether that write actually landed.
+   *
+   * Three outcomes, and only the first is cheap:
+   *
+   *  - `modified: false` is the store refusing the condition. That is definite:
+   *    the key existed (`onlyIfNew`) or the ETag was stale (`onlyIfMatch`), and
+   *    no read-back can change it. This is the only `false` this method returns.
+   *  - anything the library calls success is *unconfirmed*, because it calls a
+   *    500 and a 403 success too. The record is read back and the write counts
+   *    only if it carries this call's `writeId`.
+   *  - a throw is ambiguous - a request that timed out may still have been
+   *    applied - so it takes the same read-back.
+   *
+   * A read-back that disagrees is therefore an outage rather than a lost race,
+   * because a genuinely lost race is the `modified: false` case above.
+   */
+  async #applyGuarded(key, value, conditions) {
+    try {
+      const result = await this.#write(key, value, conditions);
+      if (result?.modified !== true) return false;
+    } catch (error) {
+      if (error instanceof TypeError) throw error;
+      /* Ambiguous rather than failed: a request that timed out may still have
+         been applied, so the read-back below decides. */
+    }
+    const after = await this.#read(key);
+    if (after !== null && after.data?.writeId === value.writeId) return true;
+    /* The store said it wrote, or might have, and the record disagrees. That is
+       never a lost race - a genuinely lost compare-and-set is the `modified:
+       false` above - so it is an outage, and reporting it as "somebody else got
+       there first" would be inventing an explanation. */
+    throw unavailable();
   }
 
   /**
@@ -165,12 +239,14 @@ export class AuthStore {
    * revoke the old session server-side before claiming success". Three outcomes
    * have to be told apart, and only one of them may be reported as success.
    *
-   *  - The guarded write reports `modified: true`. The record is dead.
+   *  - The guarded write lands, confirmed by reading this call's `writeId`
+   *    back off the record. The record is dead.
    *  - The guarded write throws. The write is *ambiguous* - a request that
    *    timed out may still have been applied - so the record is read back. If
    *    it now reads dead, the write landed and this is a success; if it reads
    *    live, it did not, and that is an outage rather than a revocation.
-   *  - The guarded write reports `modified: false`. Somebody else wrote the key
+   *  - The guarded write is refused, or lands as somebody else's. Somebody else
+   *    wrote the key
    *    between the read and the write. That is not automatically a failure: a
    *    concurrent logout and callback rotation both revoke, so a read-back that
    *    shows the record dead is the outcome the caller asked for. Anything else
@@ -183,17 +259,20 @@ export class AuthStore {
     if (existing === null) return false;
     if (!isLive(existing.data, this.now())) return false;
 
-    const dead = { ...existing.data, ...mark };
-    let result;
+    const etag = requireEtag(existing.etag);
+    const dead = { ...existing.data, ...mark, writeId: randomToken() };
+    let landed = false;
     try {
-      result = await this.#write(key, dead, { onlyIfMatch: existing.etag });
-    } catch {
-      const after = await this.#read(key);
-      if (after !== null && !isLive(after.data, this.now())) return true;
-      throw unavailable();
+      landed = await this.#applyGuarded(key, dead, { onlyIfMatch: etag });
+    } catch (error) {
+      if (error instanceof TypeError) throw error;
+      landed = false;
     }
-    if (result?.modified === true) return true;
+    if (landed) return true;
 
+    /* This call did not kill the record, but a concurrent logout or callback
+       rotation may have. Both are revocations, so a read-back showing the record
+       dead is the outcome the caller asked for. Anything else is an outage. */
     const after = await this.#read(key);
     if (after !== null && !isLive(after.data, this.now())) return true;
     throw unavailable();
@@ -225,13 +304,15 @@ export class AuthStore {
       createdAt: isoAt(at),
       expiresAt: isoAt(at + SESSION_TTL_SECONDS * 1000),
       revokedAt: null,
+      writeId: randomToken(),
     };
     /* `onlyIfNew` makes a key collision a refusal rather than an overwrite. With
        256 bits of entropy this never fires; what it rules out is the version of
        this bug where a token is not random after all, and one visitor's session
        silently replaces another's. */
-    const result = await this.#write(AuthStore.sessionKey(token), record, { onlyIfNew: true });
-    if (result?.modified !== true) throw unavailable();
+    if (!(await this.#applyGuarded(AuthStore.sessionKey(token), record, { onlyIfNew: true }))) {
+      throw unavailable();
+    }
     return { token, expiresAt: record.expiresAt };
   }
 
@@ -304,11 +385,12 @@ export class AuthStore {
       expiresAt: isoAt(at + ttlSeconds * 1000),
       consumedAt: null,
       revokedAt: null,
+      writeId: randomToken(),
     };
-    const result = await this.#write(AuthStore.transientKey(kind, token), record, {
+    const landed = await this.#applyGuarded(AuthStore.transientKey(kind, token), record, {
       onlyIfNew: true,
     });
-    if (result?.modified !== true) throw unavailable();
+    if (!landed) throw unavailable();
     return { token, expiresAt: record.expiresAt };
   }
 
@@ -350,20 +432,57 @@ export class AuthStore {
     if (found.data?.consumedAt) return null;
     if (!isLive(found.data, this.now())) return null;
 
-    const consumed = { ...found.data, consumedAt: isoAt(this.now()) };
-    const result = await this.#write(key, consumed, { onlyIfMatch: found.etag });
-    /* `modified: false` is the whole point of this method: another request
-       consumed the record between the read and the write, so this caller lost
-       and must be told nothing was there. Reporting an error instead would hand
-       a racing attacker a way to distinguish "no such state" from "state you
-       nearly had". */
-    if (result?.modified !== true) return null;
+    const etag = requireEtag(found.etag);
+    const consumed = { ...found.data, consumedAt: isoAt(this.now()), writeId: randomToken() };
+    /* Losing the compare-and-set is the whole point of this method: another
+       request consumed the record between the read and the write, so this caller
+       must be told nothing was there. Reporting an error instead would hand a
+       racing attacker a way to distinguish "no such state" from "state you
+       nearly had" - while an *ambiguous* write that did not land propagates as
+       an outage from `#applyGuarded`, because that is a different question. */
+    if (!(await this.#applyGuarded(key, consumed, { onlyIfMatch: etag }))) return null;
     return Object.freeze({
       kind,
       payload: found.data.payload ?? {},
       createdAt: found.data.createdAt,
       expiresAt: found.data.expiresAt,
     });
+  }
+
+  /**
+   * Record the first use of a browser-supplied transient token.
+   *
+   * The inverse of `createTransient`: no record exists until the token is
+   * *used*, so the issuing response writes nothing at all. That is what keeps an
+   * unauthenticated `GET` from being a write amplifier - a client that never
+   * returns its cookie would otherwise mint one permanent record per request,
+   * and nothing in this design collects them.
+   *
+   * Single use still holds, because the claim is an `onlyIfNew` write: the first
+   * caller creates the marker, every later caller is refused by the store. What
+   * is deliberately *not* claimed is provenance. Any well-formed token can be
+   * claimed once, and that is sound here because the pre-login binding's CSRF
+   * property comes from `SameSite=Lax` plus the exact `Origin` - a cross-site
+   * POST carries no cookie at all - rather than from the value having been
+   * minted by this service.
+   *
+   * @returns {Promise<boolean>} true when this call is the token's first use.
+   */
+  async claimTransient(kind, token, { ttlSeconds = TRANSIENT_TTL_SECONDS } = {}) {
+    if (!TRANSIENT_KINDS.includes(kind)) throw new TypeError(`unknown transient kind: ${kind}`);
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(token)) return false;
+    const at = this.now();
+    const record = {
+      v: 1,
+      kind,
+      payload: {},
+      createdAt: isoAt(at),
+      expiresAt: isoAt(at + ttlSeconds * 1000),
+      consumedAt: isoAt(at),
+      revokedAt: null,
+      writeId: randomToken(),
+    };
+    return this.#applyGuarded(AuthStore.transientKey(kind, token), record, { onlyIfNew: true });
   }
 
   /** Kill a transient record without consuming it, e.g. clearing a binding. */

@@ -29,10 +29,21 @@
  *  - **The `Origin` header must equal the one configured app origin exactly.**
  *    Browsers send it on every form POST and every state-changing fetch.
  *
- * And the binding is single-use: it is consumed through the store's
- * compare-and-set, so a captured value cannot be replayed and every sign-in
- * attempt is a fresh transaction. A retry therefore starts a new transaction
- * rather than replaying a consumed one, which is what C1 asks of a login retry.
+ * And the binding is single-use: the first use writes a claim marker with
+ * `onlyIfNew`, so a captured value cannot be replayed and every sign-in attempt
+ * is a fresh transaction. A retry therefore starts a new transaction rather than
+ * replaying a consumed one, which is what C1 asks of a login retry.
+ *
+ * ## Failures are pages, not envelopes
+ *
+ * The sign-in page submits a real `<form method="post">`, so this route's
+ * response *is* what the visitor looks at. A visitor whose tab sat open past the
+ * binding's fifteen minutes would otherwise be shown a raw JSON error envelope
+ * with no way back. A form submission therefore lands on `/login/?status=<word>`
+ * with a word from the same closed set the callback uses, while a JSON caller
+ * still gets the C3 envelope. Whatever cookies the route had already decided to
+ * set - notably the cleared session on the different-account path, where the
+ * revocation has already happened - ride along on that failure response.
  *
  * ## The different-account path
  *
@@ -48,11 +59,12 @@
  * browser is already signed into.
  */
 
-import { CsrfFailedError } from "../lib/auth-errors.mjs";
+import { AuthUnavailableError, CsrfFailedError } from "../lib/auth-errors.mjs";
 import { TRANSIENT_TTL_SECONDS } from "../lib/auth-store.mjs";
 import { HOSTED_LIMITS } from "../lib/contracts.mjs";
 import { buildAuthorizeUrl, callbackUri, createPkcePair } from "../lib/github-oauth.mjs";
-import { methodNotAllowed, redirectResponse, serve } from "../lib/http.mjs";
+import { errorResponse, methodNotAllowed, redirectResponse, serve } from "../lib/http.mjs";
+import { hashToken, randomToken } from "../lib/secrets.mjs";
 import {
   LOGIN_COOKIE,
   OAUTH_COOKIE,
@@ -93,16 +105,36 @@ async function readFields(request) {
   return () => null;
 }
 
+/** Whether this request is a browser form navigation rather than a JSON call. */
+function isFormNavigation(request) {
+  const type = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  return type === "application/x-www-form-urlencoded";
+}
+
+/** Where a form-posted failure lands, carrying any cookies already decided. */
+function failedPage(error, cookies) {
+  const status = error instanceof AuthUnavailableError ? "unavailable" : "expired";
+  return redirectResponse(`/login/?status=${status}`, { status: 303, cookies });
+}
+
 /** The route, over injected dependencies. */
 export function createStartRoute({ store, config: hostedConfig }) {
   return async function startRoute(request) {
     if (request.method !== "POST") return methodNotAllowed("POST");
+    const asPage = isFormNavigation(request);
+    const cookies = [];
+    try {
+      return await run(request, cookies);
+    } catch (error) {
+      return asPage ? failedPage(error, cookies) : errorResponse(error, { cookies });
+    }
+  };
 
+  async function run(request, cookies) {
     requireExactOrigin(request, hostedConfig);
     const field = await readFields(request);
 
     const switching = field("switchAccount") === "true";
-    const cookies = [];
 
     if (switching) {
       /* Revoking a live session is a protected mutation, so it is held to the
@@ -119,12 +151,12 @@ export function createStartRoute({ store, config: hostedConfig }) {
       await store.revokeSession(sessionToken);
       cookies.push(clearCookie(SESSION_COOKIE));
     } else {
-      /* One check, not two: `consumeTransient` refuses an absent token as well
-         as an unknown, expired or already-consumed one, and all four are the
-         same answer here. A separate null check above it would be a guard no
-         input could reach on its own. */
+      /* One check, not two: `claimTransient` refuses an absent or malformed
+         token as well as an already-claimed one, and all three are the same
+         answer here. A separate null check above it would be a guard no input
+         could reach on its own. */
       const binding = readCookie(request, LOGIN_COOKIE);
-      if ((await store.consumeTransient("login", binding)) === null) throw new CsrfFailedError();
+      if (!(await store.claimTransient("login", binding))) throw new CsrfFailedError();
       cookies.push(clearCookie(LOGIN_COOKIE));
     }
 
@@ -132,16 +164,26 @@ export function createStartRoute({ store, config: hostedConfig }) {
        server-side. It never travels to GitHub and never rides in the `state`
        parameter, so the value the callback redirects to is one this service
        accepted rather than one the round trip carried back. */
-    const destination = validateDestination(field("destination") ?? HOSTED_LIMITS.AUTHORIZE_PATH);
+    /* `||` rather than `??`: a form that submits `destination=` sends an empty
+       string, not an absent field, and an empty string is the visitor asking for
+       the default rather than for a destination this route must refuse. */
+    const destination = validateDestination(field("destination") || HOSTED_LIMITS.AUTHORIZE_PATH);
 
+    /* The `state` GitHub carries and the cookie this browser holds are two
+       different secrets. Making them one value looked like a double submit and
+       was not: the `__Host-` prefix is enforced by browsers, and the server only
+       reads a `Cookie` header, so anyone who learned the callback URL - a
+       function access log, an APM trace, a synced history entry - knew both
+       halves and could redeem the code with `curl`. Only the browser that
+       started the transaction holds `binding`, and only its SHA-256 is stored. */
+    const binding = randomToken();
     const pkce = createPkcePair();
     const transaction = await store.createTransient("oauth", {
       codeVerifier: pkce.verifier,
       destination,
+      bindingHash: hashToken(binding),
     });
-    cookies.push(
-      serializeCookie(OAUTH_COOKIE, transaction.token, { maxAgeSeconds: TRANSIENT_TTL_SECONDS }),
-    );
+    cookies.push(serializeCookie(OAUTH_COOKIE, binding, { maxAgeSeconds: TRANSIENT_TTL_SECONDS }));
 
     const authorizeUrl = buildAuthorizeUrl({
       clientId: hostedConfig.github.clientId,
@@ -151,7 +193,7 @@ export function createStartRoute({ store, config: hostedConfig }) {
       selectAccount: switching,
     });
     return redirectResponse(authorizeUrl, { status: 303, cookies });
-  };
+  }
 }
 
 export default serve(createStartRoute);

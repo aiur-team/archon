@@ -134,7 +134,11 @@ async function providerJson(url, init, fetchImpl, timeoutMs) {
   let response;
   try {
     response = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-  } catch {
+  } catch (error) {
+    /* A `TypeError` here is this module calling `fetch` wrongly rather than the
+       provider being unreachable, and dressing a programming error as a
+       retryable outage would hide it behind a 503 forever. */
+    if (error instanceof TypeError) throw error;
     throw providerOutage();
   }
   /* 5xx is the provider being unwell and is retryable; 4xx is this request being
@@ -211,8 +215,14 @@ export async function exchangeCodeForIdentity(
      at all means the credential in play is not the one this deployment is
      configured for - a reused client ID from an app with `repo`, say. Using such
      a token would be exercising a permission the visitor's consent screen never
-     showed them. */
-  if (typeof token.scope === "string" && token.scope !== "") throw new AuthRequestError();
+     showed them.
+     The condition is "absent, or the empty string" rather than "not a non-empty
+     string": a `scope` that arrives as `["repo"]`, or as any other shape this
+     code does not understand, is a response whose granted permissions cannot be
+     read, and an unreadable answer to "what did you grant?" is not a no. */
+  if (token.scope !== undefined && token.scope !== null && token.scope !== "") {
+    throw new AuthRequestError();
+  }
 
   const user = await providerJson(
     GITHUB_USER_URL,

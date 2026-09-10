@@ -202,10 +202,23 @@ Four things are load-bearing:
   both proceed, and the second delete succeeds against nothing.
   `consumeTransient` writes the record back marked consumed with
   `onlyIfMatch: <etag>` and treats `modified: false` as "somebody else won".
+- **`{modified: true}` is not believed.** `@netlify/blobs@11.0.2` maps *every*
+  non-412 status of a conditional PUT to `{modified: true}`, and its retry
+  helper returns a 5xx response instead of throwing once the attempts are used
+  up — so a store having a bad day reports guarded writes as successful. Every
+  write here carries a random `writeId` and counts as landed only when the
+  record reads back carrying it. A `onlyIfMatch` write is refused outright when
+  the read carried no ETag, because the client applies the condition only when
+  the value is truthy and would otherwise perform an unconditional write.
 - **A revocation is never reported without being observed.** A guarded write
   that throws is *ambiguous* — a timed-out request may still have applied — so
   the record is read back. Dead means success; live means an outage, and an
   outage is an `AuthUnavailableError` rather than a claim of success.
+- **The pre-login binding is claimed, not issued.** `claimTransient` writes the
+  single-use marker when a token is first *used*, so the route that hands out
+  the binding writes nothing at all. Minting a record on an unauthenticated
+  `GET` made that route an anonymous write amplifier into the same store the
+  sessions live in.
 
 Nothing schedules a cleanup. Expiry is enforced on every lookup, so physical
 records outliving their lifetimes is the normal case rather than an anomaly; see
@@ -286,7 +299,7 @@ deployment.
 | --- | --- | --- |
 | `__Host-archon_session` | 7 days | On logout and on callback rotation. |
 | `__Host-archon_oauth` | 15 minutes | Once, by the callback. |
-| `__Host-archon_login` | 15 minutes | Once, by a start. |
+| `__Host-archon_login` | 15 minutes | Once, by a start (claim-on-use). |
 | `__Host-archon_publish` | 15 minutes | **Survives an account switch**; cleared on a decision or at expiry. |
 
 **Why the pre-login binding is presence rather than a double submit.** C1 freezes
@@ -300,13 +313,33 @@ configured origin exactly. It is single-use through the same compare-and-set as
 the OAuth state, so a captured binding cannot be replayed and a retry is a new
 transaction rather than a replayed one.
 
+**The OAuth cookie and the `state` are two different secrets.** The cookie
+carries a random binding that never leaves the browser; only its SHA-256 is
+stored on the transaction, and `state` — the half that travels through GitHub
+and lands in access logs, traces and history — is useless without it. Making
+them one value looked like a double submit and was not: the `__Host-` prefix is
+enforced by browsers, while the server only reads a `Cookie` header, so anyone
+who learned the callback URL held both halves and could redeem the code with
+`curl`. The callback also proves the binding *before* it writes or clears
+anything, so a stranger cannot burn a victim's in-flight transaction either.
+
 **Why callback failures redirect.** The callback is reached by a top-level
 navigation, so a JSON envelope rendered as text is not an actionable retry path.
 Every failure lands on `/login/?status=<word>` with `word` from the closed set
-`denied | expired | unavailable`, which the sign-in page announces. The
-distinctions a visitor can act on survive; everything about *why* the
-transaction was rejected stays on the server, so the landing page cannot be used
-to tell a bad state from a bad code.
+`denied | expired | unavailable`, which the sign-in page announces, plus the
+visitor's `destination` once the binding has been proved so a retry lands where
+they were going. The distinctions a visitor can act on survive; everything about
+*why* the transaction was rejected stays on the server, so the landing page
+cannot be used to tell a bad state from a bad code.
+
+The start route does the same thing for the same reason: the sign-in page
+submits a real `<form method="post">`, so a form submission that fails lands on
+`/login/?status=<word>` while a JSON caller still receives the C3 envelope.
+
+**Where `/publish/authorize` goes today: nowhere.** It is the default
+destination and AHU-007 owns the page behind it, so on this deployment a
+completed sign-in currently 303s to a 404. The session is real and the cookie is
+set; only the landing page is missing until that ticket lands.
 
 ## The AHU-007 seam
 
@@ -341,10 +374,13 @@ consume, because C1 requires the binding to survive an account switch — a visi
 who realises they are signed in as the wrong account must be able to switch and
 still land on the same pending approval.
 
-Immutable fixtures for all of this live in `test/fixtures/auth.mjs`:
-`MemoryBlobStore` implements the exact two store methods `AuthStore` uses with
-the real conditional-write semantics, `githubProvider` is a narrow fake for the
-two fixed endpoints, and `fixedClock` is a clock a test moves by hand.
+Immutable fixtures for all of this live in `test/fixtures/auth.mjs`.
+`MemoryBlobStore` implements the exact two store methods `AuthStore` uses, with
+the real conditional-write semantics *and* two faults the real client actually
+produces — a conditional write that reports `{modified: true}` without applying,
+and a read that carries no ETag. Both are the shapes a tidier fake omits, and
+both are where the interesting bugs were. `githubProvider` is a narrow fake for
+the two fixed endpoints, and `fixedClock` is a clock a test moves by hand.
 
 ### `lib/config.mjs`
 
@@ -462,6 +498,13 @@ after fifteen minutes and nothing under `sessions/` after seven days. Deleting
 records older than those windows is safe at any time and is the whole of the
 maintenance this ticket asks for. Do not assume the store offers a TTL or a
 conditional delete — this design does not depend on either.
+
+`GET /api/hosted/session` writes nothing, so no unauthenticated read can grow
+the store. The remaining anonymous write surface is `POST
+/api/hosted/auth/github/start`, which writes one claim marker and one
+transaction per accepted request. Rate limiting that route is a platform
+concern this ticket does not implement; the records it creates are small and are
+covered by the same fifteen-minute retention window.
 
 ### Live acceptance is still owed
 

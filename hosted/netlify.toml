@@ -51,27 +51,30 @@
   [headers.values]
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "no-referrer"
-    Content-Security-Policy = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-    Cache-Control = "private, no-store"
-
-# The sign-in page is the one static page that runs a script and talks to this
-# origin's own API, so it needs a policy the `/*` block above deliberately does
-# not grant. Each addition is the minimum for one thing the page has to do:
-#
-#   script-src 'self'   loads `login.js`. No inline script, no external host.
-#   connect-src 'self'  lets the bootstrap call `/api/hosted/session` to obtain
-#                       the pre-login CSRF binding. The page has no other fetch.
-#   form-action         the sign-in form posts to this origin, and that POST is
-#                       answered with a 303 to github.com. Browsers check the
-#                       redirect target against `form-action` too, so the
-#                       provider's authorize origin has to be named here or the
-#                       sign-in dies at the redirect. It is a literal origin
-#                       rather than a wildcard, and it is the only external
-#                       origin any hosted response permits.
-[[headers]]
-  for = "/login/*"
-  [headers.values]
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "no-referrer"
+    # One policy for the whole static tree, rather than a strict `/*` rule plus a
+    # relaxed `/login/*` one. Netlify emits the headers of every matching rule,
+    # and a browser handed two `Content-Security-Policy` headers enforces their
+    # *intersection* - so a second, laxer block would not have relaxed anything.
+    # It would have left `default-src 'none'` in force on the sign-in page, with
+    # `login.js` blocked, the submit button stuck disabled and sign-in simply
+    # dead. Fail-closed, but dead.
+    #
+    # So the additions are stated once, here, and each is the minimum for one
+    # thing the sign-in page has to do:
+    #
+    #   script-src 'self'   loads `login.js`. No inline script, no external host.
+    #   connect-src 'self'  lets the bootstrap call `/api/hosted/session` for the
+    #                       pre-login CSRF binding. The page has no other fetch.
+    #   form-action         the sign-in form posts to this origin, and that POST
+    #                       is answered with a 303 to github.com. Browsers check
+    #                       the redirect target against `form-action` too, so the
+    #                       provider's authorize origin has to be named or the
+    #                       sign-in dies at the redirect. A literal origin, never
+    #                       a wildcard, and the only external origin any hosted
+    #                       response permits.
+    #
+    # `default-src 'none'` still refuses images, frames, objects, fonts and every
+    # connection that is not same-origin, on every page including this one.
     Content-Security-Policy = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com"
     Cache-Control = "private, no-store"
+

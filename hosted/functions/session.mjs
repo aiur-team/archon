@@ -25,6 +25,15 @@
  * cookie, so a bootstrap that fetches this route is the only conformant way for
  * a not-yet-signed-in browser to acquire a binding at all.
  *
+ * **Issuing it writes nothing.** The binding is a random cookie value and
+ * nothing more; the store record that makes it single-use is created by the
+ * start route when the token is actually *used* (`claimTransient`). An earlier
+ * version minted a record here, which meant an unauthenticated client that
+ * simply never returned its cookie could write one permanent blob per request -
+ * an anonymous write amplifier into the same store the sessions live in, with no
+ * collection behind it. The single-use property is unchanged, because the claim
+ * is an `onlyIfNew` write that only the first use can win.
+ *
  * It issues **only** that one. The OAuth-state and publication-binding cookies
  * are neither read nor cleared here, which is C1's "do not consume all three
  * cookies on the first bootstrap request" stated as code: a bootstrap that
@@ -35,6 +44,7 @@
 import { jsonResponse, methodNotAllowed, serve } from "../lib/http.mjs";
 import { validateSessionResponse } from "../lib/contracts.mjs";
 import { TRANSIENT_TTL_SECONDS } from "../lib/auth-store.mjs";
+import { randomToken } from "../lib/secrets.mjs";
 import {
   LOGIN_COOKIE,
   SESSION_COOKIE,
@@ -65,21 +75,9 @@ export function createSessionRoute({ store }) {
       );
     }
 
-    /* A browser that already holds a live binding keeps it, rather than being
-       handed a fresh one. Two reasons, and the second is the important one: a
-       page that polls this route should not invalidate the binding its own form
-       is about to present, and a route that wrote a record on every anonymous
-       GET would let an unauthenticated caller grow the store one blob per
-       request. Reuse bounds that at one record per browser per fifteen minutes. */
-    const held = readCookie(request, LOGIN_COOKIE);
-    if (held !== null && (await store.readTransient("login", held)) !== null) {
-      return jsonResponse(validateSessionResponse({ v: 1, authenticated: false }));
-    }
-
-    const binding = await store.createTransient("login");
     return jsonResponse(validateSessionResponse({ v: 1, authenticated: false }), {
       cookies: [
-        serializeCookie(LOGIN_COOKIE, binding.token, { maxAgeSeconds: TRANSIENT_TTL_SECONDS }),
+        serializeCookie(LOGIN_COOKIE, randomToken(), { maxAgeSeconds: TRANSIENT_TTL_SECONDS }),
       ],
     });
   };

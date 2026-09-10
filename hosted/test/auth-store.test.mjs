@@ -226,6 +226,80 @@ test("a store that refuses the create is an outage, not a silent overwrite", asy
   await assert.rejects(() => store.createSession(PRINCIPAL_ALPHA), AuthUnavailableError);
 });
 
+test("a conditional write that reports success without applying is not a revocation", async () => {
+  /* `@netlify/blobs` maps every non-412 status of a conditional PUT to
+     `{modified: true}` and returns a 5xx response rather than throwing, so
+     believing that flag would make logout answer 200 for a session that is
+     still live. */
+  const { store, blobs } = memoryAuthStore();
+  const { token } = await store.createSession(PRINCIPAL_ALPHA);
+  blobs.fail("sessions/", "phantom");
+  await assert.rejects(() => store.revokeSession(token), AuthUnavailableError);
+  assert.notEqual(await store.readSession(token), null, "the session is still live, and says so");
+});
+
+test("a phantom consume does not win the compare-and-set", async () => {
+  const { store, blobs } = memoryAuthStore();
+  const { token } = await store.createTransient("oauth", { codeVerifier: "v" });
+  blobs.fail("auth/oauth/", "phantom");
+  await assert.rejects(() => store.consumeTransient("oauth", token), AuthUnavailableError);
+  assert.notEqual(await store.readTransient("oauth", token), null, "nothing was consumed");
+});
+
+test("a phantom create is an outage rather than a session", async () => {
+  const { store, blobs } = memoryAuthStore();
+  blobs.fail("sessions/", "phantom");
+  await assert.rejects(() => store.createSession(PRINCIPAL_ALPHA), AuthUnavailableError);
+  assert.deepEqual(blobs.keys(), []);
+});
+
+test("a read with no ETag refuses the compare-and-set instead of downgrading it", async () => {
+  /* The client applies `onlyIfMatch` only when the value is truthy, so an absent
+     ETag would silently turn every guarded write into an unconditional one. */
+  const { store, blobs } = memoryAuthStore();
+  const { token } = await store.createSession(PRINCIPAL_ALPHA);
+  blobs.fail("sessions/", "noetag");
+  await assert.rejects(() => store.revokeSession(token), AuthUnavailableError);
+  assert.notEqual(await store.readSession(token), null);
+
+  const transient = await store.createTransient("oauth", { codeVerifier: "v" });
+  blobs.fail("auth/oauth/", "noetag");
+  await assert.rejects(() => store.consumeTransient("oauth", transient.token), AuthUnavailableError);
+  assert.notEqual(await store.readTransient("oauth", transient.token), null);
+});
+
+test("a claim is single use and needs no prior record", async () => {
+  const { store, blobs } = memoryAuthStore();
+  const token = "c".repeat(43);
+  assert.deepEqual(blobs.keys(), [], "issuing a binding writes nothing");
+  assert.equal(await store.claimTransient("login", token), true);
+  assert.equal(await store.claimTransient("login", token), false, "a replay must lose");
+  assert.equal(await store.readTransient("login", token), null, "a claim is already consumed");
+});
+
+test("a malformed claim token is refused without writing", async () => {
+  const { store, blobs } = memoryAuthStore();
+  for (const token of ["", "short", "has/slash".padEnd(40, "a"), "x".repeat(300), null, 12]) {
+    assert.equal(await store.claimTransient("login", token), false, String(token));
+  }
+  assert.deepEqual(blobs.keys(), []);
+});
+
+test("reading a consumed transient record finds nothing", async () => {
+  const { store } = memoryAuthStore();
+  const { token } = await store.createTransient("oauth", { codeVerifier: "v" });
+  await store.consumeTransient("oauth", token);
+  assert.equal(await store.readTransient("oauth", token), null);
+});
+
+test("a programming error is not dressed up as a storage outage", async () => {
+  const { store, blobs } = memoryAuthStore();
+  blobs.setJSON = async () => {
+    throw new TypeError("The 'onlyIfMatch' and 'onlyIfNew' options are mutually exclusive.");
+  };
+  await assert.rejects(() => store.createSession(PRINCIPAL_ALPHA), TypeError);
+});
+
 test("the adapter requires a store and a clock", () => {
   assert.throws(() => new AuthStore(null), TypeError);
   assert.throws(() => new AuthStore(new MemoryBlobStore(), { now: 0 }), TypeError);

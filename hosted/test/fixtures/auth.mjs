@@ -21,6 +21,19 @@
  * about single use and revocation is a claim about those semantics, so a
  * consumer testing against this fake is testing against the same rules.
  *
+ * It also models two behaviours of the real client that a tidier fake would
+ * quietly omit, and that are exactly where the interesting bugs live:
+ *
+ *  - **`"phantom"`** — a conditional write that reports `{modified: true}`
+ *    without applying. `@netlify/blobs@11.0.2` maps every non-412 status of a
+ *    conditional PUT to `{modified: true}`, and its retry helper returns a 5xx
+ *    response rather than throwing, so a store having a bad day reports guarded
+ *    writes as successful. A fake that could not produce this would let the
+ *    suite "prove" a revocation guarantee the library cannot deliver.
+ *  - **`"noetag"`** — a read that carries no ETag. `Store.getConditions` applies
+ *    `onlyIfMatch` only when the value is truthy, so an absent ETag silently
+ *    downgrades a compare-and-set to an unconditional write.
+ *
  * `githubProvider` is a fake `fetch` for the two fixed GitHub endpoints. It is
  * narrow on purpose: it answers those two URLs and throws on anything else, so a
  * test that accidentally exercises a third endpoint fails loudly rather than
@@ -114,6 +127,10 @@ export function fixedClock(startMs = Date.parse("2026-09-09T12:00:00.000Z")) {
  *               even though the record is now dead
  *   "refuse"    the next matching `setJSON` returns `{modified: false}` without
  *               applying, which is what a lost compare-and-set race looks like
+ *   "phantom"   the next matching `setJSON` returns `{modified: true, etag: ""}`
+ *               without applying, which is what the real client returns for a
+ *               conditional PUT answered with 500 or 403
+ *   "noetag"    the next matching `getWithMetadata` omits the ETag
  *
  * Each entry fires once and is removed, so a test can say "fail the first write
  * and then behave" without a stateful reset.
@@ -143,17 +160,22 @@ export class MemoryBlobStore {
 
   async getWithMetadata(key, options = {}) {
     this.reads.push({ key, options });
-    if (this.#takeFault(key, ["read"]) !== null) throw new Error("store read failed");
+    const fault = this.#takeFault(key, ["read", "noetag"]);
+    if (fault === "read") throw new Error("store read failed");
     const entry = this.entries.get(key);
     if (entry === undefined) return null;
+    if (fault === "noetag") return { data: structuredClone(entry.data), metadata: {} };
     return { data: structuredClone(entry.data), etag: entry.etag, metadata: {} };
   }
 
   async setJSON(key, data, conditions = {}) {
     this.writes.push({ key, conditions });
-    const fault = this.#takeFault(key, ["write", "ambiguous", "refuse"]);
+    const fault = this.#takeFault(key, ["write", "ambiguous", "refuse", "phantom"]);
     if (fault === "write") throw new Error("store write failed");
     if (fault === "refuse") return { modified: false };
+    /* Not applied, and still reported as a modification - the shape the real
+       client returns when a conditional PUT is answered with 500 or 403. */
+    if (fault === "phantom") return { modified: true, etag: "" };
 
     const existing = this.entries.get(key);
     if (conditions.onlyIfNew === true && existing !== undefined) return { modified: false };
