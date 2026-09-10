@@ -114,6 +114,7 @@ jobs:
           hosted/test/publication-store.test.mjs
           hosted/test/publications.test.mjs
           hosted/test/publications-agent.test.mjs
+          hosted/test/document-routes.test.mjs
           hosted/test/publications-artifact.test.mjs
 
       # AHU-011's operational half: the publish-disable policy, the two per-IP
@@ -311,6 +312,17 @@ jobs:
           # renderer's copy of the render-message contract equal to
           # `hosted/lib/contracts.mjs` before it starts a browser.
           node scripts/test-hosted-renderer.mjs
+          # AHU-009's private-document oracle. It runs the real viewer, read,
+          # session and logout handlers on one loopback origin over a
+          # deterministic identity store and AHU-004 complete records, serves
+          # the renderer build on a second, and gives an artifact an adversary
+          # origin to try to reach on a third. Half of its cases are HTTP -- the
+          # owner/stranger/missing/malformed matrix, HEAD, conditional requests,
+          # and the rule that a denial's whole response carries no marker of the
+          # document it refused -- and half are browser: the artifact has no
+          # authority over the account page, a forged readiness message from the
+          # renderer origin gets nothing, and sign-out revokes server-side.
+          node scripts/test-hosted-owner-viewer.mjs
 
       # AHU-010's clean-consumer proof. Every other gate above runs inside this
       # checkout, where `templates/base/`, `templates/skeleton/` and

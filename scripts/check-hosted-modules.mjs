@@ -136,6 +136,9 @@
  * export and a `config` object - and must be routed under `/api/hosted/`,
  * keeping the hosted API in one namespace that operator routing and rate-limit
  * rules can name. A `config.path` may be an array, and every entry is checked.
+ * The one exception is `ALLOWED_PAGE_ROUTES` below: a closed list of exact
+ * non-API page addresses, which today holds only the contract-frozen
+ * `/docs/:documentId`.
  *
  * Finding no functions is not a failure while AHU-001 ships the shell alone;
  * finding no modules at all is, and so is a `hosted/functions/` directory that
@@ -179,8 +182,27 @@ const FIXTURE_DIRECTORY = "test";
 /** Static assets. Served as committed and never imported by a function. */
 const ASSET_DIRECTORY = "public";
 
-/** The path prefix every hosted HTTP function is routed under. */
+/** The path prefix every hosted HTTP *API* function is routed under. */
 const ROUTED_PREFIX = "/api/hosted/";
+
+/**
+ * The closed set of non-API page routes a hosted function may serve.
+ *
+ * The namespace rule above exists so that operator routing and per-route rate
+ * limits have one prefix to name, and it is the right rule for every endpoint
+ * that returns a JSON envelope. It is the wrong rule for exactly one thing: the
+ * stable, human-typed address of a document. `/docs/<id>` is printed in a CLI
+ * receipt, saved in a browser's history and pasted between machines, and
+ * `hosted/lib/contracts.mjs` freezes it as `DOCUMENT_PATH_PREFIX` -- it is part
+ * of C1's destination grammar, not a URL this deployment is free to move under
+ * a prefix.
+ *
+ * So it is an allowlist of exact strings rather than a second prefix. A prefix
+ * such as `/docs/` would let any future `/docs/anything` route appear with no
+ * review; a literal means a new page route is a diff in this file, next to this
+ * paragraph, which is the only place the reasoning above is written down.
+ */
+const ALLOWED_PAGE_ROUTES = Object.freeze(["/docs/:documentId"]);
 
 /** The one source extension a hosted deploy directory may carry. */
 const LOADABLE = ".mjs";
@@ -517,7 +539,7 @@ function entryPointFaults(module) {
       faults.push(`declares a non-string route ${JSON.stringify(path)}`);
       continue;
     }
-    if (!path.startsWith(ROUTED_PREFIX)) {
+    if (!path.startsWith(ROUTED_PREFIX) && !ALLOWED_PAGE_ROUTES.includes(path)) {
       faults.push(`is routed at ${path}, outside the ${ROUTED_PREFIX}* hosted API namespace`);
     }
     paths.push(path);
