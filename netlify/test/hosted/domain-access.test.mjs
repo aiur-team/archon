@@ -21,6 +21,7 @@ import {
   DOMAIN_LIST_LIMITS,
   DomainAccessError,
   PUBLIC_MAILBOX_DOMAINS,
+  REFUSAL_REASONS,
   emailDomain,
   evaluateAccess,
   isPublicMailbox,
@@ -45,6 +46,11 @@ function documentListing(allowedDomains = LISTED_DOMAINS) {
  * read every refusal as `undefined.reason` - which is a `TypeError`, not a
  * passing test, but is also not the assertion anybody meant to write.
  */
+/** A literal string as a regular-expression source. */
+function escapeForMatch(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function refusalFrom(run, name) {
   try {
     run();
@@ -90,8 +96,12 @@ test("every write row in the shared table normalizes or refuses the way it says"
     assert.equal(error.reason, row.reason, row.name);
     if (row.domain !== undefined) {
       assert.equal(error.domain, row.domain, row.name);
-      /* The owner has to be able to see which entry they got wrong. */
-      assert.match(error.message, new RegExp(row.domain.replaceAll(".", "\\.")), row.name);
+      /* The owner has to be able to see which entry they got wrong - and a row
+         whose entry sanitises down to nothing is named `null` on purpose, so
+         there is no name to look for in the message. */
+      if (row.domain !== null) {
+        assert.match(error.message, new RegExp(escapeForMatch(row.domain)), row.name);
+      }
     }
   }
 });
@@ -418,6 +428,24 @@ test("a decision is frozen and always carries all three fields", () => {
     assert.ok(Object.isFrozen(decision));
     assert.deepEqual(Object.keys(decision).sort(), ["allowed", "reason", "role"]);
   }
+});
+
+test("the exported refusal vocabulary is the one the evaluator actually uses", () => {
+  /* An exported list of a function's outputs is a copy, and a copy drifts the
+     first time somebody adds a reason and forgets the constant. Pinned in both
+     directions against the shared table, so a new reason with no exported name
+     fails here and an exported name nothing produces fails here too. */
+  const produced = new Set(
+    READ_CASES.map(
+      (row) =>
+        evaluateAccess({
+          record: documentListing(row.allowedDomains ?? LISTED_DOMAINS),
+          principal: row.principal,
+        }).reason,
+    ).filter((reason) => reason !== null),
+  );
+  assert.deepEqual([...produced].sort(), [...REFUSAL_REASONS].sort());
+  assert.ok(Object.isFrozen(REFUSAL_REASONS));
 });
 
 test("the evaluator called with nothing refuses rather than throwing", () => {

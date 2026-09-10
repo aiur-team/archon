@@ -764,6 +764,49 @@ test("the verify-your-email page names no document and is not indexable", async 
   await assertDiscloses(await h.viewer(get(PAGE, { token: await h.signIn(unverified) })));
 });
 
+test("HEAD on the verify-your-email page is the same decision with no body", async () => {
+  /* Every other page in this module has this test, and the module's own promise
+     is that HEAD is never a cheaper way to get an answer than GET. A new page
+     that answered HEAD differently would be exactly the second, unauthorised
+     route to one address that promise exists to rule out. */
+  const h = await listing();
+  const unverified = { ...OTHER_PRINCIPAL, email: `ann@${LISTED_DOMAIN}`, emailVerified: false };
+  const token = await h.signIn(unverified);
+
+  const get = await h.viewer(new Request(new URL(PAGE, APP_ORIGIN), {
+    headers: { cookie: `${SESSION_COOKIE}=${token}` },
+  }));
+  const head = await h.viewer(new Request(new URL(PAGE, APP_ORIGIN), {
+    method: "HEAD",
+    headers: { cookie: `${SESSION_COOKIE}=${token}` },
+  }));
+
+  assert.equal(head.status, get.status);
+  assert.equal(head.headers.get("content-length"), get.headers.get("content-length"));
+  assert.equal(head.headers.get("content-security-policy"), get.headers.get("content-security-policy"));
+  assert.equal(await head.text(), "");
+  assert.notEqual(await get.text(), "");
+});
+
+test("an untyped failure on the page is an outage, never a missing document", async () => {
+  /* The catch-all around the record read must not turn a bug into "your
+     document is gone". A mis-wired dependency set throws a TypeError rather
+     than a contract error, and the module's own rule is that a failure is never
+     spelled as absence - so the untyped case has to reach the 503 page. */
+  const h = await listing();
+  const token = await h.signIn(FIXTURE_PRINCIPAL);
+  const broken = createViewerRoute({
+    store: h.auth.store,
+    config: hostedConfig({ HOSTED_RENDER_ORIGIN: RENDER_ORIGIN }),
+    publications: { store: {}, appOrigin: FIXTURE_APP_ORIGIN, production: true },
+  });
+
+  const response = await broken(get(PAGE, { token }));
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), UNAVAILABLE_PAGE);
+  assert.equal(response.headers.get("location"), null);
+});
+
 test("a reader refused by the domain rule learns nothing the page does not tell a stranger", async () => {
   const h = await listing();
   const stranger = { ...OTHER_PRINCIPAL, email: "ann@stranger.example", emailVerified: true };

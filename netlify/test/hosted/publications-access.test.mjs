@@ -22,7 +22,8 @@ import { test } from "node:test";
 
 import { validateWireError } from "../../lib/hosted/contracts.mjs";
 import { CSRF_HEADER, SESSION_COOKIE, deriveCsrfToken } from "../../lib/hosted/identity.mjs";
-import { createPublicationStore } from "../../lib/hosted/publication-store.mjs";
+import { MAX_WRITE_ATTEMPTS, createPublicationStore } from "../../lib/hosted/publication-store.mjs";
+import { publicationDependencies } from "../../lib/hosted/publications.mjs";
 import accessHandler, {
   createAccessRoute,
   config as accessConfig,
@@ -35,6 +36,7 @@ import {
   FIXTURE_PRINCIPAL,
   FIXTURE_PUBLICATION_ID,
   OTHER_PRINCIPAL,
+  PUBLISHING_ENV,
   RECORDS,
 } from "./fixtures/publications.mjs";
 import { LISTED_DOMAIN, LISTED_DOMAINS, SECOND_LISTED_DOMAIN, WRITE_CASES } from "./fixtures/domain-access.mjs";
@@ -42,6 +44,18 @@ import { createClock, createProviderDouble } from "./helpers/publication-store.m
 
 const PATH = `/api/hosted/publications/${FIXTURE_PUBLICATION_ID}/access`;
 const OTHER_ID = "1234567890abcdef1234567890abcdef";
+
+/**
+ * A `getStore` that fails if anybody calls it.
+ *
+ * `publicationDependencies` promises to contact no provider while merely being
+ * assembled - the hosted module gate loads this tree with no credential - so
+ * the honest stub for a test about *configuration* is one that proves the
+ * promise rather than one that quietly returns a double.
+ */
+function neverOpened() {
+  throw new Error("publicationDependencies opened a store while being assembled");
+}
 
 /** One harness over a real auth store and the real publication adapter. */
 function harness({ seed = "complete", allowPublicMailboxes = false, allowedDomains = null } = {}) {
@@ -298,12 +312,50 @@ test("every write row in the shared table answers the same way over HTTP", async
     }
 
     const body = await refusal(response, 400, row.reason);
-    if (row.domain !== undefined) {
-      assert.match(body.error.message, new RegExp(row.domain.replaceAll(".", "\\.")), row.name);
+    if (row.domain !== undefined && row.domain !== null) {
+      /* A prefix, because two bounds compose here and both are meant to: the
+         evaluator caps the named entry at a domain's 253 characters, and
+         `safeMessage` then caps the whole C3 message at 200 scalars. An entry
+         longer than the message bound is therefore truncated with an ellipsis,
+         which is correct - `validateWireError` in `refusal()` is what proves
+         the envelope stayed legal. What matters here is that the owner sees
+         enough of their own entry to recognise it. */
+      assert.match(
+        body.error.message,
+        new RegExp(row.domain.slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        row.name,
+      );
+      /* The message is the only place owner-authored text reaches the wire, so
+         what did *not* survive matters as much as what did: no markup, no
+         control characters, and nothing longer than the bound. */
+      assert.doesNotMatch(body.error.message, /[<>\r\n]/, row.name);
     }
     /* A refused list changes nothing. */
     assert.deepEqual(h.record().allowedDomains, [], `${row.name}: stored nothing`);
   }
+});
+
+test("the operator switch reaches the adapter, in both directions", async () => {
+  /* The one line joining the validated configuration to the adapter, and the
+     only guard in this ticket whose failure is *silent and open*: a wiring
+     break that hardcoded `true` here would turn the public-mailbox denylist off
+     site-wide while every other test in this repository stayed green, because
+     they all inject the dependency set by hand. So this is the one test that
+     builds it the way production does. */
+  const env = { ...PUBLISHING_ENV };
+  assert.equal(publicationDependencies({ env, getStore: neverOpened }).allowPublicMailboxes, false);
+  assert.equal(
+    publicationDependencies({
+      env: { ...env, ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS: "true" },
+      getStore: neverOpened,
+    }).allowPublicMailboxes,
+    true,
+  );
+  /* And it is the configuration reader's answer, not a second parse: a value
+     that reader refuses must not reach the adapter as a falsy default. */
+  assert.throws(() =>
+    publicationDependencies({ env: { ...env, ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS: "yes" }, getStore: neverOpened }),
+  );
 });
 
 test("the override lets an operator list a mailbox provider on purpose", async () => {
@@ -343,13 +395,54 @@ test("an empty list is how a policy is cleared", async () => {
   assert.deepEqual(h.record().allowedDomains, []);
 });
 
-test("writing the same list twice is a success both times", async () => {
+test("writing the same list twice is a success both times, and writes once", async () => {
   const h = harness();
   const token = await h.session();
   assert.equal((await h.access(put(token, [LISTED_DOMAIN]))).status, 200);
+
+  /* The second write is skipped, and that is asserted against the provider
+     rather than against the response: the status and the body are identical
+     whether or not a conditional write was issued, so a body-only check would
+     pass on an implementation that re-writes the record every time - which is a
+     race an idempotent caller has no business being able to lose. */
+  const before = h.provider.calls.length;
   const again = await h.access(put(token, [` ${LISTED_DOMAIN.toUpperCase()} `]));
+  const issued = h.provider.calls.slice(before);
+
   assert.equal(again.status, 200);
   assert.deepEqual((await again.json()).allowedDomains, [LISTED_DOMAIN]);
+  assert.deepEqual(
+    issued.filter((call) => call.op === "set"),
+    [],
+    "an identical list was written again",
+  );
+});
+
+test("a policy write that keeps losing its race is a retryable 503, not a lie", async () => {
+  /* The fourth compare-and-set loop in this module, held to the same bound as
+     the other three: a caller that loses `MAX_WRITE_ATTEMPTS` consecutive
+     rounds against one field is looking at a fault, and must be told so rather
+     than handed a projection of a list that was never stored. */
+  const h = harness();
+  const token = await h.session();
+
+  let rounds = 0;
+  /* The double's hook is one-shot, so it re-arms itself: the record has to move
+     under *every* attempt, or the loop simply succeeds on the second one and
+     the attempt bound is never reached. The replacement is still complete and
+     still owned, so each round is refused on the ETag rather than
+     short-circuited by the ownership check. */
+  const moveTheRecord = () => {
+    rounds += 1;
+    h.provider.put(FIXTURE_KEY, JSON.stringify({ ...RECORDS.complete, allowedDomains: [] }));
+    h.provider.beforeWrite(moveTheRecord);
+  };
+  h.provider.beforeWrite(moveTheRecord);
+
+  const body = await refusal(await h.access(put(token, [LISTED_DOMAIN])), 503, "unavailable");
+  assert.equal(body.error.retryable, true);
+  assert.equal(rounds, MAX_WRITE_ATTEMPTS, "the loop did not spend exactly its attempt budget");
+  assert.deepEqual(h.record().allowedDomains, []);
 });
 
 test("the GET and the PUT answer the same shape", async () => {

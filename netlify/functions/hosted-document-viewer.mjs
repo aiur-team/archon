@@ -145,12 +145,15 @@ export function createViewerRoute({ store, config: hostedConfig, publications })
     try {
       await readAccessiblePublication({ publicationId: documentId, principal }, publications);
     } catch (error) {
-      if (error instanceof HostedContractError && error.code === "email_unverified") {
-        return emailUnverifiedPage(method);
-      }
-      if (error instanceof HostedContractError && error.code === "unavailable") {
-        return unavailablePage(method);
-      }
+      /* Only a *typed* refusal may become the not-found page. Anything else -
+         a `TypeError` from a mis-wired dependency set, a bug in the adapter -
+         is this service failing, and rendering it as absence would tell every
+         owner at once that their document is gone: the one thing this module's
+         own rule says a failure must never read as. An untyped throw is an
+         outage, and it says so. */
+      if (!(error instanceof HostedContractError)) return unavailablePage(method);
+      if (error.code === "email_unverified") return emailUnverifiedPage(method);
+      if (error.code === "unavailable") return unavailablePage(method);
       return notFoundPage(method);
     }
 

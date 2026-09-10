@@ -306,7 +306,35 @@ export const WRITE_CASES = Object.freeze([
   { name: "a wildcard is not a domain", input: ["*.example.com"], reason: "invalid_domain" },
   { name: "a regular expression is not a domain", input: ["^.*example\\.com$"], reason: "invalid_domain" },
   { name: "an address is not a domain", input: ["ann@example.com"], reason: "invalid_domain" },
-  { name: "a URL is not a domain", input: ["https://example.com"], reason: "invalid_domain" },
+  {
+    name: "a URL is not a domain, and only its domain-ish characters are named back",
+    input: ["https://example.com"],
+    reason: "invalid_domain",
+    /* The refused entry is named back to the owner so they can see which one
+       they got wrong, and it is the one piece of owner-authored text that
+       reaches a C3 error body - so what survives into the message is asserted,
+       not just that the entry was refused. The scheme punctuation is stripped;
+       the letters are not. */
+    domain: "httpsexample.com",
+  },
+  {
+    name: "markup and control characters in a refused entry never reach the message",
+    input: ["<script>alert(1)</script>.example\n"],
+    reason: "invalid_domain",
+    domain: "scriptalert1script.example",
+  },
+  {
+    name: "an over-long refused entry is bounded before it is named back",
+    input: [`${"a".repeat(400)}!.example`],
+    reason: "invalid_domain",
+    domain: "a".repeat(253),
+  },
+  {
+    name: "an entry with no domain-ish characters at all is not named back",
+    input: ["!!!"],
+    reason: "invalid_domain",
+    domain: null,
+  },
   { name: "a homoglyph domain is refused", input: ["exаmple.com"], reason: "invalid_domain" },
   {
     /* The one homoglyph the label pattern would *not* catch on its own, and

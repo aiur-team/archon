@@ -135,10 +135,19 @@ export const DOMAIN_LIST_LIMITS = Object.freeze({
   MAX_DOMAIN_LENGTH: 253,
 });
 
-/** The roles a hosted document has. There is no role vocabulary beyond these. */
-export const HOSTED_ROLES = Object.freeze(["owner", "reader"]);
-
-/** The refusal reasons `evaluateAccess` may answer with. */
+/**
+ * Every reason `evaluateAccess` may refuse with.
+ *
+ * Exported so a caller can exhaust the set rather than guess at it, and pinned
+ * against the evaluator's actual behaviour by the shared fixture table - a
+ * hand-maintained copy of a function's outputs is a list that drifts the first
+ * time somebody adds a fourth reason and forgets this line.
+ *
+ * There is deliberately no matching `ROLES` constant. A hosted publication
+ * resolves only `owner` and `reader`, but `explicitRole` lets a collaboration
+ * document pass its own vocabulary through, so any list here would be either
+ * wrong for one caller or a union that describes neither.
+ */
 export const REFUSAL_REASONS = Object.freeze(["session_required", "email_unverified", "not_found"]);
 
 /**
