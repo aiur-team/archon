@@ -184,6 +184,31 @@ look, **not** a receipt and not a claim the document exists. Only owner
 authentication in a browser settles that. No replacement publication is ever
 started automatically.
 
+## Agent instructions
+
+The package ships the instructions an agent needs to run this whole flow —
+install, skeleton, section format, `--hosted`, the split publish lifecycle, the
+exit codes, the human approval boundary and the trust rules around the service
+origin:
+
+```
+node_modules/@aiur-team/docbuild/dist/skills/archon-doc/SKILL.md
+```
+
+It is a plain Markdown file with nothing tool-specific in the instructions, so
+any agent can read it in place. Claude Code loads a skill from
+`.claude/skills/<name>/SKILL.md` in the project, so a copy makes it automatic:
+
+```sh
+test -e .claude/skills/archon-doc \
+  && echo ".claude/skills/archon-doc already exists; not overwriting" \
+  || { mkdir -p .claude/skills \
+       && cp -R node_modules/@aiur-team/docbuild/dist/skills/archon-doc .claude/skills/archon-doc; }
+```
+
+The existence check matters: an `archon-doc` directory already there is yours
+and may be edited, and nothing in this package will overwrite it for you.
+
 ## Assets
 
 The builder resolves its base assets in this order, and uses the first that
