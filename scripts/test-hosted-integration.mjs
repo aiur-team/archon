@@ -92,6 +92,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
+
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SELF), "..");
 const execFileAsync = promisify(execFile);
@@ -120,6 +122,47 @@ const EXPECTED_CASES = 102;
 function die(message) {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+/* ------------------------------------------------------------------ *
+ * The tenant's signing key.
+ *
+ * The identity provider is Auth0, and an Auth0 sign-in ends in an ID token the
+ * application verifies against the tenant's JWKS. This runner cannot reach a
+ * real tenant, so it mints the key once here: the provider fixture signs the
+ * token with the private half, and the callback route is handed a local JWKS
+ * built from the public half through `getKeySet`, so verification runs offline
+ * against the same key that signed. The private half never leaves this process.
+ * ------------------------------------------------------------------ */
+const PROVIDER_KEY_ID = "integration-tenant-key-1";
+const { publicKey: PROVIDER_PUBLIC_KEY, privateKey: PROVIDER_PRIVATE_KEY } =
+  await generateKeyPair("RS256", { extractable: true });
+const PROVIDER_JWKS = Object.freeze({
+  keys: [{ ...(await exportJWK(PROVIDER_PUBLIC_KEY)), kid: PROVIDER_KEY_ID, alg: "RS256", use: "sig" }],
+});
+
+/** The local JWKS the callback verifies against; injected as its `getKeySet`. */
+function providerKeySet() {
+  return createLocalJWKSet(PROVIDER_JWKS);
+}
+
+/**
+ * Mint an ID token the way the tenant would.
+ *
+ * The nonce is the one the start route minted and the authorize request carried;
+ * `badNonce` forges a mismatch so the callback's constant-time nonce check can
+ * be exercised through a provider that misbehaves rather than a hand-made claim.
+ */
+async function signProviderIdToken({ issuer, audience, subject, login, nonce, badNonce = false }) {
+  const payload = { sub: subject, nickname: login };
+  if (nonce !== undefined) payload.nonce = badNonce ? `wrong-${nonce}` : nonce;
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: "RS256", kid: PROVIDER_KEY_ID })
+    .setIssuedAt()
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setExpirationTime("1h")
+    .sign(PROVIDER_PRIVATE_KEY);
 }
 
 
@@ -678,19 +721,27 @@ function accountIdFor(id) {
 }
 
 /**
- * A loopback GitHub.
+ * A loopback Auth0 tenant.
  *
- * It is a fixture because a real provider cannot be part of an untrusted
+ * It is a fixture because a real tenant cannot be part of an untrusted
  * pull-request build, and it is a *strict* fixture because a permissive one
  * would quietly excuse the application from the checks it is supposed to be
- * performing. It verifies the client id, the redirect URI, the response type,
- * the PKCE challenge method, the client secret and -- on redemption -- that the
- * verifier hashes to the challenge that was presented. A code is single use and
- * is bound to the account the person picked.
+ * performing. It verifies the client id, the redirect URI, the PKCE challenge
+ * method, the client secret and -- on redemption -- that the verifier hashes to
+ * the challenge that was presented. A code is single use and is bound to the
+ * account the person picked, and the ID token it returns is signed by the
+ * tenant key and echoes the request's nonce.
  *
- * The `plan` selects the two upstream faults C1 has answers for: an outage,
- * which must reach a truthful unavailable page, and a grant carrying a scope
- * this application never requested, which must be refused rather than used.
+ * It answers on `github.com`, the one host the deployment's
+ * `form-action 'self' https://github.com` policy lets the browser be redirected
+ * to on the sign-in navigation. Auth0's endpoints are all derived from the
+ * configured domain, so pointing the domain at `github.com` puts the whole flow
+ * on the host the browser is already allowed to walk to, without relaxing the
+ * production policy for the test.
+ *
+ * The `plan` selects the upstream faults C1 has answers for: an outage, which
+ * must reach a truthful unavailable page, and a token whose nonce does not match
+ * the transaction, which must be refused rather than used.
  */
 /**
  * A certificate for `github.com`, generated into a private temporary directory.
@@ -726,17 +777,15 @@ function generateProviderCertificate(directory) {
   return { key: readFileSync(key), cert: readFileSync(certificate) };
 }
 
-async function startProvider({ clientId, clientSecret, certificateDir }) {
+async function startProvider({ clientId, clientSecret, certificateDir, issuer }) {
   const state = {
     plan: "ok",
     account: "first",
     tokenCalls: 0,
-    userCalls: 0,
     selectAccountRequests: 0,
     violations: [],
   };
   const codes = new Map();
-  const tokens = new Map();
 
   const violate = (message) => state.violations.push(message);
   /* The consent page echoes back the redirect URI, the state and the challenge
@@ -758,17 +807,22 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
          application answers the sign-in form with a 303 to the provider and a
          server redirect on a navigation is not something an in-page route
          interceptor can see. */
-      if (url.pathname === "/login/oauth/authorize") {
+      if (url.pathname === "/authorize") {
         const query = url.searchParams;
         if (query.get("client_id") !== clientId) violate("authorize: wrong client_id");
+        if (query.get("response_type") !== "code") violate("authorize: response_type is not code");
         if (query.get("code_challenge_method") !== "S256") violate("authorize: PKCE method is not S256");
-        for (const name of ["redirect_uri", "state", "code_challenge"]) {
+        if (!(query.get("scope") ?? "").split(" ").includes("openid")) violate("authorize: scope lacks openid");
+        for (const name of ["redirect_uri", "state", "code_challenge", "nonce"]) {
           if ((query.get(name) ?? "") === "") violate(`authorize: missing ${name}`);
         }
         const redirectUri = query.get("redirect_uri") ?? "";
         const stateValue = query.get("state") ?? "";
         const challenge = query.get("code_challenge") ?? "";
-        const selecting = query.get("prompt") === "select_account";
+        const nonce = query.get("nonce") ?? "";
+        /* Auth0 asks the upstream chooser again only when the application sends
+           `prompt=login`, which is the deliberate switch-account path. */
+        const selecting = query.get("prompt") === "login";
 
         /* Two buttons and a form, so the account choice is a real navigation a
            person makes and the runner drives it the way a person would. The
@@ -784,17 +838,18 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
         return send(
           200,
           "text/html; charset=utf-8",
-          `<!doctype html><meta charset="utf-8"><title>Sign in to GitHub</title>`
+          `<!doctype html><meta charset="utf-8"><title>Sign in</title>`
             + `<h1>Authorize Archon</h1>`
-            + `<form id="consent" method="GET" action="/login/oauth/decide">`
+            + `<form id="consent" method="GET" action="/decide">`
             + `<input type="hidden" name="redirect_uri" value="${attr(redirectUri)}">`
             + `<input type="hidden" name="state" value="${attr(stateValue)}">`
             + `<input type="hidden" name="code_challenge" value="${attr(challenge)}">`
+            + `<input type="hidden" name="nonce" value="${attr(nonce)}">`
             + `${button("first")}${button("second")}</form>${script}`,
         );
       }
 
-      if (url.pathname === "/login/oauth/decide") {
+      if (url.pathname === "/decide") {
         const query = url.searchParams;
         const account = query.get("account") === "second" ? "second" : "first";
         state.account = account;
@@ -802,6 +857,7 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
         codes.set(code, {
           challenge: query.get("code_challenge") ?? "",
           redirectUri: query.get("redirect_uri") ?? "",
+          nonce: query.get("nonce") ?? "",
           account,
         });
         const target = new URL(query.get("redirect_uri") ?? "");
@@ -810,7 +866,7 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
         return send(302, "text/plain; charset=utf-8", "", { Location: target.toString() });
       }
 
-      if (url.pathname === "/login/oauth/access_token") {
+      if (url.pathname === "/oauth/token") {
         state.tokenCalls += 1;
         if (state.plan === "outage") return send(503, "text/plain; charset=utf-8", "upstream is down");
 
@@ -819,11 +875,12 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
           request.on("data", (chunk) => chunks.push(chunk));
           request.on("end", () => done(Buffer.concat(chunks).toString("utf8")));
         }));
+        if (body.get("grant_type") !== "authorization_code") violate("token: wrong grant_type");
         if (body.get("client_id") !== clientId) violate("token: wrong client_id");
         if (body.get("client_secret") !== clientSecret) violate("token: wrong client_secret");
         const issued = codes.get(body.get("code") ?? "");
         if (issued === undefined) {
-          return send(200, "application/json", JSON.stringify({ error: "bad_verification_code" }));
+          return send(400, "application/json", JSON.stringify({ error: "invalid_grant" }));
         }
         /* Single use, and PKCE verified for real: a replayed code and a code
            redeemed without the verifier that produced its challenge are both
@@ -831,32 +888,39 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
         codes.delete(body.get("code") ?? "");
         if (body.get("redirect_uri") !== issued.redirectUri) violate("token: redirect_uri did not match");
         if (base64url(body.get("code_verifier") ?? "") !== issued.challenge) {
-          return send(200, "application/json", JSON.stringify({ error: "invalid_grant" }));
+          return send(400, "application/json", JSON.stringify({ error: "invalid_grant" }));
         }
 
-        const accessToken = `fixture-token-${randomBytes(12).toString("hex")}`;
-        tokens.set(accessToken, issued.account);
+        const identity = IDENTITIES[issued.account];
+        const idToken = await signProviderIdToken({
+          issuer,
+          audience: clientId,
+          subject: `github|${identity.id}`,
+          login: identity.login,
+          nonce: issued.nonce,
+          /* The one upstream fault beyond an outage C1 has an answer for: a
+             token whose nonce does not match the transaction, which the callback
+             must refuse rather than trust. */
+          badNonce: state.plan === "badnonce",
+        });
         return send(
           200,
           "application/json",
           JSON.stringify({
-            access_token: accessToken,
-            token_type: "bearer",
-            /* C1: this application requests no scope, so a grant that carries
-               one is a credential belonging to some other app. The `scope` plan
-               is what proves the refusal is the application's and not ours. */
-            scope: state.plan === "scope" ? "repo" : "",
+            id_token: idToken,
+            access_token: `fixture-token-${randomBytes(12).toString("hex")}`,
+            token_type: "Bearer",
+            scope: "openid profile email",
+            expires_in: 86400,
           }),
         );
       }
 
-      if (url.pathname === "/user") {
-        state.userCalls += 1;
-        const authorization = request.headers.authorization ?? "";
-        const account = tokens.get(authorization.replace(/^Bearer /, ""));
-        if (account === undefined) return send(401, "application/json", JSON.stringify({ message: "Bad credentials" }));
-        const identity = IDENTITIES[account];
-        return send(200, "application/json", JSON.stringify({ id: identity.id, login: identity.login }));
+      /* The Auth0 logout endpoint: it ends the tenant session and returns the
+         browser to the allowlisted `returnTo` the application built. */
+      if (url.pathname === "/v2/logout") {
+        const returnTo = url.searchParams.get("returnTo") ?? "/";
+        return send(302, "text/plain; charset=utf-8", "", { Location: returnTo });
       }
 
       return send(404, "text/plain; charset=utf-8", "not found");
@@ -894,16 +958,13 @@ async function startProvider({ clientId, clientSecret, certificateDir }) {
 /**
  * The `fetchImpl` the real callback handler is given.
  *
- * It maps exactly the two provider URLs `netlify/lib/hosted/github-oauth.mjs` names and
- * refuses everything else, so a handler that acquired a third provider call --
- * or reached any other host -- fails here rather than silently working against
- * a fixture that answers anything.
+ * It maps exactly the one token URL `netlify/lib/hosted/auth0-oidc.mjs` names to
+ * the loopback provider and refuses everything else, so a handler that acquired
+ * a second provider call -- or reached any other host -- fails here rather than
+ * silently working against a fixture that answers anything.
  */
-function providerFetch(providerOrigin, { GITHUB_TOKEN_URL, GITHUB_USER_URL }) {
-  const routes = new Map([
-    [GITHUB_TOKEN_URL, `${providerOrigin}/login/oauth/access_token`],
-    [GITHUB_USER_URL, `${providerOrigin}/user`],
-  ]);
+function providerFetch(providerOrigin, tokenUrl) {
+  const routes = new Map([[tokenUrl, `${providerOrigin}/oauth/token`]]);
   return (url, init) => {
     const target = routes.get(String(url));
     if (target === undefined) throw new Error(`the callback reached an unexpected upstream: ${url}`);
@@ -1463,17 +1524,17 @@ async function assemble(tempRoot) {
 
   const [
     contracts, configModule, httpModule, identity, publicationsModule, publicationStore, authStoreModule,
-    githubOauth, start, status, artifact, cancel, bind, review, decision,
+    auth0Oidc, start, status, artifact, cancel, bind, review, decision,
     authStart, authCallback, authLogout, session, viewer, documentRead, documents,
   ] = await Promise.all([
     load("netlify/lib/hosted/contracts.mjs"), load("netlify/lib/hosted/config.mjs"), load("netlify/lib/hosted/http.mjs"),
     load("netlify/lib/hosted/identity.mjs"), load("netlify/lib/hosted/publications.mjs"), load("netlify/lib/hosted/publication-store.mjs"),
-    load("netlify/lib/hosted/auth-store.mjs"), load("netlify/lib/hosted/github-oauth.mjs"),
+    load("netlify/lib/hosted/auth-store.mjs"), load("netlify/lib/hosted/auth0-oidc.mjs"),
     load("netlify/functions/hosted-publications-start.mjs"), load("netlify/functions/hosted-publications-status.mjs"),
     load("netlify/functions/hosted-publications-artifact.mjs"), load("netlify/functions/hosted-publications-cancel.mjs"),
     load("netlify/functions/hosted-publications-bind.mjs"), load("netlify/functions/hosted-publications-review.mjs"),
-    load("netlify/functions/hosted-publications-decision.mjs"), load("netlify/functions/hosted-auth-github-start.mjs"),
-    load("netlify/functions/hosted-auth-github-callback.mjs"), load("netlify/functions/hosted-auth-logout.mjs"),
+    load("netlify/functions/hosted-publications-decision.mjs"), load("netlify/functions/hosted-auth-start.mjs"),
+    load("netlify/functions/hosted-auth-callback.mjs"), load("netlify/functions/hosted-auth-logout.mjs"),
     load("netlify/functions/hosted-session.mjs"), load("netlify/functions/hosted-document-viewer.mjs"),
     load("netlify/functions/hosted-document-read.mjs"), load("netlify/lib/hosted/documents.mjs"),
   ]);
@@ -1486,6 +1547,7 @@ async function assemble(tempRoot) {
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,
     certificateDir: join(tempRoot, "provider-tls"),
+    issuer: auth0Oidc.issuerUrl("github.com"),
   });
 
   /* Every port has to exist before any configuration can name one, so the
@@ -1501,8 +1563,14 @@ async function assemble(tempRoot) {
   const env = {
     HOSTED_APP_ORIGIN: app.origin,
     HOSTED_RENDER_ORIGIN: renderer.origin,
-    GITHUB_CLIENT_ID: CLIENT_ID,
-    GITHUB_CLIENT_SECRET: CLIENT_SECRET,
+    /* The tenant stand-in answers on `github.com`, the one host the deployment's
+       `form-action 'self' https://github.com` policy lets the browser be
+       redirected to on the sign-in navigation. Every Auth0 endpoint is derived
+       from this domain, so the whole flow lands on the host the browser already
+       trusts, without relaxing the production policy for the test. */
+    AUTH0_DOMAIN: "github.com",
+    AUTH0_CLIENT_ID: CLIENT_ID,
+    AUTH0_CLIENT_SECRET: CLIENT_SECRET,
     HOSTED_PUBLISH_ENABLED: "true",
   };
   const mode = configModule.LOCAL_TEST;
@@ -1521,7 +1589,7 @@ async function assemble(tempRoot) {
   });
   const authDeps = () => ({ store: authStore, config: hostedConfig() });
 
-  const callbackFetch = providerFetch(provider.origin, githubOauth);
+  const callbackFetch = providerFetch(provider.origin, auth0Oidc.tokenEndpoint("github.com"));
   const bounded = (handler) => httpModule.withErrorBoundary(handler);
 
   /* Routing is by the `config.path` each module exports. Literal paths are
@@ -1546,7 +1614,13 @@ async function assemble(tempRoot) {
   declare(authStart, bounded(authStart.createStartRoute(authDeps())));
   declare(
     authCallback,
-    bounded(authCallback.createCallbackRoute({ ...authDeps(), fetchImpl: callbackFetch })),
+    bounded(
+      authCallback.createCallbackRoute({
+        ...authDeps(),
+        fetchImpl: callbackFetch,
+        getKeySet: providerKeySet,
+      }),
+    ),
   );
   declare(authLogout, bounded(authLogout.createLogoutRoute(authDeps())));
   declare(session, bounded(session.createSessionRoute({ store: authStore })));
@@ -1574,7 +1648,7 @@ async function assemble(tempRoot) {
     app, renderer, adversary, provider, blobs, routes, env, deployment, built, rendererDist,
     modules: {
       contracts, configModule, identity, publicationsModule, publicationStore, authStoreModule,
-      githubOauth, documents, start, status, artifact, cancel, viewer, documentRead,
+      auth0Oidc, documents, start, status, artifact, cancel, viewer, documentRead,
     },
     hostedConfig, authStore, publications,
     async close() {
@@ -1953,7 +2027,7 @@ async function authBinding(world, browser) {
 
   /* 2.1 The visitor changes their mind about which account to publish as. The
          switch is a real form on the real page, and it goes back out through
-         the provider with `prompt=select_account`. */
+         the provider with `prompt=login`. */
   const beforeSwitch = provider.state.selectAccountRequests;
   await page.locator("#switch-submit").click();
   await page.locator("#pick-second").click();
@@ -2236,7 +2310,7 @@ async function providerFailures(world, browser) {
   const callbacks = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname === "/api/hosted/auth/github/callback") callbacks.push(request.url());
+    if (url.pathname === "/api/hosted/auth/callback") callbacks.push(request.url());
   });
   await signIn(page, app.origin, { destination: "/login/" });
   assert.equal(callbacks.length, 1, `the sign-in produced ${callbacks.length} callbacks`);
@@ -2311,7 +2385,7 @@ async function providerFailures(world, browser) {
   const capturedCallbacks = [];
   capturedPage.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname === "/api/hosted/auth/github/callback") capturedCallbacks.push(request.url());
+    if (url.pathname === "/api/hosted/auth/callback") capturedCallbacks.push(request.url());
   });
   await capturedPage.goto(`${app.origin}/login/?destination=%2Flogin%2F`);
   await waitFor(
@@ -2372,15 +2446,17 @@ async function providerFailures(world, browser) {
   await outagePage.waitForURL((url) => url.searchParams.get("status") !== null, { timeout: 30_000 });
   assert.equal(new URL(outagePage.url()).searchParams.get("status"), "unavailable");
   await waitFor(
-    async () => /could not reach GitHub/.test(await outagePage.locator("#status").innerText()),
+    async () => /could not reach the sign-in service/.test(await outagePage.locator("#status").innerText()),
     "the sign-in page to say the provider was unreachable",
   );
   assert.equal((await currentSession(outagePage)).authenticated, false);
   record("auth: a provider outage reaches a truthful unavailable page and no session");
 
-  /* 3.3 The provider grants a scope this application never asked for. Using a
-         credential wider than the consent screen showed is refused. */
-  provider.state.plan = "scope";
+  /* 3.3 The tenant returns an ID token whose nonce does not match the one the
+         transaction minted. A token that fails verification -- a wrong nonce,
+         issuer, audience or algorithm -- must sign nobody in; the nonce is the
+         one this fixture can drive from the provider side. */
+  provider.state.plan = "badnonce";
   await outagePage.goto(`${app.origin}/login/?destination=%2Flogin%2F`);
   await waitFor(async () => !(await outagePage.locator("#submit").isDisabled()), "the sign-in binding");
   await outagePage.locator("#submit").click();
@@ -2388,7 +2464,7 @@ async function providerFailures(world, browser) {
   await outagePage.waitForURL((url) => url.searchParams.get("status") !== null, { timeout: 30_000 });
   assert.equal(new URL(outagePage.url()).searchParams.get("status"), "expired");
   assert.equal((await currentSession(outagePage)).authenticated, false);
-  record("auth: a grant carrying an unexpected scope signs nobody in");
+  record("auth: an ID token whose nonce does not match the transaction signs nobody in");
 
   provider.state.plan = "ok";
 

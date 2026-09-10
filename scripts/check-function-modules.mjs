@@ -247,7 +247,7 @@ const HOSTED_FUNCTION_PREFIX = "hosted-";
  * adding to it is a deliberate edit a reviewer can see, on top of the whole-tree
  * rule that every bare import be root-declared.
  */
-const HOSTED_DEPENDENCIES = Object.freeze(["@netlify/blobs", "tldts"]);
+const HOSTED_DEPENDENCIES = Object.freeze(["@netlify/blobs", "jose", "tldts"]);
 
 /** The path prefix `netlify.toml` excludes from the edge gate. */
 const ROUTED_PREFIX = "/api/";

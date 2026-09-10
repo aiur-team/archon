@@ -1,6 +1,5 @@
 /**
- * `POST /api/hosted/auth/github/start` - begin a browser-bound GitHub
- * authorization.
+ * `POST /api/hosted/auth/start` - begin a browser-bound Auth0 authorization.
  *
  * ## Why this is a POST with a binding, and what stands in for a double submit
  *
@@ -58,19 +57,24 @@
  * When the visitor is signed in and asks for a different account, this route is
  * a fully protected mutation - session plus session-bound CSRF - because it
  * revokes their Archon session. It then starts a fresh authorization with
- * `prompt=select_account`, and it deliberately leaves the publication binding
- * cookie alone, so the pending approval survives the switch.
+ * `prompt=login`, and it deliberately leaves the publication binding cookie
+ * alone, so the pending approval survives the switch.
  *
- * Revoking the Archon session does not sign the visitor out of GitHub, and
- * nothing in this flow implies it does; `prompt=select_account` is what makes
- * the provider ask which account, rather than silently reusing the one the
- * browser is already signed into.
+ * Revoking the Archon session does not sign the visitor out of Auth0, and
+ * nothing in this flow implies it does; `prompt=login` is what makes Auth0 ask
+ * which account, rather than silently reusing the tenant session the browser is
+ * already carrying.
  */
 
 import { AuthUnavailableError, CsrfFailedError } from "../lib/hosted/auth-errors.mjs";
 import { TRANSIENT_TTL_SECONDS } from "../lib/hosted/auth-store.mjs";
 import { HOSTED_LIMITS } from "../lib/hosted/contracts.mjs";
-import { buildAuthorizeUrl, callbackUri, createPkcePair } from "../lib/hosted/github-oauth.mjs";
+import {
+  buildAuthorizeUrl,
+  callbackUri,
+  createNonce,
+  createPkcePair,
+} from "../lib/hosted/auth0-oidc.mjs";
 import { errorResponse, methodNotAllowed, redirectResponse, serve } from "../lib/hosted/http.mjs";
 import { hashToken, randomToken } from "../lib/hosted/secrets.mjs";
 import {
@@ -85,7 +89,7 @@ import {
   validateDestination,
 } from "../lib/hosted/identity.mjs";
 
-export const config = { path: "/api/hosted/auth/github/start" };
+export const config = { path: "/api/hosted/auth/start" };
 
 /**
  * The submitted fields, from a form post or a JSON body.
@@ -180,7 +184,7 @@ export function createStartRoute({ store, config: hostedConfig }) {
     }
 
     /* The destination is validated here, at the edge, and then stored
-       server-side. It never travels to GitHub and never rides in the `state`
+       server-side. It never travels to Auth0 and never rides in the `state`
        parameter, so the value the callback redirects to is one this service
        accepted rather than one the round trip carried back. */
     /* `||` rather than `??`: a form that submits `destination=` sends an empty
@@ -188,28 +192,37 @@ export function createStartRoute({ store, config: hostedConfig }) {
        the default rather than for a destination this route must refuse. */
     const destination = validateDestination(field("destination") || HOSTED_LIMITS.AUTHORIZE_PATH);
 
-    /* The `state` GitHub carries and the cookie this browser holds are two
+    /* The `state` Auth0 carries and the cookie this browser holds are two
        different secrets. Making them one value looked like a double submit and
        was not: the `__Host-` prefix is enforced by browsers, and the server only
        reads a `Cookie` header, so anyone who learned the callback URL - a
        function access log, an APM trace, a synced history entry - knew both
        halves and could redeem the code with `curl`. Only the browser that
-       started the transaction holds `binding`, and only its SHA-256 is stored. */
+       started the transaction holds `binding`, and only its SHA-256 is stored.
+
+       The `nonce` is a third independent secret, stored beside the verifier and
+       echoed back inside the ID token, where the callback checks it in constant
+       time. It never leaves as a cookie: it closes a replayed-token attack that
+       PKCE and `state` do not, so it lives only in the server-side record. */
     const binding = randomToken();
     const pkce = createPkcePair();
+    const nonce = createNonce();
     const transaction = await store.createTransient("oauth", {
       codeVerifier: pkce.verifier,
       destination,
       bindingHash: hashToken(binding),
+      nonce,
     });
     cookies.push(serializeCookie(OAUTH_COOKIE, binding, { maxAgeSeconds: TRANSIENT_TTL_SECONDS }));
 
     const authorizeUrl = buildAuthorizeUrl({
-      clientId: hostedConfig.github.clientId,
+      domain: hostedConfig.auth0.domain,
+      clientId: hostedConfig.auth0.clientId,
       redirectUri: callbackUri(hostedConfig.appOrigin),
       state: transaction.token,
+      nonce,
       codeChallenge: pkce.challenge,
-      selectAccount: switching,
+      switchAccount: switching,
     });
     return redirectResponse(authorizeUrl, { status: 303, cookies });
   }

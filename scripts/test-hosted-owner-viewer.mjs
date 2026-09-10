@@ -1779,8 +1779,9 @@ async function worker() {
     {
       HOSTED_APP_ORIGIN: app.origin,
       HOSTED_RENDER_ORIGIN: renderer.origin,
-      GITHUB_CLIENT_ID: "Iv1.fixtureclientid",
-      GITHUB_CLIENT_SECRET: "fixture-client-secret-not-a-real-credential",
+      AUTH0_DOMAIN: "tenant.archon.example.com",
+      AUTH0_CLIENT_ID: "exampleAuth0ClientId0000000000000",
+      AUTH0_CLIENT_SECRET: "fixture-client-secret-not-a-real-credential",
       HOSTED_PUBLISH_ENABLED: "true",
     },
     { mode: "local-test" },
