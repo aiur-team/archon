@@ -77,9 +77,9 @@ origins, its own OAuth application and its own credentials. In addition:
 
 ## 2. Environment variables
 
-`hosted/.env.example` is the redacted template. The five keys below are read by
-`hosted/lib/config.mjs` and by nothing else. Set them in the Netlify **site
-environment** (Site configuration → Environment variables), never in
+`hosted/.env.example` is the redacted template. The keys below are read by
+`netlify/lib/hosted/config.mjs` and by nothing else. Set them in the Netlify
+**site environment** (Site configuration → Environment variables), never in
 `netlify.toml` and never in the repository: a value in `netlify.toml` is
 build-scoped rather than available to a function at runtime, and a value in git
 is a value in git.
@@ -91,11 +91,12 @@ is a value in git.
 | `GITHUB_CLIENT_ID` | application | no | Public; appears in the authorization URL. |
 | `GITHUB_CLIENT_SECRET` | application | **yes** | Production context only. Never on the renderer. |
 | `HOSTED_PUBLISH_ENABLED` | application | no | Exactly `true` or `false`. Unset means disabled. |
+| `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | application | no | Exactly `true` or `false`. Unset means refused. See §9. |
 
 The renderer reads only the two origins and holds no secret at all.
-`HOSTED_PUBLISH_ENABLED` is spelled strictly: `1`, `yes` and `TRUE` are
-configuration *errors*, not falsy defaults, so a typo fails loudly instead of
-silently disabling publishing.
+`HOSTED_PUBLISH_ENABLED` and `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` are both spelled
+strictly: `1`, `yes` and `TRUE` are configuration *errors*, not falsy defaults,
+so a typo fails loudly instead of silently changing what the deployment does.
 
 **Changing an environment variable does not change a running function.**
 Netlify captures the environment when a deploy is built; already-deployed
@@ -411,3 +412,66 @@ the procedure for each of those recordings, and the preflight gate
 `node scripts/test-hosted-live.mjs`, which refuses — item by item, as `BLOCKED`
 rather than as a skipped pass — until everything above is supplied. Dated results
 live beside it under `evidence/`.
+
+---
+
+## 9. Domain access on a document
+
+A published document is readable by its owner. Its owner may additionally list
+email domains on it, and any signed-in reader holding a **verified** address at
+a listed domain then reads it. Nobody else does, and nobody else learns the
+document exists.
+
+The list lives on the document, and the owner sets it:
+
+```
+GET  /api/hosted/publications/<id>/access
+PUT  /api/hosted/publications/<id>/access   {"v":1,"allowedDomains":["example.com"]}
+```
+
+Both require the owner's session; the `PUT` also requires the app's exact
+`Origin` and the session's `x-archon-csrf` token, so it is reachable only from
+the application's own pages. The `PUT` **replaces** the whole list. `[]` clears
+it and returns the document to owner-only.
+
+There are four things an operator should know about the rule itself, because
+each of them is a support question:
+
+- **Matching is exact.** `example.com` admits `ann@example.com` and does *not*
+  admit `ann@mail.example.com`, `ann@notexample.com` or `ann@example.com.evil`.
+  There are no wildcards and no subdomain expansion; list each domain you mean.
+- **Verification is the provider's, not ours.** A reader whose address the
+  identity provider has not verified is shown "Verify your email" rather than
+  the document, however corporate the address looks. The fix is on their side.
+- **Nothing is stored when a domain admits somebody.** The decision is recomputed
+  from the reader's current verified address on every request, and a session
+  lasts at most 24 hours — so removing a domain, or a reader losing the address,
+  costs access within a day without any cleanup step here.
+- **The owner is never locked out.** Owner access is decided from the stored
+  account id before any email logic, so a provider that stops asserting a
+  verified address does not take an owner's own document away from them.
+
+### Public mailbox providers
+
+`gmail.com`, `googlemail.com`, `outlook.com`, `hotmail.com`, `live.com`,
+`yahoo.com`, `icloud.com`, `proton.me`, `pm.me`, `aol.com`, `mail.ru` and
+`qq.com` are refused when an owner tries to list them. Listing one would admit
+every person who can sign up for an address at it, which is publishing the
+document while believing it is private. The owner sees
+`public_mailbox_domain` naming the domain they typed.
+
+`ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=true` lifts that refusal for the whole site.
+Set it only on a deployment where those really are the corporate mailboxes.
+There is no per-document override and no per-owner exception.
+
+Turning it back off does **not** break a document whose list was set while it was
+on: the rule is enforced when a list is written, not when a reader is admitted by
+one. An existing list keeps working and simply cannot be written again until the
+entry is removed. That asymmetry is deliberate — enforcing the denylist on read
+would turn a policy change into an outage on documents that are perfectly
+intact.
+
+The list is bounded at **20 domains**, each at most 253 characters, and is stored
+normalized: lower-cased, de-duplicated and sorted. An entry that is not a domain
+— a wildcard, a URL, an address, a name with a trailing dot, or anything
+non-ASCII — is refused as `invalid_domain` naming the entry.

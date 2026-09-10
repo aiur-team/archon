@@ -851,6 +851,18 @@ async function waitFor(check, message, { timeout = 15_000, interval = 50 } = {})
 const statusOf = (page) => page.locator("[data-archon-status]").innerText();
 
 /**
+ * What a refused reader actually sees, whichever page they were served.
+ *
+ * ACN-007 moved where a refusal is rendered. `/docs/<id>` used to serve the
+ * shell to any signed-in reader and let `viewer.js` report the API's 404 in the
+ * status line; the page now resolves the record itself and answers the inert
+ * not-found page directly, which has no status line to read. Both are "the
+ * reader was told there is nothing here", so the assertion is against the text
+ * a person reads rather than against the element that happened to carry it.
+ */
+const refusalTextOf = (page) => page.locator("body").innerText();
+
+/**
  * Sign a principal in by asking the application to set the cookie.
  *
  * Deliberately a server round trip rather than `context.addCookies`. The cookie
@@ -1056,7 +1068,7 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       const tab = await context.newPage();
       await tab.goto(page(`/docs/${ids.owned}`));
       await waitFor(
-        async () => (await statusOf(tab)).includes("no document at this address"),
+        async () => (await refusalTextOf(tab)).includes("no document at this address"),
         "the stranger was not refused",
       );
       const html = await tab.content();
@@ -1071,7 +1083,7 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       const missing = await context.newPage();
       await missing.goto(page(`/docs/${"a".repeat(32)}`));
       await waitFor(
-        async () => (await statusOf(missing)).includes("no document at this address"),
+        async () => (await refusalTextOf(missing)).includes("no document at this address"),
         "a missing document did not report a dead end",
       );
 
@@ -1088,7 +1100,7 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       const tab = await context.newPage();
       await tab.goto(page(`/docs/${ids.pending}`));
       await waitFor(
-        async () => (await statusOf(tab)).includes("no document at this address"),
+        async () => (await refusalTextOf(tab)).includes("no document at this address"),
         "a pending publication was readable",
       );
       await tab.close();
@@ -1781,7 +1793,10 @@ async function worker() {
   };
 
   const deps = { store: auth.store, config: hostedConfig };
-  handlers.viewer = withErrorBoundary(createViewerRoute(deps));
+  /* ACN-007: the page resolves the record through the same adapter the two API
+     routes use, so that all three reach one decision for one principal. It
+     needs the publication dependencies to do that. */
+  handlers.viewer = withErrorBoundary(createViewerRoute({ ...deps, publications }));
   handlers.read = withErrorBoundary(createDocumentReadRoutes({ store: auth.store, publications }));
   handlers.session = withErrorBoundary(createSessionRoute(deps));
   handlers.logout = withErrorBoundary(createLogoutRoute(deps));

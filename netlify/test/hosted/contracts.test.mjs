@@ -202,6 +202,10 @@ test("the error table pins every C3 code to its status and retryability", () => 
       approval_required: 403,
       forbidden: 403,
       csrf_failed: 403,
+      email_unverified: 403,
+      public_mailbox_domain: 400,
+      too_many_domains: 400,
+      invalid_domain: 400,
       not_found: 404,
       descriptor_mismatch: 409,
       state_conflict: 409,
@@ -657,7 +661,10 @@ test("every contract shape pins its version", () => {
   const cases = [
     [() => validateSessionResponse(replacing(SIGNED_OUT_SESSION, { v: 2 })), "session.v"],
     [() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { v: 2 })), "session.v"],
-    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 2 })), "publication.v"],
+    /* The stored record is the one shape with two readable versions: ACN-007
+       writes `2` and still reads the `1` that ACN-004 left in stores. So the
+       version this guard has to refuse is the next one up, not `2`. */
+    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 3 })), "publication.v"],
     [() => validateStartResponse(replacing(START_RESPONSE, { v: 2 }), APP), "start.v"],
     [() => validateResult(replacing(PENDING_RESULT_ENVELOPE, { v: 2 })), "result.v"],
     [() => validateWireError(replacing(ERROR_ENVELOPE, { v: 2 })), "errorEnvelope.v"],
@@ -667,6 +674,30 @@ test("every contract shape pins its version", () => {
     [() => validateDescriptor(replacing(VALID_DESCRIPTOR, { v: 2 })), "descriptor.v"],
   ];
   for (const [run, field] of cases) rejects(run, { field });
+});
+
+test("public mailbox domains are refused unless an operator spells the override exactly", () => {
+  /* The same strictness `HOSTED_PUBLISH_ENABLED` gets, and for a sharper
+     reason: a truthy-looking `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=1` that read as
+     "on" would let an owner list `gmail.com` and believe a document was
+     private, and one that read as "off" would only annoy them. Neither guess is
+     acceptable, so a value that is not exactly `true` or `false` is a fault. */
+  const key = "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS";
+  assert.equal(readHostedConfig({ ...FIXTURE_ENV, [key]: "true" }).allowPublicMailboxes, true);
+  assert.equal(readHostedConfig({ ...FIXTURE_ENV, [key]: "false" }).allowPublicMailboxes, false);
+  assert.equal(readHostedConfig(FIXTURE_ENV).allowPublicMailboxes, false);
+  for (const value of ["1", "yes", "TRUE", "on"]) {
+    assert.throws(
+      () => readHostedConfig({ ...FIXTURE_ENV, [key]: value }),
+      (error) => error instanceof HostedConfigError && error.key === key,
+    );
+  }
+  /* And it is visible in the one log line an operator reads to check what a
+     deployment thinks it is doing. */
+  assert.match(
+    formatHostedConfig(readHostedConfig({ ...FIXTURE_ENV, [key]: "true" })),
+    /publicMailboxDomains=allowed/,
+  );
 });
 
 test("a caller-supplied field path is used verbatim in the message", () => {
@@ -1455,17 +1486,18 @@ test("a complete production configuration is accepted, with publishing off", () 
   assert.ok(Object.isFrozen(config));
 });
 
-test("the reader consults exactly C6's five operator variables", () => {
+test("the reader consults exactly C6's five operator variables and ACN-007's sixth", () => {
   assert.deepEqual([...HOSTED_CONFIG_KEYS].sort(), [
+    "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
     "HOSTED_APP_ORIGIN",
     "HOSTED_PUBLISH_ENABLED",
     "HOSTED_RENDER_ORIGIN",
   ]);
-  /* An environment carrying nothing but those five is enough, and an extra
-     variable changes nothing - in particular there is no environment value
-     that selects the relaxed mode. */
+  /* An environment carrying nothing but the required ones is enough, and an
+     extra variable changes nothing - in particular there is no environment
+     value that selects the relaxed mode. */
   const noisy = { ...FIXTURE_ENV, HOSTED_ENV: "local-test", NODE_ENV: "test", CONTEXT: "dev" };
   assert.equal(readHostedConfig(noisy).production, true);
 });
@@ -1659,6 +1691,7 @@ test("the log line names every field an operator needs to read", () => {
       ` app=${FIXTURE_APP_ORIGIN}` +
       ` render=${FIXTURE_RENDER_ORIGIN}` +
       " publish=disabled" +
+      " publicMailboxDomains=refused" +
       ` githubClientId=${FIXTURE_ENV.GITHUB_CLIENT_ID}` +
       ` githubClientSecret=${REDACTED}`,
   );

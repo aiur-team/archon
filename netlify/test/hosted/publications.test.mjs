@@ -1251,7 +1251,7 @@ test("readPublication is server-internal and hands back the whole record", async
 /* wiring                                                              */
 /* ------------------------------------------------------------------ */
 
-test("the adapter exposes exactly the nine frozen operations", () => {
+test("the adapter exposes exactly the twelve frozen operations", () => {
   const { publications } = harness();
   assert.deepEqual(Object.keys(publications).sort(), [
     "bindPublication",
@@ -1259,8 +1259,11 @@ test("the adapter exposes exactly the nine frozen operations", () => {
     "completePublication",
     "createPublication",
     "decidePublication",
+    "readAccessiblePublication",
     "readOwnedPublication",
     "readPublication",
+    "readPublicationAccess",
+    "replacePublicationAccess",
     "reviewPublication",
     "statusPublication",
   ]);

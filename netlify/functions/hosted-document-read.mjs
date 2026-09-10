@@ -2,10 +2,17 @@
  * `GET|HEAD /api/hosted/docs/<id>` and `.../content` - the owner's two reads.
  *
  * One module, two routes, because they must never disagree. Both resolve the id
- * the same way, both call `identifyHosted`, both call `readOwnedPublication`,
- * and both turn every refusal into the same 404. Splitting them into two files
- * would be two copies of an authorisation sequence, and the copy that gets a
- * step dropped is the one that serves bytes.
+ * the same way, both call `identifyHosted`, both call
+ * `readAccessiblePublication`, and both turn every refusal into the same 404.
+ * Splitting them into two files would be two copies of an authorisation
+ * sequence, and the copy that gets a step dropped is the one that serves bytes.
+ *
+ * The reader is the owner, or a signed-in account holding a verified address at
+ * a domain the owner listed on this document. That decision is
+ * `evaluateAccess`, made once in `netlify/lib/hosted/domain-access.mjs`, and
+ * these routes and the viewer page all reach it through the same adapter call -
+ * which is the whole point of there being an adapter call rather than a
+ * comparison here.
  *
  * Neither route trusts anything the viewer shell established. C4 is explicit
  * that the shell's earlier check is not reusable authorisation, and the shape of
@@ -15,16 +22,19 @@
  *
  * ## What a denial may not say
  *
- * `readOwnedPublication` collapses "no such record", "not complete yet" and
- * "belongs to another account" into one `not_found`, and this module keeps it
- * that way to the wire: one status, one envelope, no `field` that varies, no
- * header that varies, and identical bytes. An authenticated account learns
- * nothing about which publication ids exist or who owns them, which is the same
- * thing an anonymous one learns.
+ * `readAccessiblePublication` collapses "no such record", "not complete yet",
+ * "belongs to another account" and "your domain is not listed" into one
+ * `not_found`, and this module keeps it that way to the wire: one status, one
+ * envelope, no `field` that varies, no header that varies, and identical bytes.
+ * An authenticated account learns nothing about which publication ids exist or
+ * who owns them, which is the same thing an anonymous one learns.
  *
- * `session_required` is the one denial that is allowed to be distinct, and it is
- * distinct on purpose: a signed-out reader has an action to take, and telling
- * them to sign in reveals nothing, because they get that answer for every id.
+ * Two denials are allowed to be distinct, and both are distinct because the
+ * reader has an action to take. `session_required` reveals nothing: a signed-out
+ * reader gets it for every id. `email_unverified` reveals that this document
+ * lists the domain of the address the reader claimed, and nothing else - it is
+ * raised only on a domain match, so no id the reader has not already matched can
+ * produce it.
  *
  * ## Why the bytes are not a document
  *
@@ -49,7 +59,7 @@ import { SessionRequiredError } from "../lib/hosted/auth-errors.mjs";
 import { openAuthStore } from "../lib/hosted/auth-store.mjs";
 import { HostedContractError, encodeArtifactBytes } from "../lib/hosted/contracts.mjs";
 import { identifyHosted } from "../lib/hosted/identity.mjs";
-import { publicationDependencies, readOwnedPublication } from "../lib/hosted/publications.mjs";
+import { publicationDependencies, readAccessiblePublication } from "../lib/hosted/publications.mjs";
 import {
   CONTENT_DISPOSITION,
   CONTENT_PATTERN,
@@ -96,17 +106,27 @@ async function readForRequest(request, { store, publications, pattern }) {
     throw new SessionRequiredError("sign in to read this document");
   }
 
-  /* Every refusal this can throw is already `not_found`. It is re-wrapped rather
-     than re-thrown so that a future adapter change which started distinguishing
-     "not complete" from "not yours" could not leak that distinction through this
-     route without someone editing this line. */
+  /* Every refusal this can throw is `not_found` or `email_unverified`, and both
+     are re-thrown as themselves. Everything else is flattened, so that a future
+     adapter change which started distinguishing "not complete" from "not yours"
+     could not leak that distinction through this route without someone editing
+     this line. `email_unverified` is on the pass list rather than folded into
+     the 404 because the evaluator raises it only for a reader whose own domain
+     this document already lists - see the note on `EMAIL_UNVERIFIED_PAGE`. */
   try {
-    return await readOwnedPublication({ publicationId: documentId, principal }, publications);
+    const { record } = await readAccessiblePublication(
+      { publicationId: documentId, principal },
+      publications,
+    );
+    return record;
   } catch (error) {
-    if (error instanceof HostedContractError && error.code === "unavailable") throw error;
+    if (error instanceof HostedContractError && DISCLOSABLE_CODES.includes(error.code)) throw error;
     throw notFound();
   }
 }
+
+/** The two codes this route is allowed to answer with instead of a flat 404. */
+const DISCLOSABLE_CODES = Object.freeze(["unavailable", "email_unverified"]);
 
 /** The two routes, over injected dependencies. */
 export function createDocumentReadRoutes({ store, publications }) {

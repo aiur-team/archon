@@ -61,6 +61,7 @@ import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from "nod
 import {
   HOSTED_LIMITS,
   HostedContractError,
+  PUBLICATION_RECORD_VERSION,
   validateDescriptor,
   validateOrigin,
   validatePrincipal,
@@ -68,6 +69,7 @@ import {
   validateResult,
   validateStartResponse,
 } from "./contracts.mjs";
+import { DomainAccessError, evaluateAccess, normalizeDomainList } from "./domain-access.mjs";
 import { createPublicationStore, MAX_WRITE_ATTEMPTS } from "./publication-store.mjs";
 import { readHostedConfig } from "./config.mjs";
 
@@ -226,7 +228,13 @@ function requireDependencies(dependencies) {
   if (dependencies === null || typeof dependencies !== "object") {
     throw new TypeError("publication operations require an injected dependency set");
   }
-  const { store, appOrigin, publishEnabled = false, production = true } = dependencies;
+  const {
+    store,
+    appOrigin,
+    publishEnabled = false,
+    production = true,
+    allowPublicMailboxes = false,
+  } = dependencies;
   if (
     store === null ||
     typeof store !== "object" ||
@@ -242,6 +250,7 @@ function requireDependencies(dependencies) {
     appOrigin,
     publishEnabled,
     production,
+    allowPublicMailboxes,
     now: dependencies.now ?? Date.now,
     randomBytes: dependencies.randomBytes ?? nodeRandomBytes,
   };
@@ -289,6 +298,157 @@ export async function readOwnedPublication({ publicationId, principal } = {}, de
     throw fail("not_found", "publication not found", "publicationId");
   }
   return record;
+}
+
+/**
+ * The completed document, for its owner **or for a listed domain reader**.
+ *
+ * This is `readOwnedPublication` with one predicate swapped, and the swap is
+ * deliberately the only difference: same `not_found` for every refused case,
+ * same absence of a receipt-expiry check, same single answer for "missing",
+ * "not complete" and "not yours". What it adds is `evaluateAccess`, which is the
+ * one place in this repository that decides whether a domain admits a reader -
+ * so the viewer page, the metadata route and the content route reach the same
+ * verdict for the same principal by construction rather than by three handlers
+ * agreeing.
+ *
+ * The one refusal that is *not* collapsed is `email_unverified`. It reaches the
+ * caller as its own code because a reader whose own domain is listed has an
+ * action to take, and `evaluateAccess` only answers it when the domain really is
+ * on this document's list - so it says no more about the document than the
+ * reader's own claimed address already did.
+ *
+ * @returns {Promise<{record: object, role: string}>}
+ */
+export async function readAccessiblePublication(
+  { publicationId, principal, explicitRole = null } = {},
+  dependencies,
+) {
+  const { store } = requireDependencies(dependencies);
+  const reader = validatePrincipal(principal);
+  const found = await store.read(publicationId);
+
+  /* A missing record still goes through the evaluator rather than short-
+     circuiting, so that "no such document" and "a document you may not read"
+     leave this function through one line and cannot acquire different
+     behaviour later. */
+  const decision = evaluateAccess({
+    record: found === null ? null : found.record,
+    principal: reader,
+    explicitRole,
+  });
+  if (!decision.allowed) {
+    if (decision.reason === "email_unverified") {
+      throw fail("email_unverified", "verify your email address to read this document");
+    }
+    throw fail("not_found", "publication not found", "publicationId");
+  }
+  return { record: found.record, role: decision.role };
+}
+
+/**
+ * The owner's view of a document's domain list.
+ *
+ * Owner-only, and refused as `not_found` for anybody else - including for an
+ * account that would be admitted to *read* the document by one of the domains
+ * on this very list. Reading the policy is an owner's act; a reader admitted by
+ * it has no business enumerating who else is.
+ */
+export async function readPublicationAccess({ publicationId, principal } = {}, dependencies) {
+  const { allowPublicMailboxes } = requireDependencies(dependencies);
+  const record = await readOwnedPublication({ publicationId, principal }, dependencies);
+  return Object.freeze({
+    v: 1,
+    publicationId: record.id,
+    allowedDomains: [...record.allowedDomains],
+    allowPublicMailboxes,
+  });
+}
+
+/**
+ * Replace a document's domain list, as its owner.
+ *
+ * ## Why this is a read-merge-write loop rather than a write
+ *
+ * The record carries a lifecycle that other requests move. A blind
+ * `store.update` built from a record read a moment ago would carry that stale
+ * lifecycle back over a concurrent transition - a cancellation, an expiry - and
+ * the compare-and-set would not catch it, because the ETag it was built against
+ * is the one it would present. So the loop re-reads on every attempt, re-checks
+ * ownership and completeness against what is *now* stored, and changes exactly
+ * one field. `refused` means somebody else wrote in between, and the answer to
+ * that is to look again rather than to insist.
+ *
+ * ## Why the list is normalized before the loop
+ *
+ * The caller's list is bad or good independently of what is in the store, so
+ * rejecting it costs no store round trip - and an owner who sent `gmail.com`
+ * gets that answer rather than a retry storm.
+ */
+export async function replacePublicationAccess(
+  { publicationId, principal, allowedDomains } = {},
+  dependencies,
+) {
+  const { store, allowPublicMailboxes } = requireDependencies(dependencies);
+  const owner = validatePrincipal(principal);
+  const normalized = normalizeAccessList(allowedDomains, allowPublicMailboxes);
+
+  for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
+    const found = await store.read(publicationId);
+    if (found === null) throw fail("not_found", "publication not found", "publicationId");
+    const { record, etag } = found;
+    if (record.state !== "complete" || record.ownerAccountId !== owner.accountId) {
+      throw fail("not_found", "publication not found", "publicationId");
+    }
+
+    /* Nothing to write is still a success, and skipping the write is not an
+       optimisation: a conditional write of an identical record is a real race
+       an idempotent caller should not be able to lose. */
+    if (sameDomains(record.allowedDomains, normalized)) {
+      return accessProjection(record, allowPublicMailboxes);
+    }
+
+    const next = validatePublication({ ...record, allowedDomains: normalized });
+    const written = await store.update(next, etag);
+    if (written.outcome === "committed" || written.outcome === "observed") {
+      return accessProjection(written.record, allowPublicMailboxes);
+    }
+  }
+  throw unavailable("could not be updated");
+}
+
+/** The `GET` shape, which the `PUT` answers with so both agree by construction. */
+function accessProjection(record, allowPublicMailboxes) {
+  return Object.freeze({
+    v: 1,
+    publicationId: record.id,
+    allowedDomains: [...record.allowedDomains],
+    allowPublicMailboxes,
+  });
+}
+
+/** Two stored lists, both already sorted and unique, holding the same policy. */
+function sameDomains(left, right) {
+  return left.length === right.length && left.every((domain, index) => domain === right[index]);
+}
+
+/**
+ * The caller's list as a stored list, or this module's typed refusal.
+ *
+ * `DomainAccessError` is translated here rather than at the route, so that every
+ * caller of the adapter - the route, a future CLI, a test - gets the same C3
+ * code for the same bad list. The evaluator's `reason` is already a C3 code and
+ * its message already names the offending domain, which is where the domain has
+ * to live: the C3 envelope has no field of its own for it, and the value has
+ * already been bounded and stripped to domain characters before it got here.
+ */
+function normalizeAccessList(allowedDomains, allowPublicMailboxes) {
+  try {
+    return normalizeDomainList(allowedDomains, { allowPublicMailboxes });
+  } catch (error) {
+    if (!(error instanceof DomainAccessError)) throw error;
+    throw fail(error.reason, error.message, "allowedDomains");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,7 +500,7 @@ export async function createPublication(descriptor, dependencies) {
     const browserSecret = mintSecret(randomBytes);
 
     const record = validatePublication({
-      v: 1,
+      v: PUBLICATION_RECORD_VERSION,
       id,
       descriptor: validated,
       state: "pending",
@@ -353,6 +513,10 @@ export async function createPublication(descriptor, dependencies) {
       /* No owner yet, and therefore no owner email. Both are set once, by the
          approval below, from the session that authorized it. */
       ownerEmail: null,
+      /* Nobody may read a document that has not been approved yet, so an empty
+         list is the only legal starting policy. The owner sets one afterwards
+         through the access route. */
+      allowedDomains: [],
       uploadExpiresAt: null,
       completedAt: null,
       receiptExpiresAt: null,
@@ -813,6 +977,9 @@ export function createPublications(dependencies) {
     cancelPublication: bind(cancelPublication),
     completePublication: bind(completePublication),
     readOwnedPublication: bind(readOwnedPublication),
+    readAccessiblePublication: bind(readAccessiblePublication),
+    readPublicationAccess: bind(readPublicationAccess),
+    replacePublicationAccess: bind(replacePublicationAccess),
   });
 }
 
@@ -832,5 +999,6 @@ export function publicationDependencies({ env, getStore, mode } = {}) {
     appOrigin: config.appOrigin,
     production: config.production,
     publishEnabled: config.publishEnabled,
+    allowPublicMailboxes: config.allowPublicMailboxes,
   });
 }

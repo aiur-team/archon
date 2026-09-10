@@ -110,10 +110,25 @@ test("an unknown state name is unavailable, never coerced to pending", async () 
   await rejects(store.read(FIXTURE_PUBLICATION_ID), "unavailable");
 });
 
-test("an unknown schema version is unavailable, never read as v1", async () => {
+test("an unknown schema version is unavailable, never read as a known one", async () => {
   const { provider, store } = harness();
-  provider.put(FIXTURE_KEY, JSON.stringify({ ...RECORDS.complete, v: 2 }));
+  provider.put(FIXTURE_KEY, JSON.stringify({ ...RECORDS.complete, v: 3 }));
   await rejects(store.read(FIXTURE_PUBLICATION_ID), "unavailable");
+});
+
+test("a v1 record with no domain list is read, with an empty list", async () => {
+  /* The other half of the version rule, and the half that would take every
+     already-stored document offline if it were wrong: ACN-007 added
+     `allowedDomains`, and a record written before it existed has to keep
+     reading. It comes back upgraded rather than as-is, so nothing downstream
+     ever sees a record with the field missing. */
+  const { provider, store } = harness();
+  const { allowedDomains, ...withoutList } = RECORDS.complete;
+  provider.put(FIXTURE_KEY, JSON.stringify({ ...withoutList, v: 1 }));
+
+  const found = await store.read(FIXTURE_PUBLICATION_ID);
+  assert.deepEqual(found.record.allowedDomains, []);
+  assert.equal(found.record.v, 2);
 });
 
 test("a hit with no ETag is unavailable, because no conditional write could follow", async () => {

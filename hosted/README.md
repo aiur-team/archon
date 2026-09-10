@@ -510,7 +510,7 @@ receipt for a document that already exists.
 | Route | Method | Authentication |
 | --- | --- | --- |
 | `/docs/:documentId` | `GET`, `HEAD` | browser session (redirects to sign-in without one) |
-| `/api/hosted/docs/:documentId` | `GET`, `HEAD` | browser session, and the session's account must own the document |
+| `/api/hosted/docs/:documentId` | `GET`, `HEAD` | browser session; the account owns the document, or holds a verified address at a domain the owner listed |
 | `/api/hosted/docs/:documentId/content` | `GET`, `HEAD` | as above |
 
 `/docs/<id>` is the stable address of a document and the one hosted route that
@@ -518,25 +518,35 @@ lives outside the `/api/hosted/*` namespace — `hosted/lib/contracts.mjs` freez
 it as `DOCUMENT_PATH_PREFIX`, and `scripts/check-hosted-modules.mjs` allows it by
 name rather than by prefix.
 
-Four things about these routes are worth knowing before you change them.
+Five things about these routes are worth knowing before you change them.
 
-- **The shell is a constant.** `/docs/<id>` returns byte-identical HTML for every
-  document, and answers before any lookup: it checks that you are signed in and
-  that the id is well formed, and nothing else. It carries no title, no owner, no
-  digest and not even the id — `public/viewer.js` reads that from the address bar
-  and fetches the rest. So opening a stranger's id is not a way to learn whether
-  it exists, and there is no interpolation of authored text into the page to get
-  wrong.
+- **One decision, three surfaces.** The page, the metadata route and the content
+  route all call `readAccessiblePublication`, which calls `evaluateAccess` — the
+  single evaluator in `netlify/lib/hosted/domain-access.mjs`. They agree about a
+  principal by construction rather than by three handlers happening to be
+  written the same way, which is the shape a private-content bug actually takes.
+- **The shell is still a constant.** `/docs/<id>` returns byte-identical HTML for
+  every document it serves. It carries no title, no owner, no digest and not even
+  the id — `public/viewer.js` reads that from the address bar and fetches the
+  rest — so there is no interpolation of authored text into the page to get
+  wrong. What the page does now do, and did not before domain access existed, is
+  resolve the record first: the third possible answer is "verify your email",
+  which is an action rather than a refusal, and a shell reading "loading your
+  document…" would hide it.
 - **The shell's check is not reusable authorisation.** The two API routes receive
   nothing from the page: no token, no signed id, no header. Each calls
-  `identifyHosted` and `readOwnedPublication` from scratch, exactly as it would
-  for a request typed into an address bar.
-- **Every denial is the same denial.** Missing, not complete, owned by another
-  account and malformed all produce one 404 with one fixed body. A signed-out
-  reader gets `session_required` instead, which is safe to distinguish because
-  they get it for every id. A storage outage is a retryable 503 and is never
-  spelled as either — telling an owner their document is gone during an outage is
-  the failure they would act on.
+  `identifyHosted` and the evaluator from scratch, exactly as it would for a
+  request typed into an address bar.
+- **Every denial is the same denial, with two exceptions.** Missing, not
+  complete, owned by another account, not on the domain list and malformed all
+  produce one 404 with one fixed body. A signed-out reader gets
+  `session_required`, which is safe to distinguish because they get it for every
+  id. A reader whose *own* domain is on the list but whose address the provider
+  has not verified gets `email_unverified` and the "Verify your email" page —
+  the one refusal that says something about the document, bounded to somebody
+  whose claimed domain already matched. A storage outage is a retryable 503 and
+  is never spelled as any of these: telling an owner their document is gone
+  during an outage is the failure they would act on.
 - **The bytes are not a document.** `/content` is `application/octet-stream` with
   `nosniff`, `Content-Disposition: attachment; filename="archon-document.html"`
   and `Content-Security-Policy: default-src 'none'; sandbox`. Four mechanisms
@@ -547,6 +557,57 @@ Four things about these routes are worth knowing before you change them.
 `HEAD` authorises exactly as `GET` does on all three, and no private response
 carries an `ETag` — a conditional request is answered on its merits rather than
 with a 304 that skipped the owner check.
+
+### Who else may read a document
+
+| Route | Method | Authentication |
+| --- | --- | --- |
+| `/api/hosted/publications/:publicationId/access` | `GET` | a live session, and the account must own the document |
+| `/api/hosted/publications/:publicationId/access` | `PUT` | the above plus `requireBrowserMutation` (exact `Origin`, session-bound CSRF) |
+
+An owner lists email domains on their document; a signed-in reader holding a
+**verified** address at a listed domain then reads it. There are no per-person
+roles on a hosted document — owner plus domain readers is the whole vocabulary.
+
+```json
+{"v": 1, "publicationId": "9f1c…", "allowedDomains": ["example.com"], "allowPublicMailboxes": false}
+```
+
+The `PUT` sends `{"v":1,"allowedDomains":[…]}` and **replaces** the whole list;
+`[]` clears it and returns the document to owner-only. The answer is the `GET`
+shape, so the two cannot describe the stored policy differently. Reading the
+policy is owner-only even for an account the policy itself admits: being on a
+list does not entitle you to enumerate it, and a non-owner gets the same
+`not_found` an unknown id gets.
+
+Four rules decide the list, and all four live in `domain-access.mjs`:
+
+- **Matching is exact, case-insensitive, full-domain equality** after
+  normalisation. Never `endsWith`, never a suffix, never a subdomain expansion —
+  `example.com` does not admit `mail.example.com` or `notexample.com`. The
+  site-wide organisation rule in `netlify/lib/identity.mjs` *is* a suffix test,
+  and is the anti-pattern this one is written against.
+- **The owner is admitted before any email logic**, from the stored
+  `ownerAccountId`, even with `emailVerified: false` or no address at all. A
+  provider that stops asserting verification cannot lock an owner out of their
+  own document.
+- **`emailVerified` must be the boolean `true`.** The string `"true"` is not
+  true here, and an absent claim is not true here.
+- **A public mailbox provider is refused at write time** — the frozen list of
+  twelve in `domain-access.mjs` — because listing one admits everyone who can
+  sign up for an address. `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=true` lifts it
+  site-wide; §9 of `OPERATIONS.md` is the operator's side of that switch.
+
+Nothing is stored when a domain admits a reader. The decision is recomputed from
+the session's current verified address on every request and a session lasts at
+most 24 hours, so a changed or removed address loses access within a day without
+a revocation step. The list is bounded at 20 domains of at most 253 characters,
+stored lower-cased, de-duplicated and sorted.
+
+The refusals are `public_mailbox_domain`, `too_many_domains` and
+`invalid_domain`, each naming the offending entry in its message, plus
+`not_found` for a non-owner or an id that is not a complete publication and
+`csrf_failed` for a missing or forged token.
 
 ### What the viewer page is and is not
 

@@ -47,6 +47,12 @@ import {
   RECORDS,
   VALID_DESCRIPTOR,
 } from "./fixtures/publications.mjs";
+import {
+  LISTED_DOMAIN,
+  LISTED_DOMAINS,
+  READ_CASES,
+  SECOND_LISTED_DOMAIN,
+} from "./fixtures/domain-access.mjs";
 import { createClock, createProviderDouble } from "./helpers/publication-store.mjs";
 
 const RENDER_ORIGIN = "https://render.archon.example.net";
@@ -59,10 +65,11 @@ const MISSING_ID = "f".repeat(32);
  * A viewer and a read route over one memory session store and one publication
  * provider double, plus a helper that signs a principal in.
  */
-async function harness({ seed = "complete" } = {}) {
+async function harness({ seed = "complete", record = null } = {}) {
   const auth = memoryAuthStore(fixedClock(Date.parse(FIXTURE_NOW)));
   const provider = createProviderDouble();
-  if (seed !== null) provider.put(FIXTURE_KEY, JSON.stringify(RECORDS[seed]));
+  const stored = record ?? (seed === null ? null : RECORDS[seed]);
+  if (stored !== null) provider.put(FIXTURE_KEY, JSON.stringify(stored));
   const publications = {
     store: createPublicationStore({ getStore: provider.getStore }),
     appOrigin: FIXTURE_APP_ORIGIN,
@@ -75,7 +82,7 @@ async function harness({ seed = "complete" } = {}) {
     auth,
     provider,
     read: createDocumentReadRoutes({ store: auth.store, publications }),
-    viewer: createViewerRoute({ store: auth.store, config }),
+    viewer: createViewerRoute({ store: auth.store, config, publications }),
     async signIn(principal) {
       const session = await auth.store.createSession(principal);
       return session.token;
@@ -189,23 +196,43 @@ test("an owner gets a shell that carries no document data", async () => {
   assert.match(html, /data-archon-signout/);
 });
 
-test("the shell is identical for a document that does not exist", async () => {
+test("the page refuses an id that does not exist with the shared not-found body", async () => {
   const h = await harness();
   const token = await h.signIn(FIXTURE_PRINCIPAL);
-  const mine = await h.viewer(get(PAGE, { token }));
-  const theirs = await h.viewer(get(`/docs/${MISSING_ID}`, { token }));
+  const response = await h.viewer(get(`/docs/${MISSING_ID}`, { token }));
 
-  /* Byte-identical, which is the property: the shell answers before any lookup,
-     so opening a stranger's id is not a probe for whether it exists. */
-  assert.equal(theirs.status, mine.status);
-  assert.equal(await theirs.text(), await mine.text());
+  /* ACN-007 moved this: the page resolves the record now, because the third
+     possible answer - "verify your email" - is an action rather than a refusal
+     and a shell reading "loading your document…" would hide it. What has to
+     stay true is that every *refusal* is the one shared body, so "does not
+     exist" and "not yours" are still one answer. */
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), NOT_FOUND_PAGE);
 });
 
-test("the shell never reads the publication store", async () => {
+test("a document that is not yours is refused exactly as one that is missing", async () => {
   const h = await harness();
-  const before = h.provider.calls.length;
-  await h.viewer(get(PAGE, { token: await h.signIn(FIXTURE_PRINCIPAL) }));
-  assert.equal(h.provider.calls.length, before);
+  const stranger = await h.viewer(get(PAGE, { token: await h.signIn(OTHER_PRINCIPAL) }));
+  const missing = await h.viewer(
+    get(`/docs/${MISSING_ID}`, { token: await h.signIn(FIXTURE_PRINCIPAL) }),
+  );
+
+  assert.equal(stranger.status, missing.status);
+  assert.equal(await stranger.text(), await missing.text());
+  await assertDiscloses(await h.viewer(get(PAGE, { token: await h.signIn(OTHER_PRINCIPAL) })));
+});
+
+test("the shell the owner does get still carries nothing about the document", async () => {
+  const h = await harness();
+  const response = await h.viewer(get(PAGE, { token: await h.signIn(FIXTURE_PRINCIPAL) }));
+  const html = await response.text();
+
+  /* The lookup decides *whether* to serve the shell. It must not change *what*
+     the shell is: the bytes are still identical for every document, so the
+     title, the digest and the id still reach the page only through `viewer.js`
+     and the API routes that authorise again. */
+  assert.equal(response.status, 200);
+  for (const marker of SECRETS) assert.ok(!html.includes(marker));
 });
 
 test("a signed-out reader is redirected into the local sign-in flow", async () => {
@@ -624,4 +651,184 @@ test("a revoked session reads nothing on the next request", async () => {
   assert.equal((await h.read(get(CONTENT, { token }))).status, 401);
   assert.equal((await h.read(get(METADATA, { token }))).status, 401);
   assert.equal((await h.viewer(get(PAGE, { token }))).status, 303);
+});
+
+/* ------------------------------------------------------------------ */
+/* ACN-007: domain readers, across all three surfaces                  */
+/* ------------------------------------------------------------------ */
+
+/** A harness whose stored document lists `allowedDomains`. */
+async function listing(allowedDomains = LISTED_DOMAINS) {
+  return harness({ record: { ...RECORDS.complete, allowedDomains: [...allowedDomains] } });
+}
+
+/**
+ * The status each of the three surfaces answers for one principal.
+ *
+ * All three, every time, because "the viewer page, the metadata route and the
+ * content route agree on one decision for one principal" is the read-path
+ * invariant and it is only interesting when it is checked together. A helper
+ * that took one surface would let a regression on the other two through.
+ */
+async function surfaceStatuses(h, principal) {
+  const token = principal === null ? null : await h.signIn(principal);
+  const [page, metadata, content] = await Promise.all([
+    h.viewer(get(PAGE, { token })),
+    h.read(get(METADATA, { token })),
+    h.read(get(CONTENT, { token })),
+  ]);
+  return { page, metadata, content };
+}
+
+test("every read row in the shared table decides the same way on all three surfaces", async () => {
+  /* The same table the evaluator suite and the access-route suite run. What
+     this adds is that the decision survives the trip through three handlers,
+     two stores and an HTTP response - which is where a bypass would actually
+     live. */
+  let run = 0;
+  for (const row of READ_CASES) {
+    /* An `evaluatorOnly` row carries a principal `validatePrincipal` refuses -
+       an unnormalized address, a non-boolean `emailVerified` - so no session
+       store could hold it and there is no way to present it here. The evaluator
+       suite runs those rows; this one proves the rest survive the trip through
+       three handlers, two stores and an HTTP response. */
+    if (row.evaluatorOnly === true) continue;
+    run += 1;
+    const h = await listing(row.allowedDomains ?? LISTED_DOMAINS);
+    const { page, metadata, content } = await surfaceStatuses(h, row.principal);
+
+    if (row.role !== undefined) {
+      assert.equal(page.status, 200, `${row.name}: page`);
+      assert.equal(metadata.status, 200, `${row.name}: metadata`);
+      assert.equal(content.status, 200, `${row.name}: content`);
+      continue;
+    }
+
+    if (row.reason === "session_required") {
+      /* The one asymmetry, and it is about the surface rather than the
+         decision: a browser navigating to the page is sent to sign in, and an
+         API caller is told to. Both are "you are not signed in". */
+      assert.equal(page.status, 303, `${row.name}: page`);
+      assert.equal(metadata.status, 401, `${row.name}: metadata`);
+      assert.equal(content.status, 401, `${row.name}: content`);
+      continue;
+    }
+
+    const expected = row.reason === "email_unverified" ? 403 : 404;
+    assert.equal(page.status, expected, `${row.name}: page`);
+    assert.equal(metadata.status, expected, `${row.name}: metadata`);
+    assert.equal(content.status, expected, `${row.name}: content`);
+
+    const body = await metadata.json();
+    validateWireError(body);
+    assert.equal(body.error.code, row.reason, `${row.name}: code`);
+  }
+
+  /* A skip predicate that quietly matched everything would leave this loop
+     green having asserted nothing. */
+  assert.ok(run >= 15, `only ${run} of ${READ_CASES.length} rows ran through the handlers`);
+});
+
+test("a domain reader gets the same metadata and the same bytes the owner does", async () => {
+  const h = await listing();
+  const reader = { ...OTHER_PRINCIPAL, email: `ann@${LISTED_DOMAIN}`, emailVerified: true };
+  const owner = await h.signIn(FIXTURE_PRINCIPAL);
+  const listed = await h.signIn(reader);
+
+  assert.deepEqual(
+    await (await h.read(get(METADATA, { token: listed }))).json(),
+    await (await h.read(get(METADATA, { token: owner }))).json(),
+  );
+  assert.equal(
+    await (await h.read(get(CONTENT, { token: listed }))).text(),
+    await (await h.read(get(CONTENT, { token: owner }))).text(),
+  );
+});
+
+test("the verify-your-email page names no document and is not indexable", async () => {
+  const h = await listing();
+  const unverified = { ...OTHER_PRINCIPAL, email: `ann@${LISTED_DOMAIN}`, emailVerified: false };
+  const response = await h.viewer(get(PAGE, { token: await h.signIn(unverified) }));
+
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+  const html = await response.text();
+  assert.match(html, /<h1>Verify your email<\/h1>/);
+  assert.match(
+    html,
+    /Verify your email address with your sign-in provider, then open this link again\./,
+  );
+  assert.match(html, /<meta name="robots" content="noindex, nofollow" \/>/);
+  assert.doesNotMatch(html, /<script/);
+  /* It says "verify your email" and nothing about the document itself. */
+  await assertDiscloses(await h.viewer(get(PAGE, { token: await h.signIn(unverified) })));
+});
+
+test("a reader refused by the domain rule learns nothing the page does not tell a stranger", async () => {
+  const h = await listing();
+  const stranger = { ...OTHER_PRINCIPAL, email: "ann@stranger.example", emailVerified: true };
+  const refused = await h.viewer(get(PAGE, { token: await h.signIn(stranger) }));
+  const missing = await h.viewer(
+    get(`/docs/${MISSING_ID}`, { token: await h.signIn(FIXTURE_PRINCIPAL) }),
+  );
+
+  assert.equal(refused.status, missing.status);
+  assert.equal(await refused.text(), await missing.text());
+});
+
+test("removing a domain from the list closes the door on the next request", async () => {
+  /* R21 as a regression: no grant is written when a domain admits somebody, so
+     the decision is recomputed from the stored list every time. A cached or
+     stored admission would leave this reader in. */
+  const h = await listing();
+  const reader = { ...OTHER_PRINCIPAL, email: `ann@${LISTED_DOMAIN}`, emailVerified: true };
+  const token = await h.signIn(reader);
+  assert.equal((await h.read(get(METADATA, { token }))).status, 200);
+
+  h.provider.put(
+    FIXTURE_KEY,
+    JSON.stringify({ ...RECORDS.complete, allowedDomains: [SECOND_LISTED_DOMAIN] }),
+  );
+
+  assert.equal((await h.read(get(METADATA, { token }))).status, 404);
+  assert.equal((await h.read(get(CONTENT, { token }))).status, 404);
+  assert.equal((await h.viewer(get(PAGE, { token }))).status, 404);
+});
+
+test("a document stored without a domain list is still owner-only", async () => {
+  /* The upgrade-on-read path, end to end: a record written before ACN-007 has
+     no `allowedDomains`, must keep reading for its owner, and must not admit
+     anybody else on the strength of a missing field. */
+  const { allowedDomains, ...legacy } = RECORDS.complete;
+  const h = await harness({ record: { ...legacy, v: 1 } });
+
+  const owner = await surfaceStatuses(h, FIXTURE_PRINCIPAL);
+  assert.equal(owner.page.status, 200);
+  assert.equal(owner.metadata.status, 200);
+  assert.equal(owner.content.status, 200);
+
+  const stranger = await surfaceStatuses(h, {
+    ...OTHER_PRINCIPAL,
+    email: `ann@${LISTED_DOMAIN}`,
+    emailVerified: true,
+  });
+  assert.equal(stranger.page.status, 404);
+  assert.equal(stranger.metadata.status, 404);
+  assert.equal(stranger.content.status, 404);
+});
+
+test("a publication-store outage on the page is a 503, never a sign-in redirect", async () => {
+  /* The failure this is written against: an outage that read as "signed out"
+     would send an owner through a sign-in that would also fail, and one that
+     read as absence would tell them their document is gone. Now that the page
+     reads the store, it has to get this right too. */
+  const h = await listing();
+  const token = await h.signIn(FIXTURE_PRINCIPAL);
+  h.provider.failNextRead({ throws: true });
+
+  const response = await h.viewer(get(PAGE, { token }));
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), UNAVAILABLE_PAGE);
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(response.headers.get("location"), null);
 });

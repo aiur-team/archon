@@ -298,6 +298,44 @@ export const UNAVAILABLE_PAGE = `<!doctype html>
 `;
 
 /**
+ * The body served to a reader whose own domain is listed but whose address the
+ * identity provider has not verified.
+ *
+ * The one page in this module that is not a fixed refusal, and it is worth
+ * being clear about what it costs. Every other denial here is byte-identical to
+ * every other denial, which is what makes "not yours" indistinguishable from
+ * "does not exist". This one is distinguishable: seeing it means the document
+ * exists and lists the domain of the address you claimed. That is a real
+ * disclosure, and it is the price of the alternative being an actionable state
+ * - "verify your email" - rendered as "not found", which a reader with a
+ * perfectly good corporate address would read as the link being broken and
+ * would escalate to the owner rather than to their identity provider.
+ *
+ * The disclosure is bounded on purpose: `evaluateAccess` answers
+ * `email_unverified` only when the reader's own domain is actually on this
+ * document's list, so the page says nothing about a document whose list the
+ * reader did not already match, and nothing at all about one that does not
+ * exist. Like the other two it is a literal with no interpolation, it carries
+ * `noindex`, and it names no document.
+ */
+export const EMAIL_UNVERIFIED_PAGE = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Email not verified — Archon</title>
+    <style>${PAGE_STYLE}</style>
+  </head>
+  <body>
+    <h1>Verify your email</h1>
+    <p>Verify your email address with your sign-in provider, then open this link again.</p>
+    <p><a href="/">Go to Archon</a></p>
+  </body>
+</html>
+`;
+
+/**
  * The trusted shell, identical for every document.
  *
  * Read the order of the regions as the contract: the header carrying the title,
@@ -396,4 +434,15 @@ export function notFoundPage(method) {
 /** The inert outage page. Distinct from a refusal, and retryable. */
 export function unavailablePage(method) {
   return htmlResponse(UNAVAILABLE_PAGE, { status: 503, csp: INERT_PAGE_CSP, method });
+}
+
+/**
+ * The inert verify-your-email page, at the status the API routes use.
+ *
+ * 403 rather than 404, matching `email_unverified` in the C3 table, so the page
+ * and the JSON envelope a reader would get from the metadata route for the same
+ * document say the same thing with the same status.
+ */
+export function emailUnverifiedPage(method) {
+  return htmlResponse(EMAIL_UNVERIFIED_PAGE, { status: 403, csp: INERT_PAGE_CSP, method });
 }
