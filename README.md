@@ -81,6 +81,7 @@ Read `.claude/skills/architecture-doc/SKILL.md`. Its one rule is the one that ma
 | `templates/components/` | Every component, rendered live with its markup |
 | `example/` | A complete worked document. Read this one first |
 | `netlify/` | The live layer: sign-in, access, comments, suggestions, edits, history, presence |
+| `renderer/` | The isolated static origin that displays one uploaded document's active HTML |
 | `docs/research/` | The platform design. `00-integration-plan.md` is the ruling document |
 | `.claude/skills/architecture-doc/` | How to turn raw research into a document |
 
