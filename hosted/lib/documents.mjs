@@ -93,6 +93,20 @@ export const PRIVATE_HEADERS = Object.freeze({
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
+  /* Defence in depth rather than the boundary. Reading these responses
+     cross-origin is already refused by the absence of any CORS grant; this
+     stops another site *embedding* the raw bytes as a subresource, which is a
+     use that needs no read access to be unwelcome. */
+  "Cross-Origin-Resource-Policy": "same-origin",
+  /* A default policy for the responses that do not set their own. The HTML and
+     raw-bytes helpers below override it with something stricter or more
+     specific; what this covers is the JSON, which is the one response in this
+     module carrying user-authored text (the title) from the account origin.
+     `application/json` plus `nosniff` is what actually stops a browser treating
+     it as a document -- this is the belt every other hosted JSON route already
+     wears, and its absence here was the odd one out. */
+  "Content-Security-Policy":
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
 });
 
 /**
@@ -172,7 +186,18 @@ export function notFound() {
   return new HostedContractError("not_found", "document not found", { field: "documentId" });
 }
 
-/** Path patterns, anchored, tolerant of one trailing slash and nothing else. */
+/**
+ * Path patterns, anchored, tolerant of one trailing slash and nothing else.
+ *
+ * The tolerance is defensive, not a promise about the deployed URL space. A
+ * Netlify path parameter does not match a trailing slash, so `/docs/<id>/` is
+ * routed by `config.path` to nothing and never reaches these handlers on the
+ * deployment; what the tolerance buys is that if the platform ever normalises
+ * one in, the handler answers rather than 404s. Read the tests that exercise it
+ * as "the handler is not confused by a trailing slash", never as "this URL
+ * works in production" -- they call the handler directly and cannot see
+ * Netlify's route table.
+ */
 export const PAGE_PATTERN = /^\/docs\/([^/]*)\/?$/;
 export const METADATA_PATTERN = /^\/api\/hosted\/docs\/([^/]*)\/?$/;
 export const CONTENT_PATTERN = /^\/api\/hosted\/docs\/([^/]*)\/content\/?$/;

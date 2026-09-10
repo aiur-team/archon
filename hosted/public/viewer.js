@@ -256,7 +256,7 @@
    * both sides behaving exactly as specified.
    */
   function maybeHandOff() {
-    if (rendered || !readySeen || pending === null) return;
+    if (frame === null || rendered || !readySeen || pending === null) return;
     rendered = true;
     window.clearTimeout(readyTimer);
     /* The exact configured origin, never `"*"`. A `"*"` target would deliver a
@@ -331,7 +331,27 @@
   }
 
   /** One attempt at the whole sequence: session, metadata, bytes, handshake. */
+  /** Whether an attempt is in flight. A second one would race the first. */
+  let loading = false;
+
   async function load() {
+    /* Two quick presses of "Try again" used to start two attempts. The first to
+       resolve handed off and the second then overwrote the status line with
+       "Preparing the document…" over an already-rendered document, installed a
+       second deadline and re-held the whole document in `pending`. One attempt
+       at a time; the button says so too. */
+    if (loading) return;
+    loading = true;
+    retryButton.disabled = true;
+    try {
+      await attempt();
+    } finally {
+      loading = false;
+      retryButton.disabled = false;
+    }
+  }
+
+  async function attempt() {
     reset();
 
     const documentId = documentIdFromLocation();
@@ -404,6 +424,15 @@
 
     readyTimer = window.setTimeout(() => {
       if (rendered) return;
+      /* The attempt is over, not merely late. Without discarding the bytes and
+         the frame, a renderer that finally announced itself after the deadline
+         would hand off underneath a live error state: the document would appear
+         while the status line still said it had failed and focus still sat on a
+         "Try again" button that would then tear the document back down. */
+      pending = null;
+      readySeen = false;
+      frame = null;
+      stage.replaceChildren();
       fail(MESSAGES.renderer);
       document.documentElement.setAttribute("data-archon-state", "renderer-timeout");
     }, READY_TIMEOUT_MS);
@@ -425,14 +454,36 @@
    * It is attached once and compares against whatever `frame` currently is, so a
    * frame replaced by a retry is covered and the frame it replaced is not.
    */
+  /**
+   * The readiness message, as `validateReadyMessage` in
+   * `hosted/lib/contracts.mjs` defines it.
+   *
+   * Exact keys, not "has the two I care about". That module is explicit about
+   * why -- a handshake that tolerated extra fields would be a channel from the
+   * renderer origin back into this page's decision about what to send -- and an
+   * inline check that accepted `{type, v, ...anything}` was the app side of the
+   * frozen contract quietly drifting from it. Nothing downstream reads another
+   * field today; the point is that the next thing that does would inherit an
+   * unvalidated object from across an origin boundary.
+   *
+   * It is restated rather than imported because `viewer.js` is a committed
+   * static asset with no build step and no module graph, the same reason
+   * `renderer.js` restates its own half of the contract.
+   */
+  function isReadyMessage(data) {
+    if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+    const keys = Object.keys(data);
+    if (keys.length !== 2 || !keys.includes("type") || !keys.includes("v")) return false;
+    return data.type === READY && data.v === 1;
+  }
+
   window.addEventListener("message", (event) => {
     /* Both halves, before the message is looked at. `source` first because it is
        the stricter: another frame on this page reaches this window with a
        flawless `event.origin` and the wrong source. */
     if (frame === null || event.source !== frame.contentWindow) return;
     if (event.origin !== renderOrigin) return;
-    const data = event.data;
-    if (data === null || typeof data !== "object" || data.type !== READY || data.v !== 1) return;
+    if (!isReadyMessage(event.data)) return;
     readySeen = true;
     maybeHandOff();
   });

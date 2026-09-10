@@ -42,6 +42,7 @@ import { identifyHosted } from "../lib/identity.mjs";
 import {
   DOCUMENT_PAGE_PATH,
   PAGE_PATTERN,
+  PRIVATE_HEADERS,
   documentIdFrom,
   htmlResponse,
   notFoundPage,
@@ -64,11 +65,14 @@ const ALLOW = "GET, HEAD";
  * `{"v":1,...}` would display it, and a JSON body on an HTML surface is how a
  * page ends up rendering something a policy did not expect.
  */
-function methodNotAllowedPage(method) {
-  const response = notFoundPage(method === "HEAD" ? "HEAD" : "GET");
+function methodNotAllowedPage() {
+  /* Always a GET-shaped body: this is only reached for a method that is neither
+     GET nor HEAD, so there is no HEAD case here to handle. An earlier version
+     branched on it anyway, which read as if HEAD 405s were possible. */
+  const response = notFoundPage("GET");
   const headers = new Headers(response.headers);
   headers.set("Allow", ALLOW);
-  return new Response(method === "HEAD" ? null : response.body, { status: 405, headers });
+  return new Response(response.body, { status: 405, headers });
 }
 
 /** The route, over injected dependencies. Exported so tests need no environment. */
@@ -76,7 +80,7 @@ export function createViewerRoute({ store, config: hostedConfig }) {
   return async function viewerRoute(request) {
     const method = request.method === "HEAD" ? "HEAD" : "GET";
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return methodNotAllowedPage(request.method);
+      return methodNotAllowedPage();
     }
 
     let documentId;
@@ -97,12 +101,12 @@ export function createViewerRoute({ store, config: hostedConfig }) {
     }
 
     if (principal === null) {
+      /* The shared set, not a copy of it. This was the one response in the new
+         code whose headers were enumerated by hand, which meant the next header
+         added to `PRIVATE_HEADERS` would silently miss it -- and it was already
+         missing `X-Frame-Options` and a policy. */
       const headers = new Headers({
-        "Cache-Control": "private, no-store",
-        "Netlify-CDN-Cache-Control": "no-store",
-        Vary: "Cookie",
-        "Referrer-Policy": "no-referrer",
-        "X-Content-Type-Options": "nosniff",
+        ...PRIVATE_HEADERS,
         Location: signInDestination(documentId),
       });
       return new Response(null, { status: 303, headers });

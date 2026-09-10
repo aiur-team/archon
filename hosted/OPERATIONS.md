@@ -268,13 +268,20 @@ Understand what these are:
   a counter. The `429` carries `Retry-After` and the client honours it; there is
   no bypass, and adding one is not a supported operation.
 - The five-second client poll interval is pacing, not a security boundary.
-- **The document read routes carry no rule, deliberately.** `/docs/<id>`,
-  `/api/hosted/docs/<id>` and `/api/hosted/docs/<id>/content` refuse every
-  request that does not carry a valid browser session, and refuse it identically
-  whether or not the document exists — so there is no unauthenticated volume to
-  bound and no oracle to grind. The two rules above exist because their routes
-  are reachable without a session. If a pilot shows an authenticated reader
-  driving real cost, that is a quota question (§8), not a rate-limit one.
+- **The document read routes carry no rule. That is a gap, not a proof.**
+  `/docs/<id>`, `/api/hosted/docs/<id>` and `/api/hosted/docs/<id>/content`
+  disclose nothing without a valid session — a signed-out or non-owner request
+  gets an answer that is identical whether or not the document exists — so the
+  missing rule is not a disclosure risk. It **is** a cost and availability one,
+  and the reason is worth stating plainly rather than waving at: reaching those
+  routes does not require a session, and `identifyHosted` performs a
+  strongly-consistent Blobs read for *any* `__Host-archon_session` cookie value
+  a caller invents before deciding it is worthless. So an unauthenticated loop
+  over `/docs/<32 hex>` with a junk cookie buys one function invocation and one
+  consistent store read per request, with no `429` anywhere. Each real viewer
+  load additionally makes `/api/hosted/session` **write** a transient record.
+  Watch invocation and Blobs-read volume during the pilot (§8); if it moves,
+  the fix is a rule on these routes, and it is not blocked on anything.
 
 An invalid rule is **dropped by the platform without failing the deploy**, which
 is the failure mode to watch for: the route would be silently unprotected. Check

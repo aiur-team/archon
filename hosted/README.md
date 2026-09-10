@@ -526,6 +526,23 @@ account, the session or the CSRF token.
 Sign-out is a `POST` carrying the session-bound CSRF header, and the server
 revokes the session before it answers — clearing a cookie is not signing out.
 
+### What "indistinguishable" does and does not cover
+
+The bytes of a denial are identical for a missing document, an incomplete one and
+one owned by somebody else — status, headers and body. The **timing** is not. A
+key that does not exist returns from the store immediately, while a record that
+exists but belongs to another account is fetched in full (up to 2 MiB of HTML),
+parsed and validated before the owner comparison rejects it. A signed-in caller
+who already holds a document id from somewhere else — a receipt in a screenshot,
+a log line — can sample that difference and learn the id is real.
+
+It is a weak channel: it needs an id in hand and repeated sampling, and it never
+yields the title, the owner or the bytes. It is written down here because the
+alternative is a reader inferring a stronger promise from the identical bodies
+than the code actually keeps. Closing it means changing when
+`readOwnedPublication` fetches the record body, which is AHU-004's decision, not
+this route's.
+
 This bounds the artifact's *authority*, not its behaviour. A sandboxed document
 still renders whatever it likes inside its own frame and can still spend the
 reader's CPU. Nothing here makes hostile HTML safe, and nothing here is

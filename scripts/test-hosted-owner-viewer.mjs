@@ -290,6 +290,12 @@ function artifactHtml({ appOrigin, evilOrigin }) {
     return "issued";
   });
   attempt("resize", function () { return String(window.frameElement); });
+  /* The marker the raw-endpoint case looks for. Inside the sandbox this throws
+     -- the artifact has an opaque origin and no reach into any ancestor -- so
+     the flag stays unset. If the bytes were ever treated as a document on the
+     account origin, this line is what would set it, which is what makes that
+     case's assertion falsifiable rather than decorative. */
+  attempt("pwn", function () { top.__pwned = true; return "set"; });
 })();
 </script>
 </body>
@@ -394,8 +400,16 @@ async function startRenderer() {
          one, and neither does this: the interval guarantees a forged message
          lands in the window where the viewer has a frame and is waiting for it
          to speak, which is the only moment the source check is what refuses it. */
+      /* It reports what it received back to the top window rather than leaving
+         it on its own `window`. Reading `frame.contentWindow.__seen` from the
+         account origin is a cross-origin property access that always throws, so
+         an assertion built on it could never fail -- it read `["unreadable"]`
+         whatever happened. A `postMessage` back is a channel the account page
+         can actually observe. */
       const script =
-        'window.__seen=[];addEventListener("message",function(e){window.__seen.push(String(e.data&&e.data.type))});'
+        'window.__seen=[];'
+        + 'addEventListener("message",function(e){window.__seen.push(String(e.data&&e.data.type));'
+        + 'top.postMessage({archonForgeReport:window.__seen.slice()},"*");});'
         + 'setInterval(function(){top.postMessage({type:"archon:ready",v:1},"*");},50);';
       response.writeHead(200, { ...common, "Content-Type": "text/html; charset=utf-8" });
       response.end(
@@ -924,7 +938,7 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       const probe = await waitFor(
         async () => {
           const text = await artifact.locator("#probe").innerText();
-          return text.includes("resize=") ? text : null;
+          return text.includes("pwn=") ? text : null;
         },
         "the artifact never finished its probe",
       );
@@ -932,7 +946,7 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
         probe.split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
       );
 
-      for (const key of ["parentDom", "topDom", "parentLocation", "localStorage"]) {
+      for (const key of ["parentDom", "topDom", "parentLocation", "localStorage", "pwn"]) {
         assert.equal(results[key], "blocked", `the artifact reached ${key}`);
       }
       /* Either answer is a pass and the difference is engine detail: an opaque
@@ -951,7 +965,6 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
         "null",
         `the artifact does not have an opaque origin (${results.origin})`,
       );
-      assert.ok(!results.origin.includes(app.origin) && !results.origin.includes(renderer.origin));
 
       /* The two network attempts are proven blocked at the servers, not by an
          exception: an exception is what a fetch throws for a dozen reasons, and
@@ -1082,6 +1095,11 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
         await route.continue();
       });
       await tab.addInitScript((forge) => {
+        window.__forgeReports = [];
+        window.addEventListener("message", (event) => {
+          const report = event.data && event.data.archonForgeReport;
+          if (Array.isArray(report)) window.__forgeReports.push(...report);
+        });
         document.addEventListener("DOMContentLoaded", () => {
           const frame = document.createElement("iframe");
           frame.id = "forge";
@@ -1108,18 +1126,13 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       assert.equal(await tab.getAttribute("html", "data-archon-state"), "rendered");
       assert.equal(await artifact.locator("#heading").innerText(), "Quarterly figures");
 
-      /* And the forger itself received nothing. */
-      const seen = await tab.evaluate(() => {
-        const frame = document.getElementById("forge");
-        try {
-          return frame.contentWindow.__seen ?? ["unreadable"];
-        } catch {
-          return ["unreadable"];
-        }
-      });
+      /* And the forger itself received nothing, reported over a channel the
+         account page can read. */
+      const seen = await tab.evaluate(() => window.__forgeReports ?? null);
+      assert.ok(Array.isArray(seen), "the forge report channel was never established");
       assert.ok(
         !seen.includes("archon:render"),
-        "the viewer sent the private document to a forged window",
+        `the viewer sent the private document to a forged window (${seen.join(",")})`,
       );
       await tab.close();
     }],
@@ -1328,7 +1341,16 @@ async function worker() {
     owned: { ...completeRecordFor(base, html, "Quarterly figures"), id: ids.owned },
     bom: { ...completeRecordFor(base, `﻿${html}`, "With a byte-order mark"), id: ids.bom },
     hostileTitle: {
-      ...completeRecordFor(base, html, '<script>window.top.__titleRan=true</script><img src=x onerror=1>'),
+      /* The `img` handler is the load-bearing half. A `script` inserted through
+         `innerHTML` never runs, so a title regression that used `innerHTML`
+         would leave a script-only marker unset and the case would pass; an
+         `onerror` on a broken image does run under `innerHTML`, so this marker
+         actually fires if the title ever stops going in as text. */
+      ...completeRecordFor(
+        base,
+        html,
+        '<script>window.top.__titleRan=true</script><img src=x onerror="window.top.__titleRan=true">',
+      ),
       id: ids.hostileTitle,
     },
   };

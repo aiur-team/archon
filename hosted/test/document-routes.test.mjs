@@ -348,7 +348,6 @@ test("metadata never serialises the stored envelope", async () => {
 
 test("a title of executable-looking markup is returned as data, never markup", async () => {
   const hostile = '<script>alert(1)</script><img src=x onerror=alert(2)>';
-  const html = FIXTURE_HTML;
   const record = {
     ...RECORDS.complete,
     descriptor: { ...RECORDS.complete.descriptor, title: hostile },
@@ -375,7 +374,6 @@ test("a title of executable-looking markup is returned as data, never markup", a
      matters is the media type: JSON, so no browser parses it as a document, and
      `viewer.js` puts it in the page through `textContent`. */
   assert.equal((await response.json()).title, hostile);
-  assert.ok(html.length > 0);
 });
 
 /* ------------------------------------------------------------------ */
@@ -436,6 +434,30 @@ test("a leading byte-order mark survives the round trip byte for byte", async ()
     createHash("sha256").update(served).digest("hex"),
     record.descriptor.contentSha256,
   );
+});
+
+test("HEAD on the metadata route sends headers and no body", async () => {
+  const h = await harness();
+  const token = await h.signIn(FIXTURE_PRINCIPAL);
+  const head = await h.read(get(METADATA, { token, method: "HEAD" }));
+  const body = await h.read(get(METADATA, { token }));
+
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("content-type"), "application/json; charset=utf-8");
+  /* Asserted here rather than only in the acceptance runner: that runner drives
+     the handler through a Node HTTP server, which drops a HEAD body itself, so
+     its "no body" assertion cannot fail. This one calls the handler directly and
+     therefore can. */
+  assert.equal(await head.text(), "");
+  assert.equal(
+    head.headers.get("content-length"),
+    String(new TextEncoder().encode(await body.text()).byteLength),
+    "HEAD must advertise the length a GET would send",
+  );
+
+  const other = await h.read(get(METADATA, { token: await h.signIn(OTHER_PRINCIPAL), method: "HEAD" }));
+  assert.equal(other.status, 404);
+  assert.equal(await other.text(), "");
 });
 
 test("HEAD on the content route authorises identically and sends no bytes", async () => {

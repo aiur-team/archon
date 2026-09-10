@@ -132,18 +132,48 @@ export function createDocumentReadRoutes({ store, publications }) {
       const response = content ? rawContentResponse(record) : metadataResponse(record);
       return request.method === "HEAD" ? withoutBody(response) : response;
     } catch (error) {
-      const response = errorResponse(error);
-      const headers = new Headers(response.headers);
-      for (const [name, value] of Object.entries(PRIVATE_HEADERS)) headers.set(name, value);
-      const rebuilt = new Response(response.body, { status: response.status, headers });
-      return request.method === "HEAD" ? withoutBody(rebuilt) : rebuilt;
+      return privateErrorResponse(error, request);
     }
   };
 }
 
+/** A C3 error envelope carrying this module's private header set, HEAD included. */
+function privateErrorResponse(error, request) {
+  const response = errorResponse(error);
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(PRIVATE_HEADERS)) headers.set(name, value);
+  const rebuilt = new Response(response.body, { status: response.status, headers });
+  return request.method === "HEAD" ? withoutBody(rebuilt) : rebuilt;
+}
+
 /** The C4 metadata body: seven fields, and no part of the stored envelope. */
 function metadataResponse(record) {
-  return jsonResponse(200, documentMetadataOf(record), PRIVATE_HEADERS);
+  let body;
+  try {
+    body = JSON.stringify(documentMetadataOf(record));
+  } catch (error) {
+    /* A stored record that no longer satisfies `validateDocumentMetadata` is a
+       server-side data fault, not something the caller got wrong. Letting the
+       `invalid_request` through would answer an owner's valid request with a
+       400 naming an internal field such as `document.title`, and would put a
+       second, differently-shaped refusal beside the one 404 this module is
+       supposed to have. It is an outage, and it says so. */
+    throw new HostedContractError("unavailable", "document metadata is unavailable", {
+      field: "document",
+    });
+  }
+  /* Set explicitly, because `jsonResponse` does not and `withoutBody` can only
+     preserve a header that exists. `Content-Length` is the one thing a `HEAD` is
+     actually asked for, so a metadata `HEAD` that omitted it would make this
+     module's own promise about HEAD false. */
+  return new Response(body, {
+    status: 200,
+    headers: {
+      ...PRIVATE_HEADERS,
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": String(new TextEncoder().encode(body).byteLength),
+    },
+  });
 }
 
 /** The stored bytes, exactly, as something a browser will not execute. */
@@ -161,7 +191,16 @@ function rawContentResponse(record) {
   });
 }
 
-/** The Netlify entry point: the same routes, wired to the real provider. */
+/**
+ * The Netlify entry point: the same routes, wired to the real provider.
+ *
+ * The catch covers the two things that happen before the routes exist -- opening
+ * the store and reading operator configuration -- and it goes through the same
+ * private-header path the routes use. A bare `errorResponse` here was the one
+ * response from this module that shipped without `Netlify-CDN-Cache-Control`,
+ * `Vary: Cookie` and `X-Frame-Options`, which is exactly the "a header absent
+ * here is absent in production" rule failing on the path nobody tests.
+ */
 export default async function documentRead(request) {
   try {
     return await createDocumentReadRoutes({
@@ -169,6 +208,6 @@ export default async function documentRead(request) {
       publications: publicationDependencies({ env: process.env, getStore }),
     })(request);
   } catch (error) {
-    return errorResponse(error);
+    return privateErrorResponse(error, request);
   }
 }
