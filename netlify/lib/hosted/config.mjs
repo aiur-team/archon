@@ -19,7 +19,7 @@
  *    and a production bypass: no value an operator can set on a Netlify site -
  *    deliberately, by accident, or "temporarily on a preview" - can turn off the
  *    HTTPS requirement or the two-site separation. This module reads exactly the
- *    C6 keys listed below and nothing else.
+ *    keys listed below and nothing else.
  *  - **Secrets are unformattable.** `AUTH0_CLIENT_SECRET` is reachable only by
  *    calling `config.auth0.readClientSecret()`. It is not a property, so no
  *    combination of `JSON.stringify`, `util.inspect` (including
@@ -39,8 +39,9 @@ import { isLoopbackOrigin, registrableSite, validateOrigin, HostedContractError 
 export const REDACTED = "[redacted]";
 
 /**
- * The environment variables this module reads. Exactly C6's keys, and nothing
- * else - the local-test mode is an argument, not one more key.
+ * The environment variables this module reads: C6's keys plus ACN-007's
+ * public-mailbox override, and nothing else - the local-test mode is an
+ * argument, not one more key.
  */
 export const HOSTED_CONFIG_KEYS = Object.freeze([
   "HOSTED_APP_ORIGIN",
@@ -49,6 +50,7 @@ export const HOSTED_CONFIG_KEYS = Object.freeze([
   "AUTH0_CLIENT_ID",
   "AUTH0_CLIENT_SECRET",
   "HOSTED_PUBLISH_ENABLED",
+  "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
 ]);
 
 /**
@@ -183,6 +185,7 @@ function buildAuth0Credential(domain, clientId, clientSecret) {
  *   appSite: string | null,
  *   renderSite: string | null,
  *   publishEnabled: boolean,
+ *   allowPublicMailboxes: boolean,
  *   auth0: Readonly<{domain: string, clientId: string, readClientSecret: () => string}>,
  * }>}
  * @throws {HostedConfigError} naming the offending key, never its value
@@ -276,6 +279,14 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
 
   const publishEnabled = optionalBoolean(env, "HOSTED_PUBLISH_ENABLED");
 
+  /* ACN-007's one escape hatch, read through this validated reader rather than
+     out of the ambient environment at the point of use, so that a value which
+     is neither "true" nor "false" is a configuration error the deployment
+     refuses rather than a truthy string that quietly opens every document to a
+     mailbox provider. Off unless an operator spells it exactly, like every
+     other flag here. */
+  const allowPublicMailboxes = optionalBoolean(env, "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS");
+
   const auth0 = buildAuth0Credential(domain, clientId, clientSecret);
   const redactedView = () => ({
     mode,
@@ -285,6 +296,7 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     appSite,
     renderSite,
     publishEnabled,
+    allowPublicMailboxes,
     auth0: { domain, clientId, clientSecret: REDACTED },
   });
 
@@ -296,6 +308,7 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     appSite,
     renderSite,
     publishEnabled,
+    allowPublicMailboxes,
     auth0,
   };
   Object.defineProperties(config, {
@@ -322,6 +335,7 @@ export function formatHostedConfig(config) {
     `app=${config.appOrigin}`,
     `render=${config.renderOrigin}`,
     `publish=${config.publishEnabled ? "enabled" : "disabled"}`,
+    `publicMailboxDomains=${config.allowPublicMailboxes ? "allowed" : "refused"}`,
     `auth0Domain=${config.auth0.domain}`,
     `auth0ClientId=${config.auth0.clientId}`,
     `auth0ClientSecret=${REDACTED}`,

@@ -54,6 +54,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { AuthRequestError, AuthUnavailableError } from "./auth-errors.mjs";
 import { HOSTED_LIMITS, deriveAccountId, validatePrincipal } from "./contracts.mjs";
+import { normalizeEmailOrNull } from "./email.mjs";
 import { constantTimeEqual, randomToken, sha256Base64Url } from "./secrets.mjs";
 
 /** The path Auth0 is registered to call back to, under the hosted namespace. */
@@ -393,9 +394,12 @@ function sanitizeLogin(value) {
 /**
  * Build the C1 v2 principal from verified ID-token claims.
  *
- * `email` is set only when the claim is a present non-empty string, lower-cased;
- * `emailVerified` is true only when `email_verified` is the boolean `true` and
- * an email is present. The subject is spelled as the v2 `providerUserId` and the
+ * `email` is set only when the claim normalizes through the repository's one
+ * address grammar; `emailVerified` is true only when `email_verified` is the
+ * boolean `true` and an email is present. An address the grammar refuses makes
+ * the principal address-less rather than failing the sign-in, which is the
+ * right shape: the person is still who the subject says they are, they simply
+ * have no address any domain rule may act on. The subject is spelled as the v2 `providerUserId` and the
  * ownership key is derived by the contracts module rather than assembled here.
  * The whole record is handed to `validatePrincipal`, so a claim set this module
  * cannot turn into a legal principal is a failed sign-in, never a partial one.
@@ -405,9 +409,17 @@ export function principalFromClaims(claims) {
   const providerUserId = claims.sub;
   if (typeof providerUserId !== "string" || providerUserId === "") throw new AuthRequestError();
 
-  const rawEmail = claims.email;
-  const email =
-    typeof rawEmail === "string" && rawEmail !== "" ? rawEmail.toLowerCase() : null;
+  /* Through the one shared grammar rather than `toLowerCase()`, because
+     lower-casing is not normalisation and the difference is reachable here.
+     U+212A KELVIN SIGN lower-cases to an ASCII `k`, so a claim of
+     `ann@booK.example` folded into `ann@book.example` - a *verified* principal
+     at a domain the provider never asserted, which ACN-007's evaluator then
+     exact-matches against a document listing `book.example`.
+     `validatePrincipal` below does not catch it: it checks the value it is
+     given for printable ASCII, and by then the fold has already happened.
+     `normalizeEmailOrNull` refuses non-ASCII before it folds, so the claim
+     answers null and the address is simply absent. */
+  const email = normalizeEmailOrNull(claims.email);
   const emailVerified = email !== null && claims.email_verified === true;
 
   try {

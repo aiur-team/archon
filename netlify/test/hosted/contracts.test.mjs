@@ -202,6 +202,10 @@ test("the error table pins every C3 code to its status and retryability", () => 
       approval_required: 403,
       forbidden: 403,
       csrf_failed: 403,
+      email_unverified: 403,
+      public_mailbox_domain: 400,
+      too_many_domains: 400,
+      invalid_domain: 400,
       not_found: 404,
       descriptor_mismatch: 409,
       state_conflict: 409,
@@ -278,6 +282,54 @@ test("the contract lifetimes are the contract's, not whatever the fixtures say",
   assert.equal(HOSTED_LIMITS.RECEIPT_TTL_SECONDS, 86400);
   assert.equal(HOSTED_LIMITS.ERROR_MESSAGE_MAX_LENGTH, 200);
   assert.equal(HOSTED_LIMITS.TITLE_MAX_SCALARS, 160);
+});
+
+test("a stored domain list must already be normalized, sorted and unique", () => {
+  /* `validatePublication` validates the *stored* form and normalizes nothing,
+     for the same reason `requireNormalizedEmail` does not: `Example.COM` in a
+     record has not been through `normalizeDomainList`, and lower-casing it here
+     would make two spellings of one policy both valid at this boundary and
+     different at the `===` that decides who reads the document. Sorted and
+     unique is enforced rather than assumed because the store compares records
+     as canonical values - two orderings of one list would be two records, and a
+     transition would refuse itself. */
+  const withList = (allowedDomains) =>
+    validatePublication(replacing(PUBLICATION_FIXTURES.complete, { allowedDomains }));
+
+  assert.deepEqual(withList(["a.example.com", "b.example.com"]).allowedDomains, [
+    "a.example.com",
+    "b.example.com",
+  ]);
+  assert.deepEqual(withList([]).allowedDomains, []);
+
+  for (const list of [
+    ["Example.COM"],
+    [" example.com "],
+    ["example.com."],
+    ["localhost"],
+    ["exаmple.com"],
+    ["b.example.com", "a.example.com"],
+    ["example.com", "example.com"],
+    ["example.com", 7],
+    "example.com",
+    Array.from({ length: 21 }, (_, index) => `d${index}.example.net`),
+  ]) {
+    rejects(() => withList(list), { field: "publication.allowedDomains" });
+  }
+});
+
+test("an absent domain list reads as an empty one, and never as a fault", () => {
+  /* The upgrade-on-read half of the version rule. A record written before
+     ACN-007 has no `allowedDomains`, and `publication-store.mjs` turns a record
+     it cannot interpret into a 503 - so reading this as a fault would take every
+     already-stored document offline. */
+  const { allowedDomains, ...legacy } = validatePublication(PUBLICATION_FIXTURES.complete);
+  for (const value of [undefined, null]) {
+    const record = validatePublication({ ...legacy, v: 1, allowedDomains: value });
+    assert.deepEqual(record.allowedDomains, []);
+    assert.equal(record.v, 2);
+  }
+  assert.deepEqual(validatePublication({ ...legacy, v: 1 }).allowedDomains, []);
 });
 
 test("the fixture lifetimes are the declared lifetimes", () => {
@@ -657,7 +709,10 @@ test("every contract shape pins its version", () => {
   const cases = [
     [() => validateSessionResponse(replacing(SIGNED_OUT_SESSION, { v: 2 })), "session.v"],
     [() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { v: 2 })), "session.v"],
-    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 2 })), "publication.v"],
+    /* The stored record is the one shape with two readable versions: ACN-007
+       writes `2` and still reads the `1` that ACN-004 left in stores. So the
+       version this guard has to refuse is the next one up, not `2`. */
+    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 3 })), "publication.v"],
     [() => validateStartResponse(replacing(START_RESPONSE, { v: 2 }), APP), "start.v"],
     [() => validateResult(replacing(PENDING_RESULT_ENVELOPE, { v: 2 })), "result.v"],
     [() => validateWireError(replacing(ERROR_ENVELOPE, { v: 2 })), "errorEnvelope.v"],
@@ -667,6 +722,30 @@ test("every contract shape pins its version", () => {
     [() => validateDescriptor(replacing(VALID_DESCRIPTOR, { v: 2 })), "descriptor.v"],
   ];
   for (const [run, field] of cases) rejects(run, { field });
+});
+
+test("public mailbox domains are refused unless an operator spells the override exactly", () => {
+  /* The same strictness `HOSTED_PUBLISH_ENABLED` gets, and for a sharper
+     reason: a truthy-looking `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=1` that read as
+     "on" would let an owner list `gmail.com` and believe a document was
+     private, and one that read as "off" would only annoy them. Neither guess is
+     acceptable, so a value that is not exactly `true` or `false` is a fault. */
+  const key = "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS";
+  assert.equal(readHostedConfig({ ...FIXTURE_ENV, [key]: "true" }).allowPublicMailboxes, true);
+  assert.equal(readHostedConfig({ ...FIXTURE_ENV, [key]: "false" }).allowPublicMailboxes, false);
+  assert.equal(readHostedConfig(FIXTURE_ENV).allowPublicMailboxes, false);
+  for (const value of ["1", "yes", "TRUE", "on"]) {
+    assert.throws(
+      () => readHostedConfig({ ...FIXTURE_ENV, [key]: value }),
+      (error) => error instanceof HostedConfigError && error.key === key,
+    );
+  }
+  /* And it is visible in the one log line an operator reads to check what a
+     deployment thinks it is doing. */
+  assert.match(
+    formatHostedConfig(readHostedConfig({ ...FIXTURE_ENV, [key]: "true" })),
+    /publicMailboxDomains=allowed/,
+  );
 });
 
 test("a caller-supplied field path is used verbatim in the message", () => {
@@ -1457,8 +1536,9 @@ test("a complete production configuration is accepted, with publishing off", () 
   assert.ok(Object.isFrozen(config));
 });
 
-test("the reader consults exactly C6's operator variables", () => {
+test("the reader consults exactly C6's operator variables and ACN-007's override", () => {
   assert.deepEqual([...HOSTED_CONFIG_KEYS].sort(), [
+    "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
     "AUTH0_CLIENT_ID",
     "AUTH0_CLIENT_SECRET",
     "AUTH0_DOMAIN",
@@ -1466,9 +1546,9 @@ test("the reader consults exactly C6's operator variables", () => {
     "HOSTED_PUBLISH_ENABLED",
     "HOSTED_RENDER_ORIGIN",
   ]);
-  /* An environment carrying nothing but those five is enough, and an extra
-     variable changes nothing - in particular there is no environment value
-     that selects the relaxed mode. */
+  /* An environment carrying nothing but the required ones is enough, and an
+     extra variable changes nothing - in particular there is no environment
+     value that selects the relaxed mode. */
   const noisy = { ...FIXTURE_ENV, HOSTED_ENV: "local-test", NODE_ENV: "test", CONTEXT: "dev" };
   assert.equal(readHostedConfig(noisy).production, true);
 });
@@ -1681,6 +1761,7 @@ test("the log line names every field an operator needs to read", () => {
       ` app=${FIXTURE_APP_ORIGIN}` +
       ` render=${FIXTURE_RENDER_ORIGIN}` +
       " publish=disabled" +
+      " publicMailboxDomains=refused" +
       ` auth0Domain=${FIXTURE_ENV.AUTH0_DOMAIN}` +
       ` auth0ClientId=${FIXTURE_ENV.AUTH0_CLIENT_ID}` +
       ` auth0ClientSecret=${REDACTED}`,

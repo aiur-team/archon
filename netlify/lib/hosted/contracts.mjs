@@ -62,6 +62,9 @@
 import { createHash } from "node:crypto";
 import { parse as parseHost } from "tldts";
 
+import { DOMAIN_LIST_LIMITS } from "./domain-access.mjs";
+import { normalizeDomainOrNull } from "./email.mjs";
+
 /** U+0000. Spelled as an escape so this file stays free of control characters. */
 const NUL = "\u0000";
 /** U+FEFF, the optional leading byte-order mark C2 preserves rather than strips. */
@@ -218,6 +221,22 @@ export const ERROR_CODES = Object.freeze({
   approval_required: Object.freeze({ status: 403, retryable: false }),
   forbidden: Object.freeze({ status: 403, retryable: false }),
   csrf_failed: Object.freeze({ status: 403, retryable: false }),
+  /* ACN-007's one *disclosing* refusal, and the only reason a hosted read says
+     anything but `not_found`. A reader whose own domain is on a document's list
+     but whose address is unverified has an action to take, and the evaluator
+     answers this only when the domain really is listed - so it tells them no
+     more than the address they already claimed did. Not retryable: verifying an
+     address is a thing a person does with their provider, not something the
+     same request succeeds at on a second try. */
+  email_unverified: Object.freeze({ status: 403, retryable: false }),
+  /* ACN-007's three domain-list refusals. They are separate codes rather than
+     one `invalid_request` because an owner acts differently on each: a public
+     mailbox domain is a policy answer they have to argue with, too many domains
+     is a number they have to cut, and an invalid domain is a typo. All three are
+     400 and none is retryable - resending the same list gets the same answer. */
+  public_mailbox_domain: Object.freeze({ status: 400, retryable: false }),
+  too_many_domains: Object.freeze({ status: 400, retryable: false }),
+  invalid_domain: Object.freeze({ status: 400, retryable: false }),
   not_found: Object.freeze({ status: 404, retryable: false }),
   descriptor_mismatch: Object.freeze({ status: 409, retryable: false }),
   state_conflict: Object.freeze({ status: 409, retryable: false }),
@@ -322,9 +341,9 @@ function safeKeyNames(keys) {
  * Exactly `required`: no key missing, no key extra. Reported one class at a
  * time so a caller sees the whole reason.
  */
-function requireExactKeys(value, required, field) {
+function requireExactKeys(value, required, field, { optional = [] } = {}) {
   const present = Object.keys(value);
-  const missing = required.filter((key) => !Object.hasOwn(value, key));
+  const missing = required.filter((key) => !Object.hasOwn(value, key) && !optional.includes(key));
   if (missing.length > 0) {
     throw invalid(field, `is missing required field(s): ${safeKeyNames(missing)}`);
   }
@@ -843,6 +862,16 @@ function requireArtifactHtml(html, descriptor, field) {
 /* C2: publication record                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The version a record is written with.
+ *
+ * Read as "the shape this code produces", never as "the only shape it accepts":
+ * `validatePublication` reads a `1` and upgrades it, because two tickets added
+ * one field each - ACN-004's `ownerEmail` and ACN-007's `allowedDomains` - and
+ * one bump covers both.
+ */
+export const PUBLICATION_RECORD_VERSION = 2;
+
 const PUBLICATION_KEYS = Object.freeze([
   "v",
   "id",
@@ -855,6 +884,7 @@ const PUBLICATION_KEYS = Object.freeze([
   "pendingExpiresAt",
   "ownerAccountId",
   "ownerEmail",
+  "allowedDomains",
   "uploadExpiresAt",
   "completedAt",
   "receiptExpiresAt",
@@ -882,9 +912,20 @@ const PUBLICATION_KEYS = Object.freeze([
  */
 export function validatePublication(value, { field = "publication" } = {}) {
   requireRecord(value, field);
-  requireExactKeys(value, PUBLICATION_KEYS, field);
+  /* `allowedDomains` is the one optional key, because ACN-007 added it to a
+     record shape that already exists in stores. A record written before it
+     existed is a legal record with no domains listed, not a record this version
+     cannot interpret - and `publication-store.mjs` turns the latter into a 503,
+     so refusing it here would take every pre-existing document offline. */
+  requireExactKeys(value, PUBLICATION_KEYS, field, { optional: ["allowedDomains"] });
 
-  if (value.v !== 1) throw invalid(`${field}.v`, "must be 1");
+  /* Two versions are readable and one is written. ACN-004 added `ownerEmail`
+     without bumping and ACN-007 adds `allowedDomains` with one bump for both,
+     so a stored `1` is a record from either of those points and upgrades on
+     read by defaulting the field it is missing. */
+  if (value.v !== 1 && value.v !== PUBLICATION_RECORD_VERSION) {
+    throw invalid(`${field}.v`, `must be 1 or ${PUBLICATION_RECORD_VERSION}`);
+  }
   requireLowerHex(value.id, HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH, `${field}.id`);
   const descriptor = validateDescriptor(value.descriptor, { field: `${field}.descriptor` });
 
@@ -932,6 +973,7 @@ export function validatePublication(value, { field = "publication" } = {}) {
   if (ownerAccountId === null && ownerEmail !== null) {
     throw invalid(`${field}.ownerEmail`, "must be null while there is no owner");
   }
+  const allowedDomains = requireAllowedDomains(value.allowedDomains, `${field}.allowedDomains`);
   const uploadExpiresAt = requireNullableTimestamp(value.uploadExpiresAt, `${field}.uploadExpiresAt`);
   const completedAt = requireNullableTimestamp(value.completedAt, `${field}.completedAt`);
   const receiptExpiresAt = requireNullableTimestamp(
@@ -987,7 +1029,7 @@ export function validatePublication(value, { field = "publication" } = {}) {
   if (value.html !== null) requireArtifactHtml(value.html, descriptor, `${field}.html`);
 
   return Object.freeze({
-    v: 1,
+    v: PUBLICATION_RECORD_VERSION,
     id: value.id,
     descriptor,
     state,
@@ -998,11 +1040,52 @@ export function validatePublication(value, { field = "publication" } = {}) {
     pendingExpiresAt: value.pendingExpiresAt,
     ownerAccountId,
     ownerEmail,
+    allowedDomains,
     uploadExpiresAt,
     completedAt,
     receiptExpiresAt,
     html: value.html,
   });
+}
+
+/**
+ * The stored domain list: already normalized, sorted, unique, and bounded.
+ *
+ * This validates the *stored* form and normalizes nothing, for the same reason
+ * `requireNormalizedEmail` does not: a record carrying `Example.COM` has not
+ * been through the write path, and lower-casing it here would make two
+ * spellings of one policy both valid at this boundary and different at the
+ * `===` that decides access. `normalizeDomainList` is the one place a caller's
+ * input becomes a stored list, and it is the route's job to have called it.
+ *
+ * Sorted-and-unique is enforced rather than assumed because the record is
+ * compared as a canonical value by the store's compare-and-set: two orderings
+ * of one list would be two records, and a transition would refuse itself.
+ *
+ * The public-mailbox denylist is deliberately **not** applied here. It is a
+ * write-time rule with a site-wide override, and enforcing it on read would mean
+ * that turning `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` off made every record written
+ * while it was on unreadable - which `publication-store.mjs` would report as a
+ * storage outage on a document that is perfectly intact.
+ */
+function requireAllowedDomains(value, field) {
+  if (value === undefined || value === null) return Object.freeze([]);
+  if (!Array.isArray(value)) throw invalid(field, "must be an array of domains");
+  if (value.length > DOMAIN_LIST_LIMITS.MAX_DOMAINS) {
+    throw invalid(field, `must name at most ${DOMAIN_LIST_LIMITS.MAX_DOMAINS} domains`);
+  }
+  for (const entry of value) {
+    requireWellFormedString(entry, field);
+    if (normalizeDomainOrNull(entry) !== entry) {
+      throw invalid(field, "must hold normalized domains");
+    }
+  }
+  for (let index = 1; index < value.length; index += 1) {
+    if (value[index - 1] >= value[index]) {
+      throw invalid(field, "must be sorted and free of duplicates");
+    }
+  }
+  return Object.freeze([...value]);
 }
 
 /* ------------------------------------------------------------------ */

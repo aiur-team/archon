@@ -1624,7 +1624,15 @@ async function assemble(tempRoot) {
   );
   declare(authLogout, bounded(authLogout.createLogoutRoute(authDeps())));
   declare(session, bounded(session.createSessionRoute({ store: authStore })));
-  declare(viewer, bounded(viewer.createViewerRoute(authDeps())));
+  /* The page resolves the record now, so it needs the publication adapter the
+     two API routes already had - and it needs it rebuilt per request for the
+     same reason they do. ACN-007: the three surfaces reach one decision for one
+     principal, which they cannot do if one of them cannot see the record. */
+  declare(
+    viewer,
+    bounded((request) =>
+      viewer.createViewerRoute({ ...authDeps(), publications: publications() })(request)),
+  );
   /* Rebuilt per request, like every other route. A snapshot taken once at
      startup would make the operator switch unreachable from these routes, and
      the cases that turn publishing off and require an owner's reads to survive

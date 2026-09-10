@@ -446,7 +446,7 @@ section("hosted/.env.example is redacted and defaults to disabled", async () => 
   assert.deepEqual(
     Object.keys(env).sort(),
     [...HOSTED_CONFIG_KEYS].sort(),
-    "the example must carry exactly the C6 keys the config owner reads",
+    "the example must carry exactly the keys the config owner reads",
   );
   assert.equal(
     env.HOSTED_PUBLISH_ENABLED,

@@ -107,6 +107,8 @@ jobs:
           netlify/test/hosted/publications-browser.test.mjs
           netlify/test/hosted/document-routes.test.mjs
           netlify/test/hosted/publications-artifact.test.mjs
+          netlify/test/hosted/domain-access.test.mjs
+          netlify/test/hosted/publications-access.test.mjs
 
       # The approval page is defined in terms of `location.hash`, `history`, a
       # `__Host-` cookie surviving a real navigation out to a provider and back,

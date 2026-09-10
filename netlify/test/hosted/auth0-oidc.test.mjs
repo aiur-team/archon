@@ -256,9 +256,36 @@ test("a GitHub identity with no email is a valid session with no email", () => {
   assert.equal(principal.login, "octo");
 });
 
-test("email is normalised to lower case", () => {
-  const principal = principalFromClaims({ ...CLAIMS_GOOGLE, email: "Ann@Example.COM" });
+test("email is normalised through the one shared grammar", () => {
+  const principal = principalFromClaims({ ...CLAIMS_GOOGLE, email: "  Ann@Example.COM " });
   assert.equal(principal.email, "ann@example.com");
+
+  /* Lower-casing is not normalising, and the gap between them is reachable
+     from a claim. U+212A KELVIN SIGN lower-cases to an ASCII `k`, so a bare
+     `toLowerCase()` turned this claim into a *verified* principal at
+     `ann@book.example` - an address the provider never asserted, and one that
+     ACN-007's evaluator would exact-match against a document listing
+     `book.example`. `validatePrincipal` cannot catch it: by the time it checks
+     for printable ASCII, the fold has already produced printable ASCII.
+     Refusing non-ASCII before folding is what closes it, and the claim then
+     leaves the principal address-less rather than failing the sign-in. */
+  const folded = principalFromClaims({
+    ...CLAIMS_GOOGLE,
+    email: `ann@boo\u212A.example`,
+    email_verified: true,
+  });
+  assert.equal(folded.email, null, "a folding claim became an address");
+  assert.equal(folded.emailVerified, false);
+
+  /* And the rest of the grammar applies too, so a claim is held to exactly what
+     a stored address is held to. */
+  for (const email of ["ann@ example.com", "ann@exaаmple.com", "ann@localhost", "a@@b.com"]) {
+    assert.equal(
+      principalFromClaims({ ...CLAIMS_GOOGLE, email, email_verified: true }).email,
+      null,
+      JSON.stringify(email),
+    );
+  }
 });
 
 test("emailVerified is true only for the boolean true", () => {

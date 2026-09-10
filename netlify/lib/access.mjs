@@ -1,3 +1,4 @@
+import { normalizeEmailOrNull } from "./hosted/email.mjs";
 import {
   StoreError,
   assertDocId,
@@ -131,14 +132,10 @@ const STORE_UNAVAILABLE_MESSAGE = "State store unavailable";
 
 const BOUND_FROM = "env:DOC_OWNERS";
 const MAX_DOC_OWNERS_BYTES = 5000;
-const MAX_EMAIL_LENGTH = 254;
 const MAX_NAME_LENGTH = 200;
 const INVITATION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 const ASCII_WHITESPACE = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
-const EMAIL_EDGE_WHITESPACE = /^[ \t\n\r\f]+|[ \t\n\r\f]+$/g;
-const EMAIL_LOCAL_PATTERN = /^[a-z0-9.!#$%&'*+=?^_`{|}~-]{1,64}$/;
-const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const IDENTITY_SUB_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
 const INVITATION_HASH_PATTERN = /^[0-9a-f]{32}$/;
 const ISO_TIMESTAMP_PATTERN =
@@ -300,32 +297,20 @@ export const ROLE_CAPABILITIES = Object.freeze({
  * whitespace, quoted local parts, and non-ASCII spellings are all rejected. No
  * mailbox or DNS lookup is performed.
  *
+ * The grammar itself lives in `netlify/lib/hosted/email.mjs` and is called from
+ * here rather than restated. There is one address grammar in this repository
+ * and the hosted domain evaluator has to be held to exactly it: two spellings
+ * of the same rule is how a homoglyph or a trailing dot ends up admitted by one
+ * side of the product and refused by the other. What stays here is the *error*,
+ * because `invalid-email` is this module's vocabulary and every caller catches
+ * it; the shared function answers `null` and lets each tree raise its own.
+ *
  * @param {unknown} value
  * @returns {string}
  */
 export function normalizeEmail(value) {
-  if (typeof value !== "string") {
-    throw accessError("invalid-email");
-  }
-  const trimmed = value.replace(EMAIL_EDGE_WHITESPACE, "");
-  if (/[^\x00-\x7f]/.test(trimmed)) {
-    throw accessError("invalid-email");
-  }
-  const normalized = trimmed.toLowerCase();
-  if (normalized.length === 0 || normalized.length > MAX_EMAIL_LENGTH) {
-    throw accessError("invalid-email");
-  }
-  const at = normalized.indexOf("@");
-  if (at === -1 || normalized.indexOf("@", at + 1) !== -1) {
-    throw accessError("invalid-email");
-  }
-  const local = normalized.slice(0, at);
-  const domain = normalized.slice(at + 1);
-  if (!EMAIL_LOCAL_PATTERN.test(local)) {
-    throw accessError("invalid-email");
-  }
-  const labels = domain.split(".");
-  if (labels.length < 2 || !labels.every((label) => DNS_LABEL_PATTERN.test(label))) {
+  const normalized = normalizeEmailOrNull(value);
+  if (normalized === null) {
     throw accessError("invalid-email");
   }
   return normalized;
