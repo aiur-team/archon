@@ -28,6 +28,7 @@ import artifactHandler, {
   handleArtifact,
   config as artifactConfig,
 } from "../functions/publications-artifact.mjs";
+import { handleCancel } from "../functions/publications-cancel.mjs";
 import {
   FIXTURE_APP_ORIGIN,
   FIXTURE_HTML,
@@ -423,6 +424,93 @@ test("a receipt that stays unreadable is a retryable error over a document that 
 });
 
 /* ------------------------------------------------------------------ */
+/* races between two live requests                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The library suite already pins these interleavings against
+ * `completePublication` directly. They are repeated here through the real route
+ * because the acceptance gate asks what *two handler invocations* do to one
+ * record: the handler reads a body, runs a preflight and re-reads an envelope
+ * around the write, and none of that is exercised by calling the library twice.
+ *
+ * The interleaving is deterministic rather than timing-dependent. The provider
+ * double runs a one-shot hook immediately before it evaluates a conditional
+ * write, so the second request is driven to completion *inside* the first
+ * request's compare-and-set - the exact window where the first request's ETag
+ * goes stale.
+ */
+test("two concurrent uploads of the approved bytes commit one document", async () => {
+  const { resolve, provider, stored, writes } = harness({ seed: "approved" });
+
+  let inner = null;
+  provider.beforeWrite(async () => {
+    inner = await handleArtifact(upload(FIXTURE_HTML), resolve);
+  });
+  const outer = await handleArtifact(upload(FIXTURE_HTML), resolve);
+
+  /* The request that reached the store second is the one that created; the
+     other discovers the committed document and recovers its receipt. */
+  assert.equal(inner.status, 201, "the write that landed is the creation");
+  assert.equal(outer.status, 200, "the loser must not claim a second creation");
+  const created = await read(inner);
+  const recovered = await read(outer);
+  assert.deepEqual(recovered, created, "both callers see the same receipt");
+  assert.deepEqual(created.result, FIXTURE_RESULT, "one document id, one url, one owner");
+
+  const record = stored();
+  assert.equal(record.state, "complete");
+  assert.equal(record.html, FIXTURE_HTML);
+  assert.equal(record.ownerAccountId, RECORDS.approved.ownerAccountId, "the owner is immutable");
+  assert.equal(provider.keys().length, 1, "a race never mints a second record");
+  assert.equal(
+    writes().filter((call) => call.key === FIXTURE_KEY).length,
+    2,
+    "both requests attempted the compare-and-set; only one could win",
+  );
+  assert.equal(
+    JSON.parse(provider.raw(FIXTURE_KEY).data).completedAt,
+    record.completedAt,
+    "the losing attempt left the committed record untouched",
+  );
+});
+
+test("an upload whose write is delayed cannot resurrect a cancellation that won", async () => {
+  const { resolve, provider, stored, writes } = harness({ seed: "approved" });
+
+  let cancelled = null;
+  provider.beforeWrite(async () => {
+    /* The agent gave up on this operation while its own upload was in flight.
+       Cancellation reaches the store first, so the upload's compare-and-set is
+       evaluated against a record that is no longer approved. */
+    cancelled = await handleCancel(
+      new Request(`${BASE}/api/hosted/publications/${FIXTURE_PUBLICATION_ID}/cancel`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${FIXTURE_RECORD_AGENT_SECRET}` },
+      }),
+      resolve,
+    );
+  });
+  const response = await handleArtifact(upload(FIXTURE_HTML), resolve);
+
+  assert.equal(cancelled.status, 200);
+  assert.equal((await read(cancelled)).state, "cancelled");
+  await assertError(response, 409, "state_conflict");
+
+  const record = stored();
+  assert.equal(record.state, "cancelled", "the upload cannot re-open a terminal operation");
+  assert.equal(record.html, null, "a cancelled record never holds bytes");
+  assert.equal(record.completedAt, null);
+  assert.equal(provider.keys().length, 1);
+  assert.equal(
+    writes().filter((call) => call.key === FIXTURE_KEY && call.options.onlyIfMatch !== undefined)
+      .length,
+    2,
+    "the upload's late write was attempted and refused, not skipped",
+  );
+});
+
+/* ------------------------------------------------------------------ */
 /* descriptor and byte validation                                      */
 /* ------------------------------------------------------------------ */
 
@@ -481,6 +569,37 @@ test("the media type survives a client's spacing and casing", async () => {
     request.headers.set("content-type", type);
     const response = await handleArtifact(request, resolve);
     assert.equal(response.status, 201, `${type} should be accepted`);
+  }
+});
+
+test("a body this server would have to decompress is refused, before it is read", async () => {
+  for (const encoding of ["gzip", "GZIP", "br", "deflate", "identity, gzip", "gzip, identity"]) {
+    const { resolve, writes } = harness({ seed: "approved" });
+    const request = upload(FIXTURE_HTML);
+    request.headers.set("content-encoding", encoding);
+    const body = await assertError(
+      await handleArtifact(request, resolve),
+      415,
+      "unsupported_media_type",
+    );
+    assert.equal(body.error.retryable, false, `content-encoding: ${encoding} is not worth retrying`);
+    /* The digest is computed over the octets that arrive, so a coded body would
+       otherwise be measured as a document nobody approved and reported as a
+       descriptor mismatch - a 409 blaming the caller's bytes for the server's
+       refusal to decode. */
+    assert.equal(request.bodyUsed, false, "a coded body is refused before it is spent");
+    assert.deepEqual(writes(), []);
+  }
+});
+
+test("a caller that spells out the absence of a coding is accepted", async () => {
+  for (const encoding of ["identity", "IDENTITY", " identity "]) {
+    const { resolve, stored } = harness({ seed: "approved" });
+    const request = upload(FIXTURE_HTML);
+    request.headers.set("content-encoding", encoding);
+    const response = await handleArtifact(request, resolve);
+    assert.equal(response.status, 201, `content-encoding: "${encoding}" should be accepted`);
+    assert.equal(stored().html, FIXTURE_HTML);
   }
 });
 

@@ -199,7 +199,8 @@ tells you the change has landed.
    deploy did not pick up the change; repeat step 2.
 4. That `503` is the whole proof. It is the one route you can probe from
    outside, and because the upload path is gated on the same flag *inside
-   `completePublication`* — the function any future artifact route must call —
+   `completePublication`* — the function the artifact route goes through to
+   commit bytes —
    there is no window to wait out: once the deploy carrying the change is live,
    no new bytes can be committed, whatever was approved beforehand. Probing the
    upload path separately needs an approved publication, which needs a human
