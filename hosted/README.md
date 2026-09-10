@@ -33,7 +33,7 @@ the build if it ever does. Nothing about the root deployment or
 | `netlify.toml` | Deployment configuration. No edge function, no build command, no environment values. |
 | `public/` | Static app shell, served as committed. |
 | `lib/` | Server modules. Deployed. |
-| `functions/` | Routed Netlify functions under `/api/hosted/*`. |
+| `functions/` | Routed Netlify functions under `/api/hosted/*`, plus the one page route `/docs/:documentId`. |
 | `test/` | Tests and fixtures. Never reachable from a deployed module. |
 | `docs/` | Consumer documentation for the modules in `lib/`. |
 
@@ -470,6 +470,67 @@ capability the CLI holds, and ambient browser credentials alongside a capability
 is the confused-deputy shape the two-origin split exists to prevent. There is no
 CORS grant anywhere in the hosted API.
 
+### Reading a document
+
+| Route | Method | Authentication |
+| --- | --- | --- |
+| `/docs/:documentId` | `GET`, `HEAD` | browser session (redirects to sign-in without one) |
+| `/api/hosted/docs/:documentId` | `GET`, `HEAD` | browser session, and the session's account must own the document |
+| `/api/hosted/docs/:documentId/content` | `GET`, `HEAD` | as above |
+
+`/docs/<id>` is the stable address of a document and the one hosted route that
+lives outside the `/api/hosted/*` namespace — `hosted/lib/contracts.mjs` freezes
+it as `DOCUMENT_PATH_PREFIX`, and `scripts/check-hosted-modules.mjs` allows it by
+name rather than by prefix.
+
+Four things about these routes are worth knowing before you change them.
+
+- **The shell is a constant.** `/docs/<id>` returns byte-identical HTML for every
+  document, and answers before any lookup: it checks that you are signed in and
+  that the id is well formed, and nothing else. It carries no title, no owner, no
+  digest and not even the id — `public/viewer.js` reads that from the address bar
+  and fetches the rest. So opening a stranger's id is not a way to learn whether
+  it exists, and there is no interpolation of authored text into the page to get
+  wrong.
+- **The shell's check is not reusable authorisation.** The two API routes receive
+  nothing from the page: no token, no signed id, no header. Each calls
+  `identifyHosted` and `readOwnedPublication` from scratch, exactly as it would
+  for a request typed into an address bar.
+- **Every denial is the same denial.** Missing, not complete, owned by another
+  account and malformed all produce one 404 with one fixed body. A signed-out
+  reader gets `session_required` instead, which is safe to distinguish because
+  they get it for every id. A storage outage is a retryable 503 and is never
+  spelled as either — telling an owner their document is gone during an outage is
+  the failure they would act on.
+- **The bytes are not a document.** `/content` is `application/octet-stream` with
+  `nosniff`, `Content-Disposition: attachment; filename="archon-document.html"`
+  and `Content-Security-Policy: default-src 'none'; sandbox`. Four mechanisms
+  say the same thing because this is the one endpoint on the account origin that
+  returns authored HTML. The bytes are the stored bytes, byte-order mark
+  included, and hash to the digest the owner approved.
+
+`HEAD` authorises exactly as `GET` does on all three, and no private response
+carries an `ETag` — a conditional request is answered on its merits rather than
+with a 304 that skipped the owner check.
+
+### What the viewer page is and is not
+
+The trusted regions — title, signed-in account, sign-out, the status line and
+the retry control — are siblings of the renderer frame, never inside it. The
+document itself is two frames down: a cross-site frame at `HOSTED_RENDER_ORIGIN`
+holding an inner `sandbox="allow-scripts"` frame with an opaque origin. The page
+sends the renderer only HTML, only to that exact origin and window, and only
+after its `archon:ready` message; the renderer never learns the document id, the
+account, the session or the CSRF token.
+
+Sign-out is a `POST` carrying the session-bound CSRF header, and the server
+revokes the session before it answers — clearing a cookie is not signing out.
+
+This bounds the artifact's *authority*, not its behaviour. A sandboxed document
+still renders whatever it likes inside its own frame and can still spend the
+reader's CPU. Nothing here makes hostile HTML safe, and nothing here is
+end-to-end encryption: the service holds the bytes.
+
 ## Operator configuration
 
 Every key below is set in the Netlify site environment. None is set in
@@ -515,6 +576,8 @@ npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
 node scripts/check-hosted-modules.mjs
 node --test scripts/check-hosted-modules.test.mjs
 node --test hosted/test/contracts.test.mjs
+node --test hosted/test/document-routes.test.mjs
+node scripts/test-hosted-owner-viewer.mjs
 node --test \
   hosted/test/identity.test.mjs \
   hosted/test/auth-store.test.mjs \
