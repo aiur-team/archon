@@ -264,11 +264,18 @@ section("disabled publishing preserves completed receipts and bytes", async () =
   const { provider, resolve: resolveDeps } = deployment({ publishEnabled: "false", seed: "complete" });
   const before = provider.raw(FIXTURE_KEY);
 
+  /* Pin the clock inside the receipt window, as every other section does: the
+     fixture is stamped at a fixed instant, so on the wall clock the receipt
+     expires a day later and this section would start answering 410. */
+  const withinReceiptWindow = () => ({
+    ...resolveDeps(),
+    now: () => Date.parse(RECORDS.complete.completedAt) + 1000,
+  });
   const response = await handleStatus(
     request(`${START_ROUTE}/${FIXTURE_PUBLICATION_ID}/status`, {
       headers: { authorization: `Bearer ${FIXTURE_RECORD_AGENT_SECRET}` },
     }),
-    resolveDeps,
+    withinReceiptWindow,
   );
   const body = await response.json();
   assert.equal(response.status, 200, `status must answer 200 while disabled, got ${response.status}`);
