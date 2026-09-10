@@ -65,6 +65,17 @@ export function createSessionRoute({ store }) {
       );
     }
 
+    /* A browser that already holds a live binding keeps it, rather than being
+       handed a fresh one. Two reasons, and the second is the important one: a
+       page that polls this route should not invalidate the binding its own form
+       is about to present, and a route that wrote a record on every anonymous
+       GET would let an unauthenticated caller grow the store one blob per
+       request. Reuse bounds that at one record per browser per fifteen minutes. */
+    const held = readCookie(request, LOGIN_COOKIE);
+    if (held !== null && (await store.readTransient("login", held)) !== null) {
+      return jsonResponse(validateSessionResponse({ v: 1, authenticated: false }));
+    }
+
     const binding = await store.createTransient("login");
     return jsonResponse(validateSessionResponse({ v: 1, authenticated: false }), {
       cookies: [

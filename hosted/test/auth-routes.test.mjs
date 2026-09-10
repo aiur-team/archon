@@ -112,6 +112,25 @@ test("the signed-out response issues the pre-login binding and nothing else", as
   assert.ok(!/domain=/i.test(cookies.get(LOGIN_COOKIE)));
 });
 
+test("a browser that already holds a live binding is not handed another", async () => {
+  const app = deployment();
+  const first = await bootstrap(app);
+  const before = app.blobs.keys().length;
+
+  const again = await app.session(
+    browserRequest("/api/hosted/session", { cookies: { [LOGIN_COOKIE]: first } }),
+  );
+  assert.equal(setCookies(again).size, 0, "reissuing would invalidate the binding the form holds");
+  assert.equal(app.blobs.keys().length, before, "an anonymous GET must not grow the store per request");
+  assert.notEqual(await app.store.readTransient("login", first), null);
+
+  app.clock.advanceSeconds(TRANSIENT_TTL_SECONDS + 1);
+  const expired = await app.session(
+    browserRequest("/api/hosted/session", { cookies: { [LOGIN_COOKIE]: first } }),
+  );
+  assert.notEqual(cookieValue(setCookies(expired).get(LOGIN_COOKIE)), first);
+});
+
 test("a bootstrap does not consume an existing OAuth state or publication binding", async () => {
   const app = deployment();
   const binding = await createPendingBinding(app.store, { operation: "b".repeat(43) });
