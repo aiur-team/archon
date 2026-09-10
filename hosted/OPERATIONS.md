@@ -404,3 +404,10 @@ effect on deployed functions, the deployed response headers and routing, the rea
 GitHub callback and granted scopes, conditional-write race behaviour against real
 Blobs, owner/other-account read isolation, lost-response receipt recovery, and
 staging/production isolation.
+
+The acceptance side of this list is
+[`docs/builds/agent-hosted-upload/live-acceptance.md`](../docs/builds/agent-hosted-upload/live-acceptance.md):
+the procedure for each of those recordings, and the preflight gate
+`node scripts/test-hosted-live.mjs`, which refuses — item by item, as `BLOCKED`
+rather than as a skipped pass — until everything above is supplied. Dated results
+live beside it under `evidence/`.

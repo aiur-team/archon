@@ -167,6 +167,29 @@ jobs:
       - name: hosted operations gate
         run: node scripts/test-hosted-operations.mjs
 
+      # AHU-013's live acceptance gate. The capstone it belongs to cannot be
+      # closed by anything in this workflow -- it is about GitHub's real
+      # callback, real deployed routing and an installed public release -- so
+      # what CI proves here is the opposite property: that the runner refuses to
+      # report a live result when the operator prerequisites are absent, which
+      # is exactly the state every build runs in. A runner that started exiting
+      # 0 without them would turn "blocked" into "passed" silently, so a zero
+      # exit fails this step.
+      #
+      # It imports `hosted/lib` and `renderer/scripts/build.mjs` rather than
+      # restating either policy, so it runs after the hosted install above.
+      - name: live acceptance refuses without operator prerequisites
+        run: |
+          if node scripts/test-hosted-live.mjs; then
+            echo "scripts/test-hosted-live.mjs reported a live result with no operator prerequisites" >&2
+            exit 1
+          fi
+
+      # The rules that refusal is made of, one planted violation at a time,
+      # against an injected fetch so no probe leaves the runner.
+      - name: the live acceptance gate can fail
+        run: node --test --test-timeout=30000 scripts/test-hosted-live.test.mjs
+
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and
       # DOC_OWNERS, the wrong authorities here), no build command (so a deploy
