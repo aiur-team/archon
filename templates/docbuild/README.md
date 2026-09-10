@@ -160,7 +160,10 @@ else.
 `start` writes a mode-0600 request file into a mode-0700 state directory
 outside your repository: `ARCHON_PUBLISH_STATE_DIR` if set, otherwise
 `$XDG_STATE_HOME/archon-publish`, otherwise `~/.local/state/archon-publish`.
-`--state-dir` overrides it for one run. The file pins the service origin, the
+`--state-dir` overrides it for one run. Both the flag and the environment
+variable must name an absolute path: a relative one would put a capability
+wherever the command happened to be run from, which inside a checkout means
+writing a secret into the repository. The file pins the service origin, the
 absolute input path, the approved descriptor and the operation capability, and
 it survives interruption and error — nothing in this command deletes it or your
 source HTML.

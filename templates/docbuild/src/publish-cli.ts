@@ -78,6 +78,7 @@ Options
   --request <path>         The request-state file printed by start.
   --timeout-seconds <n>    resume only. Default ${PUBLISH_CONTRACT.RESUME_TIMEOUT_DEFAULT_SECONDS}, maximum ${PUBLISH_CONTRACT.RESUME_TIMEOUT_MAX_SECONDS}.
   --state-dir <path>       start only. Where private request state lives.
+                           Must be an absolute path.
                            Defaults to ${STATE_DIR_ENV}, then \$XDG_STATE_HOME,
                            then ~/.local/state/archon-publish.
   --local-test             start only. Allow a plain-http loopback service
@@ -100,19 +101,47 @@ login — only a capability for the single publication it started.
 `;
 
 /**
+ * What a usage error still knows about the invocation that produced it.
+ *
+ * A usage error can happen before `parse` has returned an `Options`, so the
+ * two facts the error envelope needs are recorded as they become known rather
+ * than read back off a value that may not exist yet.
+ */
+const invocation: { json: boolean; command: string } = { json: false, command: "unknown" };
+
+/**
  * Write help and leave, with 0 only when help is what was asked for.
  *
  * `writeSync` rather than `process.stdout.write`, because `process.exit` on the
  * next line does not wait for an asynchronous write to drain and stdout is a
  * pipe whenever this is called from a script — the exact case where the help
  * text would be truncated.
+ *
+ * A `--json` caller gets the same single error object every other failure
+ * gives it. Help is for a person and stays on stderr; an agent that asked for
+ * machine-readable output must not have to parse it — being handed a wall of
+ * prose and a bare exit code is how a caller ends up guessing at what went
+ * wrong, which is exactly what `--json` exists to prevent.
  */
 function usage(message?: string): never {
   if (message === undefined) {
     writeSync(1, HELP);
     process.exit(0);
   }
-  writeSync(2, `error: ${safeText(message)}\n\n${HELP}`);
+  const text = safeText(message);
+  if (invocation.json) {
+    writeSync(
+      1,
+      `${JSON.stringify({
+        v: 1,
+        command: invocation.command,
+        state: "error",
+        code: "invalid_input",
+        message: text,
+      })}\n`,
+    );
+  }
+  writeSync(2, `error: ${text}\n\n${HELP}`);
   process.exit(EXIT.LOCAL);
 }
 
@@ -141,6 +170,10 @@ const VALUE_FLAGS = new Set([
  * and quietly picking one of the two is the worst available answer.
  */
 function parse(argv: readonly string[]): Options {
+  /* Read before anything can fail, so a usage error raised while parsing still
+     answers in the shape the caller asked for. `--json` is positional-free and
+     takes no value, so its presence is unambiguous without parsing. */
+  invocation.json = argv.includes("--json");
   if (argv.length === 0) usage("missing command");
   if (argv.includes("-h") || argv.includes("--help")) {
     if (argv.length === 1) usage();
@@ -151,6 +184,7 @@ function parse(argv: readonly string[]): Options {
   if (command === undefined || !(COMMANDS as readonly string[]).includes(command)) {
     usage(`unknown command: ${command ?? ""}`);
   }
+  invocation.command = command;
 
   const flags = new Map<string, string>();
   let json = false;

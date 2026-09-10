@@ -619,8 +619,20 @@ export function defaultStateDir(env: NodeJS.ProcessEnv = process.env): string {
  * "Refuse where safe repair cannot be proven" is the rule, and a symlink is
  * the case it exists for: silently `chmod`ing a directory somebody else
  * pointed somewhere sensitive is a worse outcome than an error message.
+ *
+ * A relative path is refused here rather than resolved, and this is the one
+ * check every writer shares. State carries an operation bearer, so "where does
+ * it land" must not depend on the working directory the agent happened to be
+ * invoked from: `--state-dir relative/state` run inside a checkout writes a
+ * secret into the repository, which is the single directory most likely to be
+ * committed. `defaultStateDir` already refuses a relative environment
+ * override; putting the same rule at the choke point means the `--state-dir`
+ * flag and every library caller cannot bypass it.
  */
 export function ensureStateDir(dir: string): string {
+  if (!isAbsolute(dir)) {
+    throw localError(`the state directory must be an absolute path: ${dir}`, "invalid_state_dir");
+  }
   const path = resolve(dir);
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const info = lstatSync(path);
