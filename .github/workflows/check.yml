@@ -90,6 +90,30 @@ jobs:
             hosted/test/github-oauth.test.mjs \
             hosted/test/auth-routes.test.mjs
 
+      # AHU-004's publication state. Three suites rather than one because they
+      # test three different things: the provider adapter's conditional-write
+      # and readback handling, the state machine's races and deadlines, and the
+      # three agent endpoints' transport rules. Named literally, like every
+      # other test file in this workflow, so a file that stops being emitted
+      # fails loudly instead of matching a glob of nothing.
+      #
+      # These run under `hosted/test/` rather than beside the modules they
+      # cover: `scripts/check-hosted-modules.mjs` refuses a `*.test.mjs` inside
+      # `hosted/lib/` or `hosted/functions/`, because a deployed module that
+      # could import a fixture is one edit away from returning a fake success.
+      #
+      # `--test-timeout` bounds each test. These suites verify compare-and-set
+      # loops, and a regression that stops one of them terminating would
+      # otherwise hang the job until the runner's own limit killed it with no
+      # failing test named; thirty seconds is far above the whole suite's
+      # runtime and far below that.
+      - name: hosted publication tests
+        run: >-
+          node --test --test-timeout=30000
+          hosted/test/publication-store.test.mjs
+          hosted/test/publications.test.mjs
+          hosted/test/publications-agent.test.mjs
+
       # The hosted deployment's safety is mostly in what its TOML does NOT say:
       # no edge function (the legacy all-path gate resolves Netlify Identity and
       # DOC_OWNERS, the wrong authorities here), no build command (so a deploy

@@ -24,9 +24,10 @@
 #     to a function at runtime, so putting them here would also be wrong on the
 #     mechanics. `hosted/lib/config.mjs` defaults every unset key to its strict
 #     reading: production origin parsing, publishing disabled.
-#   * No routed function. AHU-001 ships the shell only. A placeholder handler
-#     that returned success for an upload route would be a production surface
-#     that lies, so the route is simply absent until its producer lands.
+#   * No route declared here. Every hosted function declares its own path in
+#     its `config` export, under `/api/hosted/*`, which is where a reviewer
+#     reads it and where `scripts/check-hosted-modules.mjs` checks it. A route
+#     added in this file would be a second, unchecked place for one to appear.
 #
 # The static headers below apply to the files in `public/`. Netlify does not
 # apply TOML headers to function-generated responses, so every hosted function
