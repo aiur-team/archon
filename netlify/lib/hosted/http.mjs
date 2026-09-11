@@ -22,6 +22,7 @@ import { HostedContractError } from "./contracts.mjs";
 import { readHostedConfig } from "./config.mjs";
 import { openAuthStore } from "./auth-store.mjs";
 import { createAllowlistStore } from "./allowlist.mjs";
+import { createSignupAttemptsStore } from "./signup-attempts.mjs";
 
 /** Applied to every response this tree emits. */
 export const SECURITY_HEADERS = Object.freeze({
@@ -119,6 +120,11 @@ export function serve(build) {
          first use - so a route that never reads it pays nothing for holding it,
          and the alternative is a second `serve` with one extra dependency. */
       allowlist: createAllowlistStore({ getStore }),
+      /* The turned-away sign-in audit, for the one auth route that appends to it.
+         Assembled for every route for the same reason the allowlist is:
+         constructing it opens no store, so a route that never records an attempt
+         pays nothing for holding it. */
+      signupAttempts: createSignupAttemptsStore({ getStore }),
     };
     return build(deps)(request);
   });

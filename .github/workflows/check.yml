@@ -110,21 +110,23 @@ jobs:
           netlify/test/hosted/domain-access.test.mjs
           netlify/test/hosted/publications-access.test.mjs
 
-      # The site-level access surfaces #227 added: the platform-access evaluator
-      # and the configuration that seeds it, the stored allowlist and its
-      # compare-and-set discipline, the three admin routes, and the
-      # invite-request form's mail transport and abuse controls. Every one runs
-      # against injected dependencies -- the same provider double the
-      # publication suites use, an in-memory session store, and a `fetch` double
-      # for the email provider -- so none of it needs a credential, a provider
-      # account or a network, and a missing secret cannot skip any of it.
+      # The site-level access surfaces #227 added, and #6's post-rejection request
+      # flow on top of them: the platform-access evaluator and the configuration
+      # that seeds it, the stored allowlist and its compare-and-set discipline,
+      # the admin routes (documents census, allowlist editor, turned-away sign-in
+      # census), and the access-request form's mail transport and abuse controls.
+      # Every one runs against injected dependencies -- the same provider double
+      # the publication suites use, an in-memory session store, and a `fetch`
+      # double for the email provider -- so none of it needs a credential, a
+      # provider account or a network, and a missing secret cannot skip any of it.
       - name: hosted admin and allowlist tests
         run: >-
           node --test --test-timeout=30000
           netlify/test/hosted/platform-access.test.mjs
           netlify/test/hosted/allowlist.test.mjs
+          netlify/test/hosted/signup-attempts.test.mjs
           netlify/test/hosted/admin-routes.test.mjs
-          netlify/test/hosted/invite-request.test.mjs
+          netlify/test/hosted/access-request.test.mjs
 
       # The approval page is defined in terms of `location.hash`, `history`, a
       # `__Host-` cookie surviving a real navigation out to a provider and back,

@@ -79,6 +79,20 @@ export const LOGIN_COOKIE = "__Host-archon_login";
  */
 export const BINDING_COOKIE = "__Host-archon_publish";
 
+/**
+ * The single-use binding for a turned-away sign-in's access request.
+ *
+ * When the platform gate refuses a verified address, the callback mints a
+ * short-lived `access_request` transient carrying that verified address and sets
+ * this cookie to its token, then lands the visitor on `/request-access/`. The
+ * request form's submit route reads this cookie and looks the address up
+ * server-side, so the address a request is attributed to is the one Auth0
+ * verified and never a string the form supplied. Distinct name and lifetime from
+ * the others, exactly as `OAUTH_COOKIE` is: this one proves nothing about a
+ * session and outlives none.
+ */
+export const ACCESS_REQUEST_COOKIE = "__Host-archon_access_request";
+
 /** The header a browser presents its session-bound CSRF token in. */
 export const CSRF_HEADER = "x-archon-csrf";
 

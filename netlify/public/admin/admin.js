@@ -24,6 +24,9 @@
   const allowlistForm = document.querySelector("[data-archon-allowlist-form]");
   const allowlistInput = document.querySelector("[data-archon-allowlist-input]");
   const allowlistAdd = document.querySelector("[data-archon-allowlist-add]");
+  const attemptsStatus = document.querySelector("[data-archon-attempts-status]");
+  const attemptsTable = document.querySelector("[data-archon-attempts]");
+  const attemptsBody = document.querySelector("[data-archon-attempts-body]");
 
   let csrfToken = null;
 
@@ -185,6 +188,45 @@
     );
   }
 
+  async function loadAttempts() {
+    say(attemptsStatus, "Loading…", "pending");
+    let response;
+    try {
+      response = await fetch("/api/hosted/admin/signup-attempts", {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+    } catch {
+      say(attemptsStatus, "Could not reach the server. Reload to try again.", "error");
+      return;
+    }
+    const body = await readJson(response);
+    if (!response.ok) {
+      say(attemptsStatus, errorMessage(body, "The turned-away list is unavailable."), "error");
+      return;
+    }
+
+    attemptsBody.replaceChildren();
+    const attempts = Array.isArray(body?.attempts) ? body.attempts : [];
+    for (const attempt of attempts) {
+      const row = document.createElement("tr");
+      cell(row, attempt.email);
+      cell(row, shortDate(attempt.firstAt));
+      cell(row, shortDate(attempt.lastAt));
+      cell(row, String(attempt.count));
+      attemptsBody.append(row);
+    }
+
+    attemptsTable.hidden = attempts.length === 0;
+    say(
+      attemptsStatus,
+      attempts.length === 0
+        ? "No turned-away sign-ins yet."
+        : `${attempts.length} address${attempts.length === 1 ? "" : "es"} turned away.`,
+      "ok",
+    );
+  }
+
   async function loadAllowlist() {
     say(allowlistStatus, "Loading…", "pending");
     let response;
@@ -252,9 +294,10 @@
     } catch {
       say(allowlistStatus, "Your session could not be confirmed. Reload the page.", "error");
       say(documentsStatus, "Your session could not be confirmed. Reload the page.", "error");
+      say(attemptsStatus, "Your session could not be confirmed. Reload the page.", "error");
       return;
     }
-    await Promise.all([loadAllowlist(), loadDocuments()]);
+    await Promise.all([loadAllowlist(), loadDocuments(), loadAttempts()]);
   }
 
   void start();

@@ -94,7 +94,7 @@ export const TRANSIENT_PREFIX = "auth/";
  * the value makes that a property of where the record lives rather than of a
  * field somebody has to remember to check.
  */
-export const TRANSIENT_KINDS = Object.freeze(["oauth", "login", "binding"]);
+export const TRANSIENT_KINDS = Object.freeze(["oauth", "login", "binding", "access_request"]);
 
 /**
  * C1 (v2): the browser session's absolute expiry, 24 hours from creation.

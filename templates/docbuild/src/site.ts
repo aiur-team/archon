@@ -81,6 +81,7 @@ const RESERVED_ROUTES = new Set([
   "d",
   "login",
   "invite",
+  "request-access",
   "skills",
   "docs",
   "publish",

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Request access — Archon</title>
+    <!--
+      Where a verified sign-in that this deployment does not admit lands. The
+      page carries no address of its own: the sign-in that reached it left a
+      one-time cookie naming the verified address, and `request-access.js` posts
+      only the note. So there is no email field to fill in and none to forge —
+      the request is attributed server-side to the address Auth0 verified.
+
+      The page's policy is `script-src 'self'; style-src 'self' 'unsafe-inline';
+      connect-src 'self'` (the first-party page set the edge gate applies to a
+      static HTML pass-through), so the styles are inline and the one script is
+      external and same-origin.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 30rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.35rem; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      label { display: block; font-weight: 600; margin: 1.25rem 0 0.35rem; }
+      textarea {
+        box-sizing: border-box;
+        font: inherit;
+        min-height: 6rem;
+        padding: 0.5rem;
+        resize: vertical;
+        width: 100%;
+      }
+      button {
+        cursor: pointer;
+        font: inherit;
+        margin-top: 1rem;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      button[disabled] { cursor: progress; opacity: 0.6; }
+      .status { margin-top: 1rem; }
+      .status:empty { display: none; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      .status[data-tone="ok"] { font-weight: 600; }
+      .back { margin-top: 1.5rem; }
+      noscript p { color: #b3261e; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Request access to Archon</h1>
+    <p class="lede">
+      Your sign-in was verified, but this account is not admitted to this
+      deployment yet. Tell an administrator what you would like to use Archon
+      for and they will be in touch. Your verified email is included
+      automatically — there is nothing else to enter.
+    </p>
+
+    <noscript>
+      <p>
+        JavaScript is required to send a request. You can still sign in again
+        from the <a href="/">home page</a> with a different account.
+      </p>
+    </noscript>
+
+    <form id="request" novalidate>
+      <label for="message">What would you like to use Archon for?</label>
+      <textarea id="message" name="message" maxlength="1000"
+                placeholder="A sentence or two is plenty."></textarea>
+      <button type="submit" id="submit">Send request</button>
+    </form>
+
+    <p class="status" id="status" role="status" aria-live="polite"></p>
+
+    <p class="back"><a href="/">Back to the home page</a></p>
+
+    <script src="./request-access.js"></script>
+  </body>
+</html>

@@ -57,6 +57,14 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
   "/docs/",
   "/publish/",
   "/invite/",
+  /* The request-access page a turned-away sign-in lands on, and its one script.
+     It is served with no session check because the visitor who reaches it has
+     no session by definition - the platform gate just refused them one. A prefix
+     rather than an exact path, like `/login/` and `/publish/`, because it is an
+     interactive page with its own same-origin asset; the static HTML gains the
+     first-party page header set through `finalizePassThrough`, which is what its
+     `fetch` to `/api/hosted/access-request` needs. */
+  "/request-access/",
 ]);
 
 /**

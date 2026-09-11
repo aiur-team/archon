@@ -49,15 +49,19 @@
 
 import { resolveAllowlist } from "../lib/hosted/allowlist.mjs";
 import { AuthUnavailableError } from "../lib/hosted/auth-errors.mjs";
+import { TRANSIENT_TTL_SECONDS } from "../lib/hosted/auth-store.mjs";
 import {
   exchangeCodeForIdToken,
   principalFromClaims,
   verifyIdToken,
 } from "../lib/hosted/auth0-oidc.mjs";
+import { normalizeEmailOrNull } from "../lib/hosted/email.mjs";
 import { methodNotAllowed, redirectResponse, serve } from "../lib/hosted/http.mjs";
 import { evaluatePlatformAccess } from "../lib/hosted/platform-access.mjs";
 import { constantTimeEqual, hashToken } from "../lib/hosted/secrets.mjs";
+import { recordSignupAttempt } from "../lib/hosted/signup-attempts.mjs";
 import {
+  ACCESS_REQUEST_COOKIE,
   OAUTH_COOKIE,
   SESSION_COOKIE,
   SESSION_COOKIE_MAX_AGE,
@@ -74,33 +78,51 @@ export const config = { path: "/api/hosted/auth/callback" };
 const SIGN_IN_PATH = "/";
 
 /**
+ * Where a verified-but-not-admitted sign-in lands instead of a bare refusal.
+ *
+ * A trailing slash so it resolves to `netlify/public/request-access/index.html`
+ * as a directory index with no `_redirects` rewrite, and so it matches the
+ * `/request-access/` pass-through the edge gate serves anonymously - the visitor
+ * has no session, so the page has to be reachable without one.
+ */
+const REQUEST_ACCESS_PATH = "/request-access/";
+
+/**
  * The only status words this route will ever put in that URL.
  *
- * A closed set, and the two the platform allowlist added are closed for the same
- * reason the first three are: the sign-in page renders a fixed message per word
- * and ignores anything else, so the query string can never become a way to put
- * chosen text on a trusted page.
+ * A closed set: the sign-in page renders a fixed message per word and ignores
+ * anything else, so the query string can never become a way to put chosen text
+ * on a trusted page.
  *
- * `not_allowed` and `verify_email` are the two answers an enforced allowlist can
- * produce, and they are deliberately *different words*. Telling a visitor who
- * simply has not confirmed their address that they are not allowed to use the
- * product sends them to ask an operator for access they already have; telling a
- * visitor who is genuinely not on the list to check their inbox sends them
- * nowhere at all. Neither word says whether any particular address or domain is
- * on the list - `evaluatePlatformAccess` checks verification *before* the list
- * precisely so that this page is not an oracle over it.
+ * `verify_email` is the one enforced-allowlist refusal that still lands on the
+ * splash, and it is deliberately its own word. A visitor who has not confirmed
+ * their address is told to check their inbox and sign in again - a refusal they
+ * can clear themselves, so there is nothing to request. A visitor who *is*
+ * verified but is not admitted is a different case entirely: they can do nothing
+ * on their own, so instead of a status word they are sent to the request-access
+ * page (see `refusedToRequestAccess`). Neither outcome says whether any
+ * particular address or domain is on the list - `evaluatePlatformAccess` checks
+ * verification *before* the list precisely so that this route is not an oracle
+ * over it, and the request page is reached by every unadmitted verified address
+ * alike.
  */
 export const CALLBACK_STATUSES = Object.freeze([
   "denied",
   "expired",
   "unavailable",
-  "not_allowed",
   "verify_email",
 ]);
 
-/** The landing word for each way the platform gate can refuse. */
+/**
+ * The landing word for each way the platform gate can refuse *to the splash*.
+ *
+ * `not_allowlisted` is deliberately absent: a verified address that is not
+ * admitted is not returned to the splash with a word at all, it is offered the
+ * request-access page. The three that remain are the ones a visitor either can
+ * act on themselves (`email_unverified`) or must simply retry (`session_required`,
+ * `allowlist_unavailable`).
+ */
 const PLATFORM_REFUSAL_STATUS = Object.freeze({
-  not_allowlisted: "not_allowed",
   email_unverified: "verify_email",
   allowlist_unavailable: "unavailable",
   session_required: "expired",
@@ -124,8 +146,67 @@ function failed(status, { clear = true, destination = null } = {}) {
   });
 }
 
+/**
+ * Land a verified-but-not-admitted visitor on the request-access page.
+ *
+ * This is the one refusal that is not a dead end. The address is the one the ID
+ * token was just verified for, and it is used two ways, both of which fail safe:
+ *
+ *  1. It is recorded in the sign-up-attempts audit so an operator can see who
+ *     was turned away even if they never submit the request form.
+ *  2. It is stored in a single-use `access_request` transient whose token rides
+ *     back in `ACCESS_REQUEST_COOKIE`, so the request form's submit route reads
+ *     the *verified* address server-side rather than trusting a form field.
+ *
+ * Neither write is allowed to change the outcome. A refused visitor is refused
+ * regardless: an audit-store outage loses one row, and a transient-store outage
+ * loses the cookie (the page still renders and explains that they must sign in
+ * again), but neither creates a session and neither throws out of the callback.
+ * The `OAUTH_COOKIE` is cleared here exactly as on every other post-binding
+ * path.
+ */
+async function refusedToRequestAccess(principal, { store, signupAttempts }) {
+  const email = normalizeEmailOrNull(principal.email);
+  const cookies = [clearCookie(OAUTH_COOKIE)];
+
+  /* A verified address that does not normalise is not one we can record or
+     attribute a request to. It is vanishingly rare - the gate already refused
+     it as `not_allowlisted` for the same reason - so the page is still offered,
+     without a cookie, and the visitor is told to sign in again. */
+  if (email !== null) {
+    try {
+      await recordSignupAttempt({ email }, { store: signupAttempts });
+    } catch {
+      /* The audit is bookkeeping; losing one row must not admit anyone or turn a
+         refusal into an error page. */
+    }
+
+    try {
+      const minted = await store.createTransient("access_request", { email });
+      cookies.unshift(
+        serializeCookie(ACCESS_REQUEST_COOKIE, minted.token, {
+          maxAgeSeconds: TRANSIENT_TTL_SECONDS,
+        }),
+      );
+    } catch {
+      /* No token means the request form cannot attribute a message, so it will
+         answer "sign in again" rather than mail an unverified address. The
+         refusal itself is unaffected. */
+    }
+  }
+
+  return redirectResponse(REQUEST_ACCESS_PATH, { status: 303, cookies });
+}
+
 /** The route, over injected dependencies. */
-export function createCallbackRoute({ store, config: hostedConfig, allowlist, fetchImpl, getKeySet }) {
+export function createCallbackRoute({
+  store,
+  config: hostedConfig,
+  allowlist,
+  signupAttempts,
+  fetchImpl,
+  getKeySet,
+}) {
   return async function callbackRoute(request) {
     if (request.method !== "GET") return methodNotAllowed("GET");
 
@@ -242,6 +323,13 @@ export function createCallbackRoute({ store, config: hostedConfig, allowlist, fe
         enforced: true,
       });
       if (!decision.allowed) {
+        /* A verified address that simply is not admitted is offered the
+           request-access page rather than dead-ended on the splash. Every other
+           refusal - an unverified address, an unreadable list, a lost session -
+           still lands on the splash with the word its reader can act on. */
+        if (decision.reason === "not_allowlisted") {
+          return refusedToRequestAccess(principal, { store, signupAttempts });
+        }
         return failed(PLATFORM_REFUSAL_STATUS[decision.reason] ?? "expired", { destination });
       }
     }

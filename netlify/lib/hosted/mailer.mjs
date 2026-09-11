@@ -2,9 +2,9 @@
  * The transactional email transport, and the one message this deployment sends.
  *
  * Before this module the notifier was Slack-only (`netlify/lib/notify.mjs`), and
- * the hosted tree had no way to reach a person at all. The invite-request form
- * needs one, so this is it - deliberately the smallest thing that is a real
- * transport rather than a general mail library.
+ * the hosted tree had no way to reach a person at all. The access-request form a
+ * turned-away sign-in lands on needs one, so this is it - deliberately the
+ * smallest thing that is a real transport rather than a general mail library.
  *
  * ## What is and is not configured here
  *
@@ -12,7 +12,7 @@
  * part of `readHostedConfig`'s set on purpose: every key that reader validates is
  * one a deployment cannot serve *any* hosted request without, and email is not
  * that. A deployment with no mail configuration serves everything else normally
- * and answers the invite-request route with "not enabled", which is a far better
+ * and answers the access-request route with "not enabled", which is a far better
  * failure than a site that refuses to sign anybody in because nobody set a
  * sender address.
  *

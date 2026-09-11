@@ -1,7 +1,7 @@
 /**
  * The conditional-write discipline for the small singleton records this
- * deployment keeps beside its publications: the platform allowlist, and the
- * invite-request rate-limit counters.
+ * deployment keeps beside its publications: the platform allowlist, the
+ * access-request rate-limit counter, and the turned-away sign-in census.
  *
  * ## Its relationship to `publication-store.mjs`
  *

@@ -20,8 +20,13 @@ import {
   validateDestination,
 } from "../../lib/hosted/identity.mjs";
 import { createPublicationStore } from "../../lib/hosted/publication-store.mjs";
+import {
+  createSignupAttemptsStore,
+  recordSignupAttempt,
+} from "../../lib/hosted/signup-attempts.mjs";
 import { createAdminAllowlistRoute } from "../../functions/hosted-admin-allowlist.mjs";
 import { createAdminDocumentsRoute } from "../../functions/hosted-admin-documents.mjs";
+import { createAdminSignupAttemptsRoute } from "../../functions/hosted-admin-signup-attempts.mjs";
 import { ADMIN_PAGE_PATH } from "../../lib/hosted/admin.mjs";
 import { ADMIN_SIGN_IN, createAdminPageRoute } from "../../functions/hosted-admin-page.mjs";
 import {
@@ -80,12 +85,20 @@ function publication(id, { title, ownerEmail = null, allowedDomains = [], state 
   };
 }
 
-async function harness({ env = {}, documents = [] } = {}) {
+async function harness({ env = {}, documents = [], attempts = [] } = {}) {
   const clock = fixedClock();
   const auth = memoryAuthStore(clock, new MemoryBlobStore());
   const provider = createProviderDouble();
   const publications = createPublicationStore({ getStore: provider.getStore });
   for (const record of documents) await publications.create(record);
+
+  const signupAttempts = createSignupAttemptsStore({ getStore: provider.getStore });
+  for (const attempt of attempts) {
+    await recordSignupAttempt(
+      { email: attempt.email, now: () => new Date(attempt.at) },
+      { store: signupAttempts },
+    );
+  }
 
   const config = readHostedConfig({ ...HOSTED_ENV, ARCHON_ADMINS: ADMIN, ...env });
   const deps = () =>
@@ -94,6 +107,7 @@ async function harness({ env = {}, documents = [] } = {}) {
       store: auth.store,
       allowlist: createAllowlistStore({ getStore: provider.getStore }),
       publications,
+      signupAttempts,
     });
 
   return {
@@ -106,6 +120,7 @@ async function harness({ env = {}, documents = [] } = {}) {
     page: createAdminPageRoute(deps),
     documents: createAdminDocumentsRoute(deps),
     allowlist: createAdminAllowlistRoute(deps),
+    attempts: createAdminSignupAttemptsRoute(deps),
   };
 }
 
@@ -411,6 +426,65 @@ test("a seeded entry is marked and its removal is refused with a usable message"
   assert.match((await refused.json()).error.message, /ARCHON_PLATFORM_ALLOWLIST/);
 });
 
+/* --- the turned-away sign-in census --------------------------------------- */
+
+test("the attempts census lists every turned-away address, newest first", async () => {
+  const app = await harness({
+    attempts: [
+      { email: "early@example.com", at: "2026-09-10T09:00:00.000Z" },
+      { email: "late@example.com", at: "2026-09-10T11:00:00.000Z" },
+    ],
+  });
+  const { cookies } = await app.signIn(personAt(ADMIN));
+  const response = await app.attempts(
+    browserRequest("/api/hosted/admin/signup-attempts", { cookies }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.v, 1);
+  assert.deepEqual(body.attempts.map((a) => a.email), ["late@example.com", "early@example.com"]);
+  const late = body.attempts[0];
+  assert.equal(late.count, 1);
+  assert.equal(late.firstAt, "2026-09-10T11:00:00.000Z");
+  assert.equal(late.lastAt, "2026-09-10T11:00:00.000Z");
+});
+
+test("the attempts census is empty when nobody has been turned away", async () => {
+  const app = await harness();
+  const { cookies } = await app.signIn(personAt(ADMIN));
+  const body = await (
+    await app.attempts(browserRequest("/api/hosted/admin/signup-attempts", { cookies }))
+  ).json();
+  assert.deepEqual(body.attempts, []);
+});
+
+test("the attempts census refuses a non-admin and a signed-out caller", async () => {
+  const app = await harness({
+    attempts: [{ email: "turned-away@example.com", at: "2026-09-10T09:00:00.000Z" }],
+  });
+  const { cookies } = await app.signIn(personAt(NOT_ADMIN));
+
+  const refused = await app.attempts(
+    browserRequest("/api/hosted/admin/signup-attempts", { cookies }),
+  );
+  assert.equal(refused.status, 403);
+  /* Being turned away yourself does not entitle you to enumerate who else was. */
+  assert.ok(!(await refused.text()).includes("turned-away@example.com"), "a refusal names nobody");
+
+  const anonymous = await app.attempts(browserRequest("/api/hosted/admin/signup-attempts"));
+  assert.equal(anonymous.status, 401);
+});
+
+test("the admin shell names the turned-away section", async () => {
+  const app = await harness();
+  const { cookies } = await app.signIn(personAt(ADMIN));
+  const body = await (await app.page(browserRequest("/admin", { cookies }))).text();
+  assert.match(body, /Turned-away sign-ins/);
+  /* The shell still carries no data of its own. */
+  assert.ok(!body.includes("turned-away@example.com"));
+});
+
 test("every admin route refuses the methods it does not implement", async () => {
   const app = await harness();
   const { cookies } = await app.signIn(personAt(ADMIN));
@@ -418,6 +492,7 @@ test("every admin route refuses the methods it does not implement", async () => 
     [app.page, "/admin", "POST", "GET, HEAD"],
     [app.documents, "/api/hosted/admin/documents", "POST", "GET"],
     [app.allowlist, "/api/hosted/admin/allowlist", "DELETE", "GET, POST"],
+    [app.attempts, "/api/hosted/admin/signup-attempts", "POST", "GET"],
   ];
   for (const [route, path, method, allow] of cases) {
     const response = await route(browserRequest(path, { method, cookies }));
@@ -435,6 +510,7 @@ test("no admin response is cacheable and none carries a CORS grant", async () =>
     [app.page, "/admin"],
     [app.documents, "/api/hosted/admin/documents"],
     [app.allowlist, "/api/hosted/admin/allowlist"],
+    [app.attempts, "/api/hosted/admin/signup-attempts"],
   ]) {
     const response = await route(browserRequest(path, { cookies }));
     assert.match(response.headers.get("Cache-Control"), /no-store/, `${path} is not cached`);

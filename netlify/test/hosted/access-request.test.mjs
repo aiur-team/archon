@@ -1,28 +1,31 @@
 /**
- * The invite-request form: its mail configuration, its abuse controls and the
+ * The access-request form: its mail configuration, its abuse controls and the
  * route that ties them together.
  *
- * Every send goes through the real request-building code against an injected
- * `fetch` double, so what is verified is the headers, the body and how a
- * provider failure is reported. No account is registered, no key is present and
- * nothing leaves this process.
+ * A verified sign-in that this deployment does not admit lands on the
+ * request-access page carrying a one-time `access_request` cookie whose stored
+ * payload is the VERIFIED address. This route reads that address server-side and
+ * mails the operator; the form body carries only the note. Every send goes
+ * through the real request-building code against an injected `fetch` double, so
+ * what is verified is the headers, the body and how a provider failure is
+ * reported. No account is registered, no key is present and nothing leaves this
+ * process.
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  INVITE_LIMITS,
-  INVITE_RATE_KEY,
-  claimInviteSubmission,
-  createInviteRateStore,
-  inviteMessage,
+  REQUEST_LIMITS,
+  REQUEST_RATE_KEY,
+  accessRequestMessage,
+  claimRequestSubmission,
+  createRequestRateStore,
   normalizeMessage,
-  normalizeRequesterEmail,
   sourceKeyOf,
   validateRateRecord,
   windowOf,
-} from "../../lib/hosted/invite-requests.mjs";
+} from "../../lib/hosted/access-requests.mjs";
 import {
   MailerConfigError,
   MailerSendError,
@@ -32,8 +35,15 @@ import {
 } from "../../lib/hosted/mailer.mjs";
 import { readHostedConfig } from "../../lib/hosted/config.mjs";
 import { HostedContractError } from "../../lib/hosted/contracts.mjs";
-import { createInviteRequestRoute } from "../../functions/hosted-invite-request.mjs";
-import { APP_ORIGIN, HOSTED_ENV, browserRequest } from "./fixtures/auth.mjs";
+import { ACCESS_REQUEST_COOKIE } from "../../lib/hosted/identity.mjs";
+import { createAccessRequestRoute } from "../../functions/hosted-access-request.mjs";
+import {
+  APP_ORIGIN,
+  HOSTED_ENV,
+  browserRequest,
+  fixedClock,
+  memoryAuthStore,
+} from "./fixtures/auth.mjs";
 import { createProviderDouble } from "./helpers/publication-store.mjs";
 
 const MAIL_ENV = Object.freeze({
@@ -74,7 +84,7 @@ test("a partial configuration is a fault, not a silent 'not enabled'", () => {
 });
 
 test("the provider is named exactly, so no request URL is ever configurable", () => {
-  /* A configurable endpoint on a route an anonymous visitor can reach is a
+  /* A configurable endpoint on a route a near-anonymous visitor can reach is a
      server-side request forgery primitive behind a name that reads like a
      setting. */
   const error = thrown(() =>
@@ -156,29 +166,22 @@ test("a note is bounded and stripped of control characters", () => {
      is how it renders as something other than what arrived. */
   assert.equal(normalizeMessage("a\rbc‮d"), "abcd");
   assert.throws(
-    () => normalizeMessage("x".repeat(INVITE_LIMITS.MESSAGE_MAX_SCALARS + 1)),
+    () => normalizeMessage("x".repeat(REQUEST_LIMITS.MESSAGE_MAX_SCALARS + 1)),
     HostedContractError,
   );
   assert.throws(() => normalizeMessage(42), HostedContractError);
 });
 
-test("the requester's address is validated and says nothing about who is known", () => {
-  assert.equal(normalizeRequesterEmail(" Someone@Example.COM "), "someone@example.com");
-  const error = thrown(() => normalizeRequesterEmail("not-an-address"));
-  assert.ok(error instanceof HostedContractError);
-  assert.equal(error.code, "invalid_request");
-});
-
-test("the operator's message labels every field and puts the note last", () => {
+test("the operator's message names the verified address and puts the note last", () => {
   /* A note containing something that looks like a label cannot appear to precede
      a field that follows it, because no field follows it. */
-  const text = inviteMessage({
+  const text = accessRequestMessage({
     email: "someone@example.com",
-    message: "Email: forged@evil.example",
+    message: "Verified email: forged@evil.example",
     at: AT,
   });
-  assert.match(text, /^Someone asked for an invite/);
-  assert.match(text, /\nEmail: someone@example\.com\n/);
+  assert.match(text, /^Someone was turned away at sign-in/);
+  assert.match(text, /\nVerified email: someone@example\.com\n/);
   assert.ok(text.indexOf("Message:") < text.indexOf("forged@evil.example"), "the note is last");
 });
 
@@ -186,7 +189,7 @@ test("the operator's message labels every field and puts the note last", () => {
 
 function rateHarness() {
   const provider = createProviderDouble();
-  return { provider, store: createInviteRateStore({ getStore: provider.getStore }) };
+  return { provider, store: createRequestRateStore({ getStore: provider.getStore }) };
 }
 
 test("a source is a digest, so the counter is not a log of who visited", () => {
@@ -210,11 +213,11 @@ test("a client-settable forwarding header is not read at all", () => {
 test("a source the platform did not name shares one strict bucket", async () => {
   const { store } = rateHarness();
   const now = () => AT;
-  for (let i = 0; i < INVITE_LIMITS.MAX_PER_SOURCE; i += 1) {
-    await claimInviteSubmission({ source: "unknown", now }, { store });
+  for (let i = 0; i < REQUEST_LIMITS.MAX_PER_SOURCE; i += 1) {
+    await claimRequestSubmission({ source: "unknown", now }, { store });
   }
   await assert.rejects(
-    () => claimInviteSubmission({ source: "unknown", now }, { store }),
+    () => claimRequestSubmission({ source: "unknown", now }, { store }),
     (error) => error instanceof HostedContractError && error.code === "rate_limited",
   );
 });
@@ -222,14 +225,14 @@ test("a source the platform did not name shares one strict bucket", async () => 
 test("the per-source budget is spent, and another source still has its own", async () => {
   const { store } = rateHarness();
   const now = () => AT;
-  for (let i = 0; i < INVITE_LIMITS.MAX_PER_SOURCE; i += 1) {
-    await claimInviteSubmission({ source: "aaa", now }, { store });
+  for (let i = 0; i < REQUEST_LIMITS.MAX_PER_SOURCE; i += 1) {
+    await claimRequestSubmission({ source: "aaa", now }, { store });
   }
   await assert.rejects(
-    () => claimInviteSubmission({ source: "aaa", now }, { store }),
+    () => claimRequestSubmission({ source: "aaa", now }, { store }),
     HostedContractError,
   );
-  await claimInviteSubmission({ source: "bbb", now }, { store });
+  await claimRequestSubmission({ source: "bbb", now }, { store });
 });
 
 test("the window total bounds what the deployment sends however many sources appear", async () => {
@@ -237,26 +240,26 @@ test("the window total bounds what the deployment sends however many sources app
      therefore the only one that actually bounds the provider bill. */
   const { store } = rateHarness();
   const now = () => AT;
-  for (let i = 0; i < INVITE_LIMITS.MAX_PER_WINDOW; i += 1) {
-    await claimInviteSubmission({ source: `s${i}`, now }, { store });
+  for (let i = 0; i < REQUEST_LIMITS.MAX_PER_WINDOW; i += 1) {
+    await claimRequestSubmission({ source: `s${i}`, now }, { store });
   }
   await assert.rejects(
-    () => claimInviteSubmission({ source: "fresh", now }, { store }),
+    () => claimRequestSubmission({ source: "fresh", now }, { store }),
     (error) => error instanceof HostedContractError && error.code === "rate_limited",
   );
 });
 
 test("the counter resets when the window rolls over, and keeps one key forever", async () => {
   const { provider, store } = rateHarness();
-  for (let i = 0; i < INVITE_LIMITS.MAX_PER_SOURCE; i += 1) {
-    await claimInviteSubmission({ source: "aaa", now: () => AT }, { store });
+  for (let i = 0; i < REQUEST_LIMITS.MAX_PER_SOURCE; i += 1) {
+    await claimRequestSubmission({ source: "aaa", now: () => AT }, { store });
   }
-  const later = new Date(AT.getTime() + INVITE_LIMITS.WINDOW_MS);
+  const later = new Date(AT.getTime() + REQUEST_LIMITS.WINDOW_MS);
   assert.notEqual(windowOf(later), windowOf(AT));
-  await claimInviteSubmission({ source: "aaa", now: () => later }, { store });
+  await claimRequestSubmission({ source: "aaa", now: () => later }, { store });
   /* One key rather than one per hour: the provider has no expiry and no
      conditional delete, so a key per window would never be removed by anything. */
-  assert.deepEqual(provider.keys(), [INVITE_RATE_KEY]);
+  assert.deepEqual(provider.keys(), [REQUEST_RATE_KEY]);
 });
 
 test("a counter that cannot be read refuses the submission", async () => {
@@ -265,16 +268,16 @@ test("a counter that cannot be read refuses the submission", async () => {
   const { provider, store } = rateHarness();
   provider.failNextRead({ throws: true });
   await assert.rejects(
-    () => claimInviteSubmission({ source: "aaa", now: () => AT }, { store }),
+    () => claimRequestSubmission({ source: "aaa", now: () => AT }, { store }),
     (error) => error instanceof HostedContractError && error.code === "unavailable",
   );
 });
 
 test("a corrupt counter is an outage rather than a fresh budget", async () => {
   const { provider, store } = rateHarness();
-  provider.put(INVITE_RATE_KEY, JSON.stringify({ v: 1, window: "1", counts: { aaa: -5 } }));
+  provider.put(REQUEST_RATE_KEY, JSON.stringify({ v: 1, window: "1", counts: { aaa: -5 } }));
   await assert.rejects(
-    () => claimInviteSubmission({ source: "aaa", now: () => AT }, { store }),
+    () => claimRequestSubmission({ source: "aaa", now: () => AT }, { store }),
     (error) => error instanceof HostedContractError && error.code === "unavailable",
   );
 });
@@ -288,8 +291,18 @@ test("the stored total is derived, never read", () => {
 
 /* --- the route ------------------------------------------------------------ */
 
+/**
+ * One deployment of the route.
+ *
+ * The verified address reaches the route through a real `access_request`
+ * transient in a real `AuthStore`, exactly as the callback leaves it, so what is
+ * exercised is the route reading the address from the store rather than a mock of
+ * that read. `mint(email)` returns the cookie a refused-and-verified visitor's
+ * browser would hold.
+ */
 function routeHarness({ env = MAIL_ENV, send = async () => new Response("{}", { status: 200 }) } = {}) {
   const provider = createProviderDouble();
+  const auth = memoryAuthStore(fixedClock());
   const sends = [];
   const fetchImpl = async (url, init) => {
     sends.push(JSON.parse(init.body));
@@ -299,21 +312,31 @@ function routeHarness({ env = MAIL_ENV, send = async () => new Response("{}", { 
     Object.freeze({
       config: readHostedConfig(HOSTED_ENV),
       mailer: readMailerConfig({ ...HOSTED_ENV, ...env }),
-      rate: createInviteRateStore({ getStore: provider.getStore }),
+      rate: createRequestRateStore({ getStore: provider.getStore }),
+      store: auth.store,
       fetchImpl,
       now: () => AT,
     });
-  return { provider, sends, route: createInviteRequestRoute(deps) };
+  return {
+    provider,
+    sends,
+    route: createAccessRequestRoute(deps),
+    async mint(email) {
+      const { token } = await auth.store.createTransient("access_request", { email });
+      return { [ACCESS_REQUEST_COOKIE]: token };
+    },
+  };
 }
 
 function submission(json, options = {}) {
-  return browserRequest("/api/hosted/invite-request", { method: "POST", json, ...options });
+  return browserRequest("/api/hosted/access-request", { method: "POST", json, ...options });
 }
 
-test("a submission is accepted, mailed to the operator, and answered with one fixed body", async () => {
+test("a submission is accepted, mailed to the operator with the verified address, and answered with one fixed body", async () => {
   const app = routeHarness();
+  const cookies = await app.mint("someone@example.com");
   const response = await app.route(
-    submission({ v: 1, email: "Someone@Example.com", message: "I would like to try Archon." }),
+    submission({ v: 1, message: "I would like to try Archon." }, { cookies }),
   );
 
   assert.equal(response.status, 202);
@@ -324,33 +347,56 @@ test("a submission is accepted, mailed to the operator, and answered with one fi
   assert.match(app.sends[0].text, /I would like to try Archon\./);
 });
 
-test("the requester is never a recipient, so this is not an open relay", async () => {
+test("with no request cookie the route refuses and sends nothing", async () => {
+  /* A fresh browser, an expired window, or a page opened without a refused
+     sign-in behind it. There is nothing to attribute a request to, so the answer
+     is "sign in again" and no mail is sent. */
   const app = routeHarness();
-  await app.route(submission({ v: 1, email: "victim@elsewhere.example", message: "" }));
+  const response = await app.route(submission({ v: 1, message: "let me in" }));
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error.code, "session_required");
+  assert.equal(app.sends.length, 0);
+});
+
+test("the address is read from the store, never from the body, so the form is not a relay", async () => {
+  /* The body carries only a note. Even a body that tries to smuggle an address
+     changes nothing: the recipient is fixed and the attributed address is the
+     verified one from the cookie. */
+  const app = routeHarness();
+  const cookies = await app.mint("real@example.com");
+  await app.route(
+    submission({ v: 1, message: "hi", email: "victim@elsewhere.example", to: "victim@elsewhere.example" }, { cookies }),
+  );
   const sent = app.sends[0];
   assert.deepEqual(sent.to, [MAIL_ENV.ARCHON_EMAIL_RECIPIENT]);
   assert.equal(sent.from, MAIL_ENV.ARCHON_EMAIL_SENDER);
+  assert.match(sent.text, /real@example\.com/, "the verified address is what is mailed");
   for (const [field, value] of Object.entries(sent)) {
     if (field === "text") continue;
     assert.ok(
       !JSON.stringify(value).includes("victim@elsewhere.example"),
-      `the requester's address is content, not ${field}`,
+      `a body-supplied address never becomes ${field}`,
     );
   }
 });
 
 test("the answer is the same whoever submits, so the form is not a membership oracle", async () => {
   const app = routeHarness();
-  const first = await app.route(submission({ v: 1, email: "its.everdred@gmail.com", message: "" }));
-  const second = await app.route(submission({ v: 1, email: "nobody@nowhere.example", message: "" }));
+  const first = await app.route(
+    submission({ v: 1, message: "" }, { cookies: await app.mint("its.everdred@gmail.com") }),
+  );
+  const second = await app.route(
+    submission({ v: 1, message: "" }, { cookies: await app.mint("nobody@nowhere.example") }),
+  );
   assert.equal(first.status, second.status);
   assert.deepEqual(await first.json(), await second.json());
 });
 
 test("a submission from another origin is refused before any counter is touched", async () => {
   const app = routeHarness();
+  const cookies = await app.mint("someone@example.com");
   const response = await app.route(
-    submission({ v: 1, email: "someone@example.com" }, { origin: "https://evil.example" }),
+    submission({ v: 1, message: "hi" }, { cookies, origin: "https://evil.example" }),
   );
   assert.equal(response.status, 403);
   assert.equal(app.sends.length, 0);
@@ -359,53 +405,51 @@ test("a submission from another origin is refused before any counter is touched"
 
 test("a form-encoded body is refused, so no cross-origin form can reach this route", async () => {
   const app = routeHarness();
+  const cookies = await app.mint("someone@example.com");
   const response = await app.route(
-    browserRequest("/api/hosted/invite-request", {
+    browserRequest("/api/hosted/access-request", {
       method: "POST",
-      form: { email: "someone@example.com" },
+      cookies,
+      form: { message: "hi" },
     }),
   );
   assert.equal(response.status, 415);
   assert.equal(app.sends.length, 0);
 });
 
-test("a malformed address is refused and costs no send", async () => {
-  const app = routeHarness();
-  const response = await app.route(submission({ v: 1, email: "not-an-address" }));
-  assert.equal(response.status, 400);
-  assert.equal(app.sends.length, 0);
-});
-
 test("a rate-limited submission is a 429 with one message for every way it can happen", async () => {
   const app = routeHarness();
-  for (let i = 0; i < INVITE_LIMITS.MAX_PER_SOURCE; i += 1) {
-    const accepted = await app.route(submission({ v: 1, email: `p${i}@example.com` }));
+  const cookies = await app.mint("persistent@example.com");
+  for (let i = 0; i < REQUEST_LIMITS.MAX_PER_SOURCE; i += 1) {
+    const accepted = await app.route(submission({ v: 1, message: `try ${i}` }, { cookies }));
     assert.equal(accepted.status, 202);
   }
-  const refused = await app.route(submission({ v: 1, email: "late@example.com" }));
+  const refused = await app.route(submission({ v: 1, message: "again" }, { cookies }));
   assert.equal(refused.status, 429);
-  assert.match((await refused.json()).error.message, /too many invite requests/);
-  assert.equal(app.sends.length, INVITE_LIMITS.MAX_PER_SOURCE, "the refused one was never sent");
+  assert.match((await refused.json()).error.message, /too many access requests/);
+  assert.equal(app.sends.length, REQUEST_LIMITS.MAX_PER_SOURCE, "the refused one was never sent");
 });
 
 test("a failed send does not refund the budget", async () => {
   /* A budget refunded on failure lets anybody who can make sends fail spend an
      unlimited number of attempts at the provider. */
   const app = routeHarness({ send: async () => new Response("{}", { status: 500 }) });
-  const failed = await app.route(submission({ v: 1, email: "someone@example.com" }));
+  const cookies = await app.mint("someone@example.com");
+  const failed = await app.route(submission({ v: 1, message: "one" }, { cookies }));
   assert.equal(failed.status, 503);
   assert.equal((await failed.json()).error.retryable, true);
 
-  for (let i = 1; i < INVITE_LIMITS.MAX_PER_SOURCE; i += 1) {
-    assert.equal((await app.route(submission({ v: 1, email: `p${i}@example.com` }))).status, 503);
+  for (let i = 1; i < REQUEST_LIMITS.MAX_PER_SOURCE; i += 1) {
+    assert.equal((await app.route(submission({ v: 1, message: `n${i}` }, { cookies }))).status, 503);
   }
-  const spent = await app.route(submission({ v: 1, email: "late@example.com" }));
+  const spent = await app.route(submission({ v: 1, message: "late" }, { cookies }));
   assert.equal(spent.status, 429, "the failed attempts were still spent");
 });
 
 test("a deployment with no mail configuration reports the feature unavailable", async () => {
   const app = routeHarness({ env: {} });
-  const response = await app.route(submission({ v: 1, email: "someone@example.com" }));
+  const cookies = await app.mint("someone@example.com");
+  const response = await app.route(submission({ v: 1, message: "hi" }, { cookies }));
   assert.equal(response.status, 503);
   assert.match((await response.json()).error.message, /not enabled/);
   assert.equal(app.sends.length, 0);
@@ -413,11 +457,12 @@ test("a deployment with no mail configuration reports the feature unavailable", 
 
 test("the route accepts POST only and grants no CORS", async () => {
   const app = routeHarness();
-  const refused = await app.route(browserRequest("/api/hosted/invite-request", { method: "GET" }));
+  const refused = await app.route(browserRequest("/api/hosted/access-request", { method: "GET" }));
   assert.equal(refused.status, 405);
   assert.equal(refused.headers.get("allow"), "POST");
 
-  const accepted = await app.route(submission({ v: 1, email: "someone@example.com" }));
+  const cookies = await app.mint("someone@example.com");
+  const accepted = await app.route(submission({ v: 1, message: "hi" }, { cookies }));
   assert.equal(accepted.headers.get("access-control-allow-origin"), null);
   assert.equal(APP_ORIGIN, HOSTED_ENV.HOSTED_APP_ORIGIN);
 });

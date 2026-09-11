@@ -57,6 +57,9 @@ export const ADMIN_DOCUMENTS_PATH = "/api/hosted/admin/documents";
 /** The allowlist editor route. */
 export const ADMIN_ALLOWLIST_PATH = "/api/hosted/admin/allowlist";
 
+/** The turned-away sign-in census route. */
+export const ADMIN_SIGNUP_ATTEMPTS_PATH = "/api/hosted/admin/signup-attempts";
+
 /** The two edits the allowlist route accepts. */
 export const ALLOWLIST_ACTIONS = Object.freeze(["add", "remove"]);
 
@@ -156,6 +159,25 @@ export function unreadableCensusOf(id) {
   return Object.freeze({ documentId: id, unreadable: true });
 }
 
+/**
+ * The admin projection of one recorded sign-up attempt.
+ *
+ * Built field by field from nothing, exactly as the document census is, so a
+ * field added to the stored attempt record next does not join the response
+ * unless it is named here. Every field is bookkeeping an operator reads - the
+ * verified address that was turned away, when it was first and last seen, and
+ * how many times - and none of it is a secret: the address is one Auth0 already
+ * verified, and the whole point of the view is that the admin can act on it.
+ */
+export function signupAttemptView(attempt) {
+  return Object.freeze({
+    email: attempt.email,
+    firstAt: attempt.firstAt,
+    lastAt: attempt.lastAt,
+    count: attempt.count,
+  });
+}
+
 /** The JSON envelope every admin route answers with, matching C3's `v: 1`. */
 export function adminEnvelope(body) {
   return Object.freeze({ v: 1, ...body });
@@ -230,11 +252,35 @@ export function adminShell(adminEmail) {
       </table>
     </section>
 
+    <section class="panel" aria-labelledby="attempts-heading">
+      <h2 id="attempts-heading">Turned-away sign-ins</h2>
+      <p class="hint">
+        Verified addresses that signed in and were not admitted. Recorded at the
+        sign-in attempt itself, so an address appears here whether or not the
+        person went on to submit the request-access form. Adding one to the
+        allowlist above lets it sign in.
+      </p>
+      <p class="status" data-archon-attempts-status role="status" aria-live="polite">
+        Loading…
+      </p>
+      <table class="attempts" data-archon-attempts hidden>
+        <thead>
+          <tr>
+            <th scope="col">Email</th>
+            <th scope="col">First seen</th>
+            <th scope="col">Last seen</th>
+            <th scope="col">Attempts</th>
+          </tr>
+        </thead>
+        <tbody data-archon-attempts-body></tbody>
+      </table>
+    </section>
+
     <noscript>
       <p class="status" data-tone="error">
         JavaScript is required. This page holds no data of its own: it fetches
-        the document census and the allowlist from routes that authorise each
-        request separately.
+        the document census, the allowlist and the turned-away sign-ins from
+        routes that authorise each request separately.
       </p>
     </noscript>
   </body>
