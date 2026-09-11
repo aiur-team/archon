@@ -21,13 +21,13 @@ import {
   LISTED_DOMAIN,
   SECOND_LISTED_DOMAIN,
   WRITE_CASES,
-} from "../test/hosted/fixtures/domain-access.mjs";
+} from "./hosted/fixtures/domain-access.mjs";
 import {
   accessDocumentKey,
   accessGrantKey,
   capabilitiesFor,
 } from "../lib/access.mjs";
-import { createAccessHandler } from "./access.mjs";
+import { createAccessHandler } from "../functions/access.mjs";
 
 const DOC = "abc123";
 const NOW_MS = Date.parse("2026-09-10T12:00:00.000Z");

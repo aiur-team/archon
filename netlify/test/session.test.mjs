@@ -23,8 +23,8 @@ import {
   resolveRole,
 } from "../lib/access.mjs";
 import { StoreError } from "../lib/store.mjs";
-import { LISTED_DOMAIN } from "../test/hosted/fixtures/domain-access.mjs";
-import { createSessionHandler } from "./session.mjs";
+import { LISTED_DOMAIN } from "./hosted/fixtures/domain-access.mjs";
+import { createSessionHandler } from "../functions/session.mjs";
 
 const DOC = "abc123";
 const NOW = "2026-09-10T12:00:00.000Z";
@@ -219,7 +219,7 @@ test("only GET is answered", async () => {
 });
 
 test("the route is declared exactly once, at /api/session", async () => {
-  const module = await import("./session.mjs");
+  const module = await import("../functions/session.mjs");
   assert.deepEqual(module.config, { path: "/api/session" });
   assert.equal(typeof module.default, "function");
 });

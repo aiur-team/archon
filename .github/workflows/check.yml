@@ -272,7 +272,7 @@ jobs:
           # `/api/login`, `/api/logout` or `/api/accept`, and exactly one
           # `login/index.html` in the publish tree.
           node --test netlify/lib/access.test.mjs
-          node --test netlify/functions/session.test.mjs
+          node --test netlify/test/session.test.mjs
           node --test netlify/test/identity-removal.test.mjs
           # ACN-008's write-path suite: the owner-only `["doc","allowedDomains"]`
           # body variant that replaced `["doc","orgDefault"]` on
@@ -281,7 +281,7 @@ jobs:
           # read path cannot come to disagree about a domain. The coordinator's
           # own matrix -- leases, epochs, transfer markers -- stays in
           # `scripts/test-p4-j.mjs` below and is not restated there.
-          node --test netlify/functions/access.test.mjs
+          node --test netlify/test/access.test.mjs
           # The permanent regression runners are standalone supervisors, not
           # `node --test` files: each one names itself, forks its own matrices
           # and prints its own PASS lines. They are heavier than the docbuild
