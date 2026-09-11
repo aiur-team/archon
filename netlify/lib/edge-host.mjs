@@ -296,6 +296,68 @@ export function withApplicationHeaders(response) {
 }
 
 /**
+ * The application host's response header set for a first-party static HTML page
+ * it serves directly — the sign-in page today, and any other `text/html` file
+ * under `netlify/public/`. These are trusted first-party documents, not API
+ * answers, so they cannot take the `applicationHeaders` set: that set's CSP is
+ * `default-src 'none'` with no `script-src`, `style-src`, `connect-src` or
+ * `form-action`, which leaves each of those directives falling back to `'none'`.
+ * On the sign-in page that blocks its `login.js`, its inline `<style>`, the
+ * `fetch` that obtains the CSRF binding and the form post that starts sign-in —
+ * the page freezes at "Preparing sign-in…" with a disabled button.
+ *
+ * This set names each directive such a page needs and nothing more: its own
+ * same-origin scripts and inline style, its same-origin `fetch` and its
+ * same-origin form post. `script-src` is `'self'` with no `'unsafe-inline'`
+ * because these pages carry no inline `<script>`. The framing and base-uri
+ * denials, and the same `X-Frame-Options`, `nosniff` and referrer policy, are
+ * kept identical to `applicationHeaders` so a page is no more exposed than an
+ * API answer in any respect but the four directives it must have to work.
+ *
+ * @returns {Array<[string, string]>}
+ */
+export function firstPartyPageHeaders() {
+  const csp = [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+  return [
+    ["Content-Security-Policy", csp],
+    ["X-Frame-Options", "DENY"],
+    ["X-Content-Type-Options", "nosniff"],
+    ["Referrer-Policy", "no-referrer"],
+  ];
+}
+
+/**
+ * Apply the first-party page header set to a response, but only when it carries
+ * no `Content-Security-Policy` of its own. Returns the same response instance,
+ * mutated in place, exactly as `withApplicationHeaders` does; the caller decides
+ * a response is a first-party HTML page before calling this.
+ *
+ * @param {Response} response
+ * @returns {Response}
+ */
+export function withFirstPartyPageHeaders(response) {
+  let headers;
+  try {
+    headers = response.headers;
+  } catch {
+    return response;
+  }
+  if (!(headers instanceof Headers)) return response;
+  if (headers.has("Content-Security-Policy")) return response;
+  for (const [name, value] of firstPartyPageHeaders()) headers.set(name, value);
+  return response;
+}
+
+/**
  * The refusal a hostname that is neither the application nor the renderer host
  * gets: 404, no body, and `X-Robots-Tag: noindex` so a deploy preview that runs
  * the production functions is never indexed. Answered before any store read.

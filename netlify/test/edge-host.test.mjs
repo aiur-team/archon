@@ -25,6 +25,7 @@ import {
   applicationHeaders,
   applicationOrigin,
   classifyHost,
+  firstPartyPageHeaders,
   isApplicationPassThrough,
   isRenderPrefix,
   notFoundForeignHost,
@@ -32,6 +33,7 @@ import {
   rendererHeaders,
   rendererRewriteTarget,
   withApplicationHeaders,
+  withFirstPartyPageHeaders,
 } from "../lib/edge-host.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -151,6 +153,40 @@ test("withApplicationHeaders adds the set only when no CSP is present", () => {
     "a response that already carries a CSP keeps its own",
   );
   assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no application X-Frame-Options");
+});
+
+test("firstPartyPageHeaders is a page CSP: self scripts, inline styles, self fetch and form-action", () => {
+  const headers = firstPartyPageHeaders();
+  const csp = headers.find(([name]) => name === "Content-Security-Policy")[1];
+  assert.ok(csp.startsWith("default-src 'none'"), "still default-deny");
+  assert.ok(/(^|; )script-src 'self'(;|$)/.test(csp), "the page's own script may load, with no unsafe-inline");
+  assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"), "the page's inline <style> may apply");
+  assert.ok(csp.includes("connect-src 'self'"), "login.js may fetch the CSRF binding same-origin");
+  assert.ok(csp.includes("form-action 'self'"), "the sign-in form may post to this origin");
+  assert.ok(csp.includes("frame-ancestors 'none'"), "the page is still unframable");
+  assert.ok(csp.includes("base-uri 'none'"));
+  assert.ok(!csp.includes("form-action 'none'"), "a page must never carry the API form-action 'none'");
+  assert.equal(headers.find(([name]) => name === "X-Frame-Options")[1], "DENY");
+  assert.equal(headers.find(([name]) => name === "X-Content-Type-Options")[1], "nosniff");
+  assert.equal(headers.find(([name]) => name === "Referrer-Policy")[1], "no-referrer");
+});
+
+test("withFirstPartyPageHeaders adds the page set only when no CSP is present", () => {
+  const bare = new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
+  withFirstPartyPageHeaders(bare);
+  assert.ok(bare.headers.get("Content-Security-Policy").includes("form-action 'self'"), "a bare page gains the page CSP");
+  assert.equal(bare.headers.get("X-Frame-Options"), "DENY");
+
+  const owned = new Response("x", {
+    headers: { "content-security-policy": "default-src 'none'; frame-ancestors 'none'" },
+  });
+  withFirstPartyPageHeaders(owned);
+  assert.equal(
+    owned.headers.get("Content-Security-Policy"),
+    "default-src 'none'; frame-ancestors 'none'",
+    "a response that already carries a CSP keeps its own",
+  );
+  assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no page X-Frame-Options");
 });
 
 test("notFoundForeignHost is a bodyless 404 with noindex", async () => {
@@ -293,6 +329,14 @@ function functionResponse() {
 /** A static page with no CSP, as a served `_site/login/index.html` has none. */
 function staticPage(body = "<!doctype html><title>page</title>") {
   return new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+/** An API answer with no CSP of its own, as a JSON route response has none. */
+function jsonNoCsp() {
+  return new Response("{}", {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 let gatePromise;
@@ -473,6 +517,51 @@ test("application host passes through API, assets, login, docs, publish and invi
     assert.equal(cspCount(response), 1, `exactly one CSP on ${path}`);
     assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
   }
+});
+
+test("a static HTML page pass-through gets the page CSP; an API/JSON one keeps the strict API CSP", async () => {
+  // The sign-in and approval pages are static text/html with no CSP of their
+  // own. The API set's `default-src 'none'` freezes them -- no script, no inline
+  // style, no fetch, no form post -- so the gate gives a static HTML answer a
+  // page CSP that admits exactly those, and no more.
+  for (const path of ["/login/", "/publish/authorize", "/invite/"]) {
+    const { response } = await runGate(APP_HOST, path, { next: () => staticPage() });
+    assert.equal(response.status, 200, `${path} passes through`);
+    assert.equal(control.identifyCalls, 0, `${path} is not session-checked`);
+    assert.equal(cspCount(response), 1, `exactly one CSP on ${path}`);
+    const csp = response.headers.get("Content-Security-Policy");
+    assert.ok(/(^|; )script-src 'self'(;|$)/.test(csp), `${path}: its script may load`);
+    assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"), `${path}: its inline style may apply`);
+    assert.ok(csp.includes("connect-src 'self'"), `${path}: it may fetch same-origin`);
+    assert.ok(csp.includes("form-action 'self'"), `${path}: its form may post same-origin`);
+    assert.ok(!csp.includes("form-action 'none'"), `${path}: never the API form-action 'none'`);
+    assert.equal(
+      response.headers.get("X-Frame-Options"),
+      "DENY",
+      `${path}: still frame-denied`,
+    );
+  }
+
+  // A pass-through that answers JSON with no CSP is an API answer: it keeps the
+  // strict application set, byte for byte, `form-action 'none'` and all.
+  for (const path of ["/api/hosted/session", "/api/whatever"]) {
+    const { response } = await runGate(APP_HOST, path, { next: () => jsonNoCsp() });
+    assert.equal(cspCount(response), 1, `exactly one CSP on ${path}`);
+    assert.equal(
+      response.headers.get("Content-Security-Policy"),
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      `${path}: the strict API CSP is unchanged`,
+    );
+    assert.equal(response.headers.get("X-Frame-Options"), "DENY");
+  }
+
+  // A pass-through that owns a CSP keeps it, static-HTML or not.
+  const { response: owned } = await runGate(APP_HOST, "/login/", { next: () => functionResponse() });
+  assert.equal(cspCount(owned), 1, "still exactly one CSP");
+  assert.ok(
+    owned.headers.get("Content-Security-Policy").includes("frame-src https://renderer.example.net"),
+    "a response that owns a CSP is never replaced by the page set",
+  );
 });
 
 test("application host session-checks a collaboration slug and serves a readable document", async () => {
