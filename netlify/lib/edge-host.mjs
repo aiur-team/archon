@@ -56,6 +56,44 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
 ]);
 
 /**
+ * The application-host paths served publicly with no session check: the built
+ * reference documents this repository composes from its own committed
+ * `doc.json` files. They are documentation of the product, so an anonymous
+ * visitor reads them without signing in, while every other document stays
+ * behind the session and access gate exactly as before.
+ *
+ * Two properties make this safe to widen the public surface with, and both are
+ * load-bearing:
+ *
+ *   * **Exact full paths, never prefixes.** `isApplicationPassThrough` above
+ *     matches with `startsWith` because its entries are directory namespaces
+ *     the site owns outright. These are not: `/example/` is one document among
+ *     a namespace of sibling documents, and `SLUG_RE` in
+ *     `templates/docbuild/src/site.ts` admits `example-thing`. A prefix match
+ *     here would silently publish every future slug that happens to begin with
+ *     one of these names, which is the class of defect a broad `/assets/`
+ *     prefix has already caused on this site. Membership is equality.
+ *   * **The list is closed and held equal to the build.** A route may only
+ *     appear here when the document that owns it declares `"public": true` in
+ *     its `doc.json`, and `preflightPublicRoutes` in
+ *     `templates/docbuild/src/site.ts` fails the build when the two sets differ
+ *     in either direction. So a reference document that is renamed, deleted or
+ *     made private cannot leave a stale entry behind for a later document to
+ *     inherit, and a list that is both the input and the check never drifts in
+ *     silence.
+ *
+ * It cannot be derived at runtime instead: the deploy tree the connect tool
+ * copies is `netlify/`, `netlify.toml` and the lockfiles, so no `doc.json` is
+ * present on the edge. This is the edge's copy of a fact the build owns, and
+ * the preflight is what keeps the copy honest.
+ */
+export const APP_PUBLIC_PATHS = Object.freeze([
+  "/components/",
+  "/example/",
+  "/how-archon-works/",
+]);
+
+/**
  * A header-safe origin serialization, the same shape `renderer/scripts/build.mjs`
  * requires before it will write an origin into a header line: scheme, host or
  * bracketed IPv6 literal, optional port, and nothing that could forge a header.
@@ -201,6 +239,21 @@ export function rendererRewriteTarget(pathname, search) {
  */
 export function isApplicationPassThrough(pathname) {
   return APP_PASS_THROUGH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/**
+ * Whether an application-host path is one of the public reference documents,
+ * served with no session check.
+ *
+ * Exact membership of `APP_PUBLIC_PATHS` and nothing else: no prefix, no
+ * normalization, no trailing-slash tolerance. `/example` and `/example-thing/`
+ * are both false, and each stays gated.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isApplicationPublic(pathname) {
+  return APP_PUBLIC_PATHS.includes(pathname);
 }
 
 /**

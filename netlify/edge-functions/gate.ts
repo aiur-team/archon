@@ -8,6 +8,7 @@ import {
   applicationOrigin,
   classifyHost,
   isApplicationPassThrough,
+  isApplicationPublic,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -398,8 +399,18 @@ async function applicationHost(
      The bare root is public too: it serves the splash at
      `netlify/public/index.html` through the same pass-through, so an anonymous
      visitor lands on the splash rather than the sign-in redirect. Only the exact
-     root is public; every deeper path stays gated. */
-  if (url.pathname === PUBLIC_ROOT || isApplicationPassThrough(url.pathname)) {
+     root is public; every deeper path stays gated.
+
+     The built reference documents -- `APP_PUBLIC_PATHS` -- join it. They are
+     the product's own documentation, so they are read without signing in. They
+     are matched by exact full path rather than by prefix, and the list is held
+     equal to the documents that declare themselves public at build time, so no
+     private collaboration document can fall inside the public set. */
+  if (
+    url.pathname === PUBLIC_ROOT ||
+    isApplicationPublic(url.pathname) ||
+    isApplicationPassThrough(url.pathname)
+  ) {
     let passed: Response;
     try {
       passed = await context.next();
@@ -408,9 +419,15 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    return url.pathname === PUBLIC_ROOT
-      ? withLandingPageHeaders(passed)
-      : finalizePassThrough(passed);
+    if (url.pathname === PUBLIC_ROOT) return withLandingPageHeaders(passed);
+    /* A public reference document is the same bytes under the same header set
+       a signed-in reader gets today; only the session check is skipped. It does
+       not take `finalizePassThrough`'s first-party page set, because that would
+       make the answer depend on who asked -- the one thing a public document
+       must not do. */
+    if (isApplicationPublic(url.pathname))
+      return withApplicationHeaders(passed);
+    return finalizePassThrough(passed);
   }
 
   return withApplicationHeaders(await sessionGate(req, url, context, env));

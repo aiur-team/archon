@@ -26,7 +26,9 @@ import {
   applicationOrigin,
   classifyHost,
   firstPartyPageHeaders,
+  APP_PUBLIC_PATHS,
   isApplicationPassThrough,
+  isApplicationPublic,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -114,6 +116,38 @@ test("isRenderPrefix and isApplicationPassThrough classify application paths", (
   }
   for (const gated of ["/", "/some-slug/", "/renderer.js", "/_render/index.html"]) {
     assert.equal(isApplicationPassThrough(gated), false, `${gated} is not a pass-through`);
+  }
+});
+
+test("isApplicationPublic matches the reference documents by exact path only", () => {
+  assert.deepEqual(
+    [...APP_PUBLIC_PATHS].sort(),
+    ["/components/", "/example/", "/how-archon-works/"],
+    "the public set is the three built reference documents and nothing else",
+  );
+  for (const pub of APP_PUBLIC_PATHS) {
+    assert.equal(isApplicationPublic(pub), true, `${pub} is public`);
+  }
+  /* The whole safety argument of the public set is that membership is equality,
+     never a prefix. Each of these shares a prefix with a public route and is a
+     path a collaboration document could legitimately be served at, so each one
+     being false is what keeps the public set from leaking into the slug
+     namespace around it. */
+  for (const gated of [
+    "/example",
+    "/example-thing/",
+    "/example/deeper/",
+    "/example//",
+    "/examples/",
+    "/Example/",
+    "/components",
+    "/components-v2/",
+    "/how-archon-works",
+    "/how-archon-works-2/",
+    "/",
+    "/some-slug/",
+  ]) {
+    assert.equal(isApplicationPublic(gated), false, `${gated} is not public`);
   }
 });
 
@@ -616,6 +650,89 @@ test("application host session-checks a collaboration slug and serves a readable
   assert.equal(await response.text(), PAGE, "the whole document is replayed");
   assert.equal(cspCount(response), 1, "with exactly one application CSP");
   assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
+});
+
+test("the built reference documents are served to an anonymous visitor with no session check", async (t) => {
+  /* The acceptance property of ACN #232: each public reference route answers
+     200 with the built document body to a visitor carrying no session cookie --
+     no 303 to /login/, no 403 "You do not have access to this document". If the
+     public passlist is removed these three assertions fail loudly, because the
+     path falls straight back to `sessionGate` and an anonymous request there is
+     a redirect. */
+  for (const path of APP_PUBLIC_PATHS) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      next: () => docPage(),
+    });
+    assert.equal(response.status, 200, `${path} is served, not a redirect or a refusal`);
+    assert.equal(calls.next, 1, `${path} is fetched downstream exactly once`);
+    assert.equal(response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(await response.text(), PAGE, `${path} replays the whole built document`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
+    assert.equal(cspCount(response), 1, `${path} carries exactly one CSP`);
+    assert.ok(
+      response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"),
+      `${path} keeps the application header set`,
+    );
+  }
+
+  /* A public document's `doc-id` is never even read, so its answer cannot
+     depend on an access row. Presenting a session that would be refused the
+     document changes nothing about what comes back. */
+  const withSession = await runGate(APP_HOST, "/example/", { next: () => docPage() });
+  assert.equal(withSession.response.status, 200, "a signed-in visitor gets the same answer");
+  assert.equal(control.identifyCalls, 0, "whose session is not even resolved");
+  assert.equal(control.resolveCalls, 0, "and still no role is resolved");
+  t.diagnostic(`public reference routes: ${APP_PUBLIC_PATHS.join(" ")}`);
+});
+
+test("a near miss of a public reference route is still gated", async () => {
+  /* The public set is matched by exact full path, so every path that merely
+     shares a prefix with one stays in the session gate. `example-thing` is a
+     slug `SLUG_RE` admits, which is exactly the future collaboration document a
+     prefix match would have published by accident. */
+  for (const [path, location] of [
+    ["/example-thing/", "/login/?destination=%2Fexample-thing%2F"],
+    ["/components-v2/", "/login/?destination=%2Fcomponents-v2%2F"],
+    ["/how-archon-works-2/", "/login/?destination=%2Fhow-archon-works-2%2F"],
+  ]) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${path} is not public`);
+    assert.equal(response.headers.get("Location"), location);
+    assert.equal(calls.next, 0, `${path} is refused before anything is fetched`);
+  }
+
+  /* Without its trailing slash `/example` is not the document's route and not
+     a destination ACN-005's grammar accepts, so it is the bare sign-in page. */
+  const bare = await runGate(APP_HOST, "/example", {
+    cookie: null,
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+  });
+  assert.equal(bare.response.status, 303, "/example is not the public /example/");
+  assert.equal(bare.response.headers.get("Location"), "/login/");
+});
+
+test("a signed-in visitor with no grant on a private document still gets the refusal", async (t) => {
+  /* The other half of the acceptance: widening the public set must not weaken
+     the gated one. A document outside the public set is still read for its
+     `doc-id`, still resolved, and still refused when the role cannot read. */
+  const original = control.resolveRole;
+  control.resolveRole = function refuse() {
+    this.resolveCalls += 1;
+    return { role: "none", canRead: false };
+  };
+  t.after(() => {
+    control.resolveRole = original;
+  });
+
+  const { response } = await runGate(APP_HOST, "/private-doc/", { next: () => docPage() });
+  assert.equal(response.status, 403, "a role that cannot read is refused");
+  assert.equal(await response.text(), "You do not have access to this document.");
+  assert.equal(control.resolveCalls, 1, "the private document's role is resolved");
 });
 
 /* --- the connect-consumer fallback ---------------------------------------- */

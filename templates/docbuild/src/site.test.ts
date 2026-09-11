@@ -136,7 +136,16 @@ const origins = (t: Ctx, values: { app?: string; render?: string } = {}): void =
  */
 const root = (
   t: Ctx,
-  options: { served?: boolean; slug?: string; hosted?: boolean; renderer?: boolean } = {},
+  options: {
+    served?: boolean;
+    slug?: string;
+    hosted?: boolean;
+    renderer?: boolean;
+    /** `doc.json`'s `public`, omitted entirely when undefined. */
+    documentPublic?: unknown;
+    /** The `APP_PUBLIC_PATHS` a stand-in edge module exports, or no module. */
+    publicPaths?: string[];
+  } = {},
 ): string => {
   const dir = mkdtempSync(join(tmpdir(), "acn001-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -149,7 +158,12 @@ const root = (
   const slug = options.slug ?? "sample";
   const inst = join(dir, "sample");
   mkdirSync(join(inst, "sections"), { recursive: true });
-  writeFileSync(join(inst, "doc.json"), docJson(slug));
+  writeFileSync(
+    join(inst, "doc.json"),
+    options.documentPublic === undefined
+      ? docJson(slug)
+      : docJson(slug).replace('"aliases": [],', `"aliases": [],\n  "public": ${JSON.stringify(options.documentPublic)},`),
+  );
   writeFileSync(join(inst, "sections", "01-problem.html"), SECTION);
 
   if (options.served === true) {
@@ -160,6 +174,19 @@ const root = (
     writeFileSync(join(dir, "skills", "archon-doc", "SKILL.md"), SKILL);
     writeFileSync(join(dir, "AGENTS.md"), AGENTS);
     writeFileSync(join(dir, "llms.txt"), LLMS);
+  }
+
+  /* A stand-in for the deployed gate's own module, carrying only the export the
+     public-route preflight reads. The real one is a Deno edge function's helper
+     and importing it here would drag the whole header matrix into a packaging
+     test; what is under test is that the two lists are held equal, not what
+     else that file says. */
+  if (options.publicPaths !== undefined) {
+    mkdirSync(join(dir, "netlify", "lib"), { recursive: true });
+    writeFileSync(
+      join(dir, "netlify", "lib", "edge-host.mjs"),
+      `export const APP_PUBLIC_PATHS = Object.freeze(${JSON.stringify(options.publicPaths)});\n`,
+    );
   }
 
   if (options.hosted === true) {
@@ -343,6 +370,94 @@ test("a hosted page at an unreserved top-level name fails the build", async (t) 
         error.message,
       ),
   );
+});
+
+test("a public document builds only when the gate's public set names its route", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    documentPublic: true,
+    publicPaths: ["/example/"],
+  });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "example", "index.html")), "the public document is published");
+});
+
+test("a public document the deployed gate does not serve is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  // The silent half of the drift: a document starts declaring itself public and
+  // nobody adds its route to the edge module, so it deploys still gated with no
+  // diagnostic anywhere.
+  const dir = root(t, { served: true, slug: "example", documentPublic: true, publicPaths: [] });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /netlify\/lib\/edge-host\.mjs serves nothing without a session, but the documents declaring 'public': true are \/example\//.test(
+        error.message,
+      ),
+  );
+});
+
+test("a gate public route no document declares is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  /* The dangerous half. `/example/` stands in the edge module with no document
+     behind it, so whatever claims the `example` slug next inherits a route that
+     is served with no session check. Holding the two lists equal is what makes
+     this a failed build rather than a quietly published private document. */
+  const dir = root(t, { served: true, slug: "sample", publicPaths: ["/example/"] });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /serves \/example\/ without a session, but the documents declaring 'public': true are none/.test(
+        error.message,
+      ),
+  );
+});
+
+test("a public document with no edge module to serve it is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, slug: "example", documentPublic: true });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /\/example\/ declare 'public': true, but netlify\/lib\/edge-host\.mjs is absent/.test(error.message),
+  );
+});
+
+test("'public' must be a boolean when a document states it", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, documentPublic: "yes" });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /sample\/doc\.json: invalid 'public' \(expected a boolean when present\)/.test(error.message),
+  );
+});
+
+test("a document that says nothing about publicity is gated, and needs no edge module", async (t) => {
+  isolate(t);
+  origins(t);
+  // The default every existing document and every installed consumer relies on:
+  // absent means gated, and a deployment with no public surface is unaffected.
+  const dir = root(t, { served: true });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "sample", "index.html")), "the gated document still publishes");
 });
 
 test("with no hosted tree the site publishes no rewrite to a page it lacks", async (t) => {

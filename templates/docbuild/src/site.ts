@@ -114,6 +114,16 @@ const STATIC_PAGES = ["invite"];
 const HOSTED_TREE = "netlify/public";
 
 /**
+ * The edge module that carries the public-route list the deployed gate matches.
+ *
+ * The gate runs on the edge, where no `doc.json` exists: the deploy tree is
+ * `netlify/` and the lockfiles, so the list of public documents has to be
+ * written down there rather than derived. `preflightPublicRoutes` is what stops
+ * that written-down copy from drifting away from the documents themselves.
+ */
+const EDGE_HOST_MODULE = "netlify/lib/edge-host.mjs";
+
+/**
  * The renderer shell's home inside the publish tree. `buildRenderer` deletes
  * its own target before writing, so this must be a subdirectory of `_site/` and
  * never `_site/` itself.
@@ -144,6 +154,8 @@ interface SiteMetadata {
   title: string;
   heading: string | undefined;
   lede: string | undefined;
+  /** `doc.json`'s optional `public`, defaulting to false: a gated document. */
+  isPublic: boolean;
 }
 
 function readUtf8(path: string, label = path): string {
@@ -259,6 +271,15 @@ function parseMetadata(root: string, instance: string): SiteMetadata {
   if (lede !== undefined && typeof lede !== "string") {
     return fail(`${instance}/doc.json: invalid 'lede' (expected a string when present)`);
   }
+  /* Publicity is declared by the document, not inferred from the build. A
+     repository-backed deployment carries private collaboration documents and
+     public reference documents in the same tree and composes both the same way,
+     so "the build emitted it" says nothing about who may read it. Absent means
+     gated: a document that says nothing is never made public by adding it. */
+  const isPublic = fields.public;
+  if (isPublic !== undefined && typeof isPublic !== "boolean") {
+    return fail(`${instance}/doc.json: invalid 'public' (expected a boolean when present)`);
+  }
 
   return {
     instance,
@@ -268,6 +289,7 @@ function parseMetadata(root: string, instance: string): SiteMetadata {
     title,
     heading: typeof heading === "string" ? heading : undefined,
     lede: typeof lede === "string" ? lede : undefined,
+    isPublic: isPublic === true,
   };
 }
 
@@ -407,6 +429,67 @@ function preflightHostedRoutes(root: string): void {
     fail(
       `${HOSTED_TREE} publishes ${undeclared.join(", ")} at the site root, ` +
         "which RESERVED_ROUTES does not reserve: a document slug could claim it and be overwritten",
+    );
+  }
+}
+
+/**
+ * Hold the deployed gate's public-route list equal to the documents that
+ * declare themselves public.
+ *
+ * `netlify/lib/edge-host.mjs` carries `APP_PUBLIC_PATHS`, the closed set of
+ * exact paths the edge gate serves with no session check. The edge cannot
+ * derive that set: the deploy tree is `netlify/` and the lockfiles, and no
+ * `doc.json` travels with it. So it is a copy -- and an unchecked copy of a
+ * security boundary is the worst kind, because both halves of the drift are
+ * silent. A document renamed out from under a stale entry leaves a public route
+ * standing for whatever claims that slug next; a document that starts declaring
+ * itself public and is never added stays gated with no diagnostic.
+ *
+ * Holding the two equal in both directions is what makes each of those a build
+ * failure instead. It is the same shape as `preflightHostedRoutes` above and
+ * the renderer build's `STATIC_FILES` check, for the same reason: a list that is
+ * both the input and the check drifts in silence.
+ *
+ * A repository with no edge module and no public document is a deployment that
+ * has no public surface to keep honest, and builds exactly as it did before.
+ */
+async function preflightPublicRoutes(root: string, docs: SiteMetadata[]): Promise<void> {
+  // A public document's every route is public: the slug it is served at and
+  // each alias that serves the same document. Anything else would make one
+  // spelling of a public page redirect into a sign-in.
+  const declared = docs
+    .filter((doc) => doc.isPublic)
+    .flatMap((doc) => [doc.slug, ...doc.aliases])
+    .map((route) => `/${route}/`)
+    .sort();
+
+  const stat = lstat(root, EDGE_HOST_MODULE);
+  if (stat === null) {
+    if (declared.length === 0) return;
+    return fail(
+      `${declared.join(", ")} declare 'public': true, but ${EDGE_HOST_MODULE} is absent, ` +
+        "so no gate would serve them without a session",
+    );
+  }
+
+  let listed: unknown;
+  try {
+    const mod = await import(pathToFileURL(join(root, EDGE_HOST_MODULE)).href);
+    listed = mod.APP_PUBLIC_PATHS;
+  } catch (e) {
+    return fail(`${EDGE_HOST_MODULE}: ${osError(e)}`);
+  }
+  if (!Array.isArray(listed) || listed.some((path) => typeof path !== "string")) {
+    return fail(`${EDGE_HOST_MODULE}: APP_PUBLIC_PATHS must be an array of strings`);
+  }
+  const published = [...(listed as string[])].sort();
+
+  if (published.length !== declared.length || published.some((path, i) => path !== declared[i])) {
+    return fail(
+      `${EDGE_HOST_MODULE} serves ${published.join(", ") || "nothing"} without a session, ` +
+        `but the documents declaring 'public': true are ${declared.join(", ") || "none"}: ` +
+        "the gate's public set and the public documents must name the same routes",
     );
   }
 }
@@ -688,6 +771,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
   for (const page of STATIC_PAGES) validateStaticTree(root, page);
   validateStaticTree(root, HOSTED_TREE);
   preflightHostedRoutes(root);
+  await preflightPublicRoutes(root, docs);
   preflightServedContent(root);
 
   const outDir = resolve(root, "_site");

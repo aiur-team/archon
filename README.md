@@ -87,6 +87,22 @@ equality — `mail.example.com` is not `example.com`, and neither is `example.co
 is recomputed on every request, so removing a domain takes effect immediately rather than at the end of a
 session. A document listing no domains admits its owner and the people the owner named, and nobody else.
 
+### Publishing a document to everyone
+
+A document read without signing in is not a share, it is a publication, and it takes two edits rather than
+one. Set `"public": true` in its `doc.json`, and add its exact route to `APP_PUBLIC_PATHS` in
+`netlify/lib/edge-host.mjs`. Omitting either is a build failure naming the route and the file, because the
+two lists are held equal: the gate runs on the edge, where no `doc.json` exists, so its copy of the public
+set is checked against the documents rather than trusted.
+
+The route is matched by **exact full path**, never as a prefix. `/example/` is public; `/example-thing/` is
+a different document and stays gated. That is deliberate and is the reason the list is written out in full:
+a prefix would publish every future slug that happens to begin with a published one.
+
+`public` is absent from every document the skeleton produces, and absent means gated. The three reference
+documents this repository ships — `/example/`, `/components/` and `/how-archon-works/` — are the only ones
+that set it.
+
 ## The two modes
 
 **Repository-backed.** All four `DOCS_*` variables are set. An edit commits back through the fine-grained
