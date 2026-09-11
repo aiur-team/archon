@@ -94,6 +94,8 @@ import { promisify } from "node:util";
 
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
 
+import { isLandingPage, landingPageHeaders } from "../netlify/lib/edge-host.mjs";
+
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SELF), "..");
 const execFileAsync = promisify(execFile);
@@ -1014,6 +1016,11 @@ function compilePath(pattern) {
 /** The static tree the hosted deployment publishes, and its rewrites. */
 const STATIC_ROOT = join(ROOT, "netlify", "public");
 
+/** The homepage tree the site build merges at the publish root: `site/index.html`
+ * becomes `_site/index.html` and is what `/` serves. Tried after `STATIC_ROOT`
+ * so the splash the failed-sign-in landing returns to renders here too. */
+const SITE_ROOT = join(ROOT, "site");
+
 /**
  * The application: the actual handlers, the actual static tree, the actual
  * deployment headers.
@@ -1060,11 +1067,25 @@ async function startApp({ routes, deployment }) {
         return writeResponse(response, nodeResponse, { head: method === "HEAD" });
       }
 
-      /* The static tree, with the deployment's own header block. */
+      /* The static tree, with the deployment's own header block. The publish
+         tree `templates/build --site` writes merges two sources at the root:
+         the function deploy's `netlify/public` and the homepage tree `site/`
+         (so `site/index.html` becomes `_site/index.html`, served at `/`). This
+         runner serves `netlify/public` directly; the splash and its assets come
+         from `site/`, tried as a second root so `/` renders the splash the
+         failed-sign-in landing returns to, exactly as the deployed `/` does. */
       let pathname = deployment.rewrites.get(url.pathname) ?? url.pathname;
       if (pathname.endsWith("/")) pathname = `${pathname}index.html`;
-      const file = join(STATIC_ROOT, pathname);
-      if (!file.startsWith(`${STATIC_ROOT}/`) || !existsSync(file) || !statSync(file).isFile()) {
+      let file = join(STATIC_ROOT, pathname);
+      let ok = file.startsWith(`${STATIC_ROOT}/`) && existsSync(file) && statSync(file).isFile();
+      if (!ok) {
+        const fromSite = join(SITE_ROOT, pathname);
+        if (fromSite.startsWith(`${SITE_ROOT}/`) && existsSync(fromSite) && statSync(fromSite).isFile()) {
+          file = fromSite;
+          ok = true;
+        }
+      }
+      if (!ok) {
         nodeResponse.writeHead(404, {
           ...Object.fromEntries(staticHeaders),
           "Content-Type": "text/plain; charset=utf-8",
@@ -1073,8 +1094,13 @@ async function startApp({ routes, deployment }) {
         return;
       }
       const body = await readFile(file);
+      /* Landing pages take the gate's looser landing header set, which admits
+         the splash's inline scripts and its status message; every other static
+         file keeps the strict set. The gate is the authority in production; the
+         two sets are reused here so `/` behaves as it deploys. */
+      const headerSet = isLandingPage(url.pathname) ? landingPageHeaders() : staticHeaders;
       nodeResponse.writeHead(200, {
-        ...Object.fromEntries(staticHeaders),
+        ...Object.fromEntries(headerSet),
         "Content-Type": CONTENT_TYPES[pathname.slice(pathname.lastIndexOf("."))] ?? "application/octet-stream",
         "Content-Length": body.length,
       });
@@ -2347,7 +2373,7 @@ async function providerFailures(world, browser) {
   const tokenCallsBeforeReplay = provider.state.tokenCalls;
   await page.goto(callbackUrl);
   await page.waitForURL(
-    (url) => url.pathname === "/login/" && url.searchParams.get("status") !== null,
+    (url) => url.pathname === "/" && url.searchParams.get("status") !== null,
     { timeout: 30_000 },
   );
   assert.equal(
@@ -2374,7 +2400,7 @@ async function providerFailures(world, browser) {
   const strangerPage = await stranger.newPage();
   await strangerPage.goto(callbackUrl);
   await strangerPage.waitForURL(
-    (url) => url.pathname === "/login/" && url.searchParams.get("status") !== null,
+    (url) => url.pathname === "/" && url.searchParams.get("status") !== null,
     { timeout: 30_000 },
   );
   assert.equal(
@@ -2466,8 +2492,8 @@ async function providerFailures(world, browser) {
   await outagePage.waitForURL((url) => url.searchParams.get("status") !== null, { timeout: 30_000 });
   assert.equal(new URL(outagePage.url()).searchParams.get("status"), "unavailable");
   await waitFor(
-    async () => /could not reach the sign-in service/.test(await outagePage.locator("#status").innerText()),
-    "the sign-in page to say the provider was unreachable",
+    async () => /could not reach the sign-in service/.test(await outagePage.locator("#siteSigninStatus").innerText()),
+    "the splash to say the provider was unreachable",
   );
   assert.equal((await currentSession(outagePage)).authenticated, false);
   record("auth: a provider outage reaches a truthful unavailable page and no session");

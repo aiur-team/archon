@@ -362,7 +362,7 @@ test("knowing the callback URL is not enough to redeem the code", async () => {
       cookies: { [OAUTH_COOKIE]: "an-attacker-supplied-binding-value" },
     }),
   );
-  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(replay.headers.get("location"), "/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
   assert.equal(app.providerCalls.length, 0, "the code must not be redeemed");
 
@@ -404,7 +404,7 @@ test("a start from the wrong origin, or with no origin, is refused before anythi
       browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: {}, origin }),
     );
     assert.equal(page.status, 303);
-    assert.equal(page.headers.get("location"), "/login/?status=expired");
+    assert.equal(page.headers.get("location"), "/?status=expired");
   }
   assert.deepEqual(
     app.blobs.keys().filter((key) => !key.startsWith("auth/login/")),
@@ -544,6 +544,75 @@ test("a sign-in with nothing to approve lands on the onboarding page", async () 
       `a sign-in with no destination must land on the onboarding page (form ${JSON.stringify(form)})`,
     );
   }
+});
+
+test("a splash sign-in that posts destination=/ completes end to end", async () => {
+  /* The splash's Sign-in form spells "sign in and come back home" as
+     `destination=/`. `/` is not a stored landing the callback would ever redirect
+     to, so an earlier build turned it away at the start route -- the round trip
+     never began and the visitor was left on `/?status=expired` (previously
+     `/login/?status=expired`) with no way through. `/` now folds to the
+     onboarding default at the edge, before the allowlist is consulted, so a plain
+     splash sign-in verifies and creates a session. The allowlist itself is
+     unchanged: `/` is still refused as a stored destination below. */
+  const app = deployment();
+  const login = await bootstrap(app);
+  const started = await app.start(
+    browserRequest("/api/hosted/auth/start", {
+      method: "POST",
+      cookies: { [LOGIN_COOKIE]: login },
+      form: { destination: "/" },
+    }),
+  );
+  assert.equal(started.status, 303, "the splash's `/` must start the round trip, not be refused");
+  const location = new URL(started.headers.get("location"));
+  assert.equal(location.origin, AUTHORIZE_ORIGIN);
+
+  const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
+  await armProvider(app, { nonce: location.searchParams.get("nonce") });
+  const landed = await app.callback(
+    browserRequest(
+      `/api/hosted/auth/callback?state=${location.searchParams.get("state")}&code=fixture-code`,
+      { cookies: { [OAUTH_COOKIE]: binding } },
+    ),
+  );
+  assert.equal(landed.status, 303);
+  assert.equal(
+    landed.headers.get("location"),
+    HOSTED_LIMITS.WELCOME_PATH,
+    "the completed sign-in must land on the onboarding page",
+  );
+  assert.match(
+    cookieValue(setCookies(landed).get(SESSION_COOKIE)) ?? "",
+    /^[A-Za-z0-9_-]{32,}$/,
+    "a legitimate round trip must create a session",
+  );
+});
+
+test("a good sign-in never routes the visitor through /login, and a failed one returns to the splash", async () => {
+  const app = deployment();
+
+  /* The happy path: the start leg goes to Auth0 and the callback lands on the
+     onboarding page. Neither touches the standalone /login page, so the splash's
+     Sign-in button is the only sign-in surface a completing visitor ever sees. */
+  const good = await signIn(app);
+  assert.equal(new URL(good.started.headers.get("location")).origin, AUTHORIZE_ORIGIN);
+  assert.ok(!good.started.headers.get("location").includes("/login"));
+  assert.equal(good.landed.headers.get("location"), HOSTED_LIMITS.WELCOME_PATH);
+  assert.ok(!good.landed.headers.get("location").includes("/login"));
+
+  /* A form-posted start with no valid pre-login binding fails, and the visitor
+     is returned to the splash with a status word -- not dead-ended on /login. */
+  const failed = await app.start(
+    browserRequest("/api/hosted/auth/start", {
+      method: "POST",
+      cookies: {},
+      form: { destination: "/welcome" },
+    }),
+  );
+  assert.equal(failed.status, 303);
+  assert.equal(failed.headers.get("location"), "/?status=expired");
+  assert.ok(!failed.headers.get("location").startsWith("/login"));
 });
 
 test("a sign-in completing a pending publication still lands on the approval page", async () => {
@@ -701,7 +770,7 @@ test("a callback with no binding cookie or a mismatched state signs nobody in", 
       : `/api/hosted/auth/callback?state=${query}&code=c`;
     const response = await app.callback(browserRequest(path, { cookies }));
     assert.equal(response.status, 303);
-    assert.equal(response.headers.get("location"), "/login/?status=expired");
+    assert.equal(response.headers.get("location"), "/?status=expired");
     assert.equal(setCookies(response).has(SESSION_COOKIE), false);
   }
   assert.notEqual(await app.store.readTransient("oauth", started.state), null, "a refused callback consumes nothing");
@@ -714,7 +783,7 @@ test("a replayed state in a cookie-less browser signs nobody in and writes nothi
   const replay = await app.callback(
     browserRequest(`/api/hosted/auth/callback?state=${state}&code=fixture-code`, {}),
   );
-  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(replay.headers.get("location"), "/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
   assert.equal(app.blobs.keys().length, before, "a cookie-less replay writes nothing");
 });
@@ -727,7 +796,7 @@ test("a state is consumed once: a replayed callback signs nobody in", async () =
       cookies: { [OAUTH_COOKIE]: binding },
     }),
   );
-  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(replay.headers.get("location"), "/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
 });
 
@@ -757,7 +826,7 @@ test("a denied consent is a normal outcome with an actionable retry", async () =
   );
   assert.equal(
     response.headers.get("location"),
-    "/login/?status=denied&destination=%2Fwelcome",
+    "/?status=denied&destination=%2Fwelcome",
     "a retry must land back where the visitor was going",
   );
   assert.equal(setCookies(response).has(SESSION_COOKIE), false);
@@ -769,7 +838,7 @@ test("a denied consent is a normal outcome with an actionable retry", async () =
       cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
-  assert.equal(replay.headers.get("location"), "/login/?status=expired");
+  assert.equal(replay.headers.get("location"), "/?status=expired");
   assert.equal(setCookies(replay).has(SESSION_COOKIE), false);
   assert.equal(app.providerCalls.length, 0);
 });
@@ -792,7 +861,7 @@ test("a token endpoint outage is unavailable and a refusal is expired", async ()
     );
     assert.equal(
       response.headers.get("location"),
-      `/login/?status=${status}&destination=%2Fwelcome`,
+      `/?status=${status}&destination=%2Fwelcome`,
       JSON.stringify(provider),
     );
     assert.equal(setCookies(response).has(SESSION_COOKIE), false);
@@ -818,7 +887,7 @@ test("a token that fails verification signs nobody in", async () => {
     );
     assert.equal(
       response.headers.get("location"),
-      "/login/?status=expired&destination=%2Fwelcome",
+      "/?status=expired&destination=%2Fwelcome",
       `verification failure: ${label}`,
     );
     assert.equal(setCookies(response).has(SESSION_COOKIE), false, label);
@@ -863,7 +932,7 @@ test("a callback that cannot revoke the old session signs nobody in", async () =
   );
   assert.equal(
     landed.headers.get("location"),
-    "/login/?status=unavailable&destination=%2Fwelcome",
+    "/?status=unavailable&destination=%2Fwelcome",
   );
   assert.equal(setCookies(landed).has(SESSION_COOKIE), false);
   assert.notEqual(await app.store.readSession(first.token), null);
@@ -886,7 +955,7 @@ test("a corrupted stored destination is a failed sign-in, not an open redirect",
       cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
-  assert.equal(landed.headers.get("location"), "/login/?status=expired");
+  assert.equal(landed.headers.get("location"), "/?status=expired");
   assert.equal(setCookies(landed).has(SESSION_COOKIE), false);
 });
 
@@ -1073,7 +1142,7 @@ test("with the gate on, an address that is not on the list gets no session", asy
      lands where they were going instead of silently on the default. */
   assert.equal(
     landed.headers.get("location"),
-    "/login/?status=not_allowed&destination=%2Fwelcome",
+    "/?status=not_allowed&destination=%2Fwelcome",
   );
   assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined, "no session cookie is issued");
 });
@@ -1107,7 +1176,7 @@ test("an unreadable allowlist is an outage, never 'you are not allowed'", async 
   const landed = await attemptSignIn(app);
   assert.equal(
     landed.headers.get("location"),
-    "/login/?status=unavailable&destination=%2Fwelcome",
+    "/?status=unavailable&destination=%2Fwelcome",
   );
   assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined);
 });

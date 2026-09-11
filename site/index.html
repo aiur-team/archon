@@ -102,10 +102,24 @@
      is hidden it rides near the top of the page. Colours are the shared tokens. */
   .site-signin {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
     margin: 0;
   }
+  /* The failed-sign-in message wraps to its own line under the button and shares
+     the page's error tone. Empty by default, so it occupies no space until the
+     splash is reached with a status word. */
+  .signin-status {
+    flex-basis: 100%;
+    margin: 0.4rem 0 0;
+    text-align: right;
+    font-size: 0.85rem;
+    color: #b3261e;
+    max-width: 32rem;
+    margin-left: auto;
+  }
+  .signin-status:empty { display: none; }
   .site-signin button {
     cursor: pointer;
     font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
@@ -372,20 +386,63 @@
     <a href="https://aiur.team">Learn More</a>
     <button class="banner-close" id="aiur-banner-close" type="button" aria-label="Dismiss announcement">&#215;</button>
   </aside>
-  <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start">
-    <!-- Somebody signing in from the splash has nothing to approve yet, so they
-         land on the onboarding page, which explains the flow. #236 landed them
-         on this same splash as an interim measure; this replaces it. A
-         publication being approved arrives on /publish/authorize through its own
-         link, not through this button. -->
-    <input type="hidden" name="destination" value="/welcome">
-    <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
-  </form>
+  <div class="site-signin">
+    <form id="siteSignin" method="post" action="/api/hosted/auth/start">
+      <!-- Somebody signing in from the splash has nothing to approve yet, so they
+           land on the onboarding page, which explains the flow. #236 landed them
+           on this same splash as an interim measure; this replaces it. A
+           publication being approved arrives on /publish/authorize through its own
+           link, not through this button. A `?destination=` a failed sign-in
+           carried back is applied to this field below, so a retry keeps its
+           intent; the server validates it again and is the authority. -->
+      <input type="hidden" name="destination" id="siteSigninDest" value="/welcome">
+      <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
+    </form>
+    <!-- The splash is the single sign-in entry, so a sign-in that failed returns
+         here with `?status=<word>` rather than dead-ending on /login. The word is
+         from a closed set the server controls; anything else is ignored, so the
+         query string can never put chosen text on the page. -->
+    <p class="signin-status" id="siteSigninStatus" role="status" aria-live="polite"></p>
+  </div>
   <script>
   (() => {
     "use strict";
     const form = document.getElementById("siteSignin");
     const btn = document.getElementById("siteSigninBtn");
+    const dest = document.getElementById("siteSigninDest");
+    const statusEl = document.getElementById("siteSigninStatus");
+
+    /* The closed set of words the start route and callback may land back here
+       with, each mapped to a fixed message. A word not in the set shows nothing,
+       so the query string cannot become a way to render arbitrary text. */
+    const LANDING = {
+      denied: "You cancelled the sign-in. You can try again.",
+      expired: "That sign-in attempt expired or could not be verified. Please try again.",
+      unavailable: "Archon could not reach the sign-in service just now. Please try again in a moment.",
+      not_allowed: "This account is not allowed to use this deployment. Ask an administrator for an invite.",
+      verify_email: "Confirm your email address with your identity provider, then sign in again."
+    };
+
+    /* The same shapes the server accepts, so a carried `?destination=` is only
+       ever re-applied to the form when it is a legal one; the server validates it
+       again regardless. `/` and an empty value both mean the onboarding default,
+       which the field already holds. */
+    const RESERVED = new Set(["admin", "assets", "login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
+    function destinationAllowed(value) {
+      if (value === "/publish/authorize" || value === "/welcome" || value === "/admin") return true;
+      if (/^\/docs\/[0-9a-f]{32}$/.test(value)) return true;
+      const slug = /^\/([a-z0-9-]{1,64})\/$/.exec(value);
+      return slug !== null && !RESERVED.has(slug[1]);
+    }
+
+    try {
+      const params = new URL(window.location.href).searchParams;
+      const message = LANDING[params.get("status")];
+      if (message !== undefined) statusEl.textContent = message;
+      const wanted = params.get("destination");
+      if (wanted !== null && destinationAllowed(wanted)) dest.value = wanted;
+    } catch (error) { /* a URL the browser will not parse leaves the defaults */ }
+
     let ready = false;
     async function boot() {
       ready = false;

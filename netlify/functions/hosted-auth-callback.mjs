@@ -28,11 +28,14 @@
  *
  * This route is reached by a top-level browser navigation, so its response is a
  * page a person looks at. A JSON error envelope rendered as text is not an
- * actionable retry path. Every failure therefore lands back on `/login` with a
- * status word from a closed set - `denied`, `expired`, `unavailable` - which the
- * sign-in page announces. The distinctions a visitor can act on are preserved;
- * everything about *why* the transaction was rejected stays on the server, so a
- * prober cannot use the landing page to tell a bad state from a bad code.
+ * actionable retry path. Every failure therefore lands back on the splash at `/`
+ * with a status word from a closed set - `denied`, `expired`, `unavailable` -
+ * which the splash announces beside its one Sign-in button. The splash is the
+ * single sign-in entry, so a failed sign-in returns there rather than
+ * dead-ending on the standalone `/login` page with its duplicate button. The
+ * distinctions a visitor can act on are preserved; everything about *why* the
+ * transaction was rejected stays on the server, so a prober cannot use the
+ * landing page to tell a bad state from a bad code.
  *
  * The OAuth cookie is cleared on every path that got past the binding check -
  * success or failure - and on no path before it. Clearing it earlier was a
@@ -66,8 +69,9 @@ import {
 
 export const config = { path: "/api/hosted/auth/callback" };
 
-/** Where a failed sign-in lands. A fixed internal path with a closed-set word. */
-const SIGN_IN_PATH = "/login/";
+/** Where a failed sign-in lands: the splash, the single sign-in entry, with a
+ * closed-set status word it announces beside its one Sign-in button. */
+const SIGN_IN_PATH = "/";
 
 /**
  * The only status words this route will ever put in that URL.
