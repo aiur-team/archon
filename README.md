@@ -114,9 +114,12 @@ happens to begin with a published one.
 
 `public` is absent from every document the skeleton produces, and absent means gated. The three reference
 documents this repository ships — `/example/`, `/components/` and `/how-archon-works/` — are the only ones
-that set it. A site vendored by `scripts/connect.mjs` carries no `netlify/lib/edge-host.mjs` of its own, so
-`"public": true` there is a build failure rather than a feature; publishing is a property of this
-deployment's gate.
+that set it.
+
+The equality above is enforced by `templates/build --site`, so it holds for any repository-backed
+deployment. A site created by `scripts/connect.mjs` is deployed with `--no-build` and so carries the list
+without the check; its publish tree is a single document at the root, which is public by the design of
+standalone mode, and none of these routes resolve to a file there.
 
 ## The two modes
 

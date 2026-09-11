@@ -123,14 +123,25 @@ const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
  *     `example-thing`. A prefix match would silently publish every future slug
  *     beginning with a published one -- the same defect `APP_PASS_THROUGH_PATHS`
  *     above exists to avoid for `/admin`. Membership is equality.
- *   * **The list is closed and held equal to the build.** A route may only
- *     appear here when the document that owns it declares `"public": true` in
- *     its `doc.json`, and `preflightPublicRoutes` in
+ *   * **The list is closed, and the repo-backed build holds it equal.** A route
+ *     may only appear here when the document that owns it declares
+ *     `"public": true` in its `doc.json`, and `preflightPublicRoutes` in
  *     `templates/docbuild/src/site.ts` fails the build when the two sets differ
  *     in either direction. So a reference document that is renamed, deleted or
  *     made private cannot leave a stale entry behind for a later document to
  *     inherit, and a list that is both the input and the check never drifts in
  *     silence.
+ *
+ *     That equality is a property of the `templates/build --site` build rather
+ *     than of every deploy of this file, and the difference is worth naming
+ *     instead of glossing. `scripts/connect.mjs` copies `netlify/` verbatim and
+ *     deploys with `--no-build`, so a connected site carries this list with the
+ *     preflight never having run. Nothing leaks there: that site's publish tree
+ *     is a single `index.html` at the root, so each of these routes is an
+ *     anonymous 404, and its one document is already public at `/` by the
+ *     design of standalone mode. But a connected tree that ever gained a file
+ *     under one of these names would serve it with no session check and no
+ *     build to object -- see #239.
  *
  * A document is reachable by more than its slug directory, so the set names
  * every route the build emits for it: `/<slug>/` and the permanent `/d/<id>`
