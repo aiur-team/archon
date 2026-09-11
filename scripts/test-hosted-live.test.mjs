@@ -462,14 +462,24 @@ test("a renderer hostname that redirects to the primary domain fails loudly", as
        the operator must do: this is a topology decision, not a header fix. */
     assert.match(l0.detail, /topology is unavailable/);
     assert.match(l0.detail, new RegExp(String(status)));
+    /* Named as a *redirect*, not merely as "not 200". The two need different
+       operator actions -- a 503 is an outage to wait out, a 301 is a routing
+       rule somebody added that has to be removed -- and a message that collapsed
+       them would send the operator to retry a gate that will never pass. */
+    assert.match(l0.detail, /and redirected/);
+    assert.match(l0.detail, /stop and escalate/);
   }
 });
 
 test("a renderer hostname that answers anything but 200 fails the topology gate", async () => {
   const fetchImpl = healthyDeployment({ [`${RENDER}/`]: reply(null, {}, 503) });
   const results = await probeDeployment(FACTS, { fetchImpl, documentId: "probe0000" });
-  assert.equal(result(results, "L0").status, "fail");
-  assert.match(result(results, "L0").detail, /topology is unavailable/);
+  const l0 = result(results, "L0");
+  assert.equal(l0.status, "fail");
+  assert.match(l0.detail, /topology is unavailable/);
+  /* And it is not reported as a redirect, which would be a different defect
+     with a different fix. */
+  assert.doesNotMatch(l0.detail, /redirected/);
 });
 
 /* ------------------------------------------------------------------ *
