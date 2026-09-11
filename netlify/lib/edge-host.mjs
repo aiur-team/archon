@@ -512,13 +512,35 @@ export function withApplicationHeaders(response) {
  *
  * @returns {Array<[string, string]>}
  */
-export function firstPartyPageHeaders() {
+/**
+ * A bare provider hostname: dot-separated labels and nothing else -- no scheme,
+ * port, path, credentials or whitespace -- so a configured value can never carry
+ * anything but a host into a header line.
+ */
+const AUTH_HOST = /^(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})+$/i;
+
+/**
+ * The `form-action` directive for a page that carries a sign-in form. `'self'`
+ * alone is not enough: the submission redirects to the identity provider, and
+ * `form-action` is enforced across that redirect. A page with no configured
+ * provider keeps the same-origin-only policy.
+ *
+ * @param {string | null | undefined} authOrigin
+ * @returns {string}
+ */
+function formAction(authOrigin) {
+  return typeof authOrigin === "string" && authOrigin.length > 0
+    ? `form-action 'self' ${authOrigin}`
+    : "form-action 'self'";
+}
+
+export function firstPartyPageHeaders(authOrigin) {
   const csp = [
     "default-src 'none'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "connect-src 'self'",
-    "form-action 'self'",
+    formAction(authOrigin),
     "frame-ancestors 'none'",
     "base-uri 'none'",
   ].join("; ");
@@ -540,7 +562,7 @@ export function firstPartyPageHeaders() {
  * @param {Response} response
  * @returns {Response}
  */
-export function withFirstPartyPageHeaders(response) {
+export function withFirstPartyPageHeaders(response, authOrigin) {
   let headers;
   try {
     headers = response.headers;
@@ -549,7 +571,7 @@ export function withFirstPartyPageHeaders(response) {
   }
   if (!(headers instanceof Headers)) return response;
   if (headers.has("Content-Security-Policy")) return response;
-  for (const [name, value] of firstPartyPageHeaders()) headers.set(name, value);
+  for (const [name, value] of firstPartyPageHeaders(authOrigin)) headers.set(name, value);
   return response;
 }
 
@@ -567,7 +589,7 @@ export function withFirstPartyPageHeaders(response) {
  *
  * @returns {Array<[string, string]>}
  */
-export function landingPageHeaders() {
+export function landingPageHeaders(authOrigin) {
   const csp = [
     "default-src 'none'",
     "script-src 'self' 'unsafe-inline'",
@@ -575,7 +597,7 @@ export function landingPageHeaders() {
     "font-src https://fonts.gstatic.com",
     "img-src 'self' data:",
     "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
-    "form-action 'self'",
+    formAction(authOrigin),
     "frame-ancestors 'none'",
     "base-uri 'none'",
   ].join("; ");
@@ -596,7 +618,7 @@ export function landingPageHeaders() {
  * @param {Response} response
  * @returns {Response}
  */
-export function withLandingPageHeaders(response) {
+export function withLandingPageHeaders(response, authOrigin) {
   let headers;
   try {
     headers = response.headers;
@@ -605,8 +627,35 @@ export function withLandingPageHeaders(response) {
   }
   if (!(headers instanceof Headers)) return response;
   if (headers.has("Content-Security-Policy")) return response;
-  for (const [name, value] of landingPageHeaders()) headers.set(name, value);
+  for (const [name, value] of landingPageHeaders(authOrigin)) headers.set(name, value);
   return response;
+}
+
+/**
+ * The identity provider's origin, derived from the one configured `AUTH0_DOMAIN`.
+ *
+ * A sign-in form posts same-origin to `/api/hosted/auth/start`, which answers a
+ * redirect to the provider's `/authorize`. `form-action` is enforced across that
+ * redirect, so a policy of `'self'` alone blocks the submission before the
+ * provider is ever reached -- the browser refuses with "violates ... form-action
+ * 'self'" and no sign-in can complete. The provider's origin therefore has to be
+ * named in `form-action`, and only there: it grants nothing else.
+ *
+ * It is built from configuration rather than from a request, and the host is
+ * validated before it is put in a header, so a malformed or absent setting
+ * yields `null` and the policy falls back to `'self'` rather than emitting a
+ * header a caller could have shaped.
+ *
+ * @param {Record<string, string | undefined> | undefined} env
+ * @returns {string | null}
+ */
+export function authorizationOrigin(env) {
+  const configured = env?.AUTH0_DOMAIN;
+  if (typeof configured !== "string") return null;
+  const host = configured.trim();
+  if (host.length === 0 || host.length > 253) return null;
+  if (!AUTH_HOST.test(host)) return null;
+  return `https://${host}`;
 }
 
 /**
