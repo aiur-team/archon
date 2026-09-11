@@ -112,10 +112,11 @@ test("the CSRF token is derived from the session and is not the session", () => 
   assert.throws(() => deriveCsrfToken(""), TypeError);
 });
 
-test("the four internal destination shapes are reachable", () => {
+test("the internal destination shapes are reachable", () => {
   assert.equal(validateDestination("/publish/authorize"), "/publish/authorize");
   /* The onboarding page an ordinary sign-in defaults to, matched exactly and
-     with no trailing slash. */
+     with no trailing slash. It replaced #236's interim `/` landing, which is
+     refused again below. */
   assert.equal(validateDestination("/welcome"), "/welcome");
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
   assert.equal(validateDestination(docs), docs);
@@ -144,7 +145,14 @@ test("every redirect-injection spelling is refused", () => {
     `/docs/${"a1b2c3d4".repeat(4)}/`,
     `/docs/${"a1b2c3d4".repeat(4)}?x=1`,
     "/docs/short",
+    /* `/` and its near misses. #236 accepted the bare `/` as an interim landing
+       for a sign-in with nothing to approve; the onboarding page replaced it, so
+       the root is refused again and the allowlist has one answer to that
+       question rather than two. */
     "/",
+    "/?x=1",
+    "/#x",
+    "//",
     "",
     /* Collaboration-slug near misses: a reserved first segment, two segments,
        an uppercase letter, an underscore, no trailing slash, an over-long

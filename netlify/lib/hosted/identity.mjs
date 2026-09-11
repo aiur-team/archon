@@ -233,6 +233,12 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
  * slug shape either: `welcome` is a reserved first segment, and `/welcome/` is
  * refused rather than quietly treated as a document named "welcome".
  *
+ * `/` was briefly a sixth shape. #236 added it so a plain sign-in could land on
+ * the splash rather than the approval page's "No pending publication" dead end,
+ * and said so: an interim landing until the onboarding page existed. It does
+ * now, so the interim shape is gone rather than left as a second answer to the
+ * same question - and `/` is back among the refused spellings below.
+ *
  * The slug is matched on the raw string too: a `%2e%2e`, a
  * second segment, an absent trailing slash, or an uppercase letter all fail the
  * one pattern rather than being decoded into something that then has to be
@@ -242,7 +248,9 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 export function validateDestination(value) {
   if (typeof value !== "string") throw new AuthRequestError("unknown destination");
   if (value === HOSTED_LIMITS.AUTHORIZE_PATH) return value;
-  /* The onboarding page an ordinary sign-in defaults to. */
+  /* The onboarding page an ordinary sign-in defaults to, and what replaced
+     #236's interim `/` landing: it answers the same "where does a sign-in with
+     nothing to approve go" question, with a page that explains the flow. */
   if (value === HOSTED_LIMITS.WELCOME_PATH) return value;
   /* The admin console. An exact string like the authorize path, and an internal
      absolute path with nothing caller-controlled in it, so it widens the
