@@ -28,6 +28,7 @@ import { buildLogoutUrl, principalFromClaims } from "../../lib/hosted/auth0-oidc
 import { HOSTED_LIMITS } from "../../lib/hosted/contracts.mjs";
 import { withErrorBoundary } from "../../lib/hosted/http.mjs";
 import {
+  ACCESS_REQUEST_COOKIE,
   BINDING_COOKIE,
   LOGIN_COOKIE,
   OAUTH_COOKIE,
@@ -37,6 +38,10 @@ import {
   deriveCsrfToken,
   identifyHosted,
 } from "../../lib/hosted/identity.mjs";
+import {
+  createSignupAttemptsStore,
+  readSignupAttempts,
+} from "../../lib/hosted/signup-attempts.mjs";
 import startHandler, { createStartRoute } from "../../functions/hosted-auth-start.mjs";
 import { createCallbackRoute } from "../../functions/hosted-auth-callback.mjs";
 import { createLogoutRoute } from "../../functions/hosted-auth-logout.mjs";
@@ -91,7 +96,11 @@ function deployment({ clock = fixedClock(), env = {} } = {}) {
      gate is exercised against real conditional writes and real read failures. */
   const provider = createProviderDouble();
   const allowlist = createAllowlistStore({ getStore: provider.getStore });
-  const deps = { store, config, allowlist };
+  /* The turned-away sign-in census the callback appends to on a `not_allowlisted`
+     refusal. It shares the publication suite's provider double with the allowlist,
+     under its own key, so both are exercised against real conditional writes. */
+  const signupAttempts = createSignupAttemptsStore({ getStore: provider.getStore });
+  const deps = { store, config, allowlist, signupAttempts };
   return {
     store,
     blobs,
@@ -99,6 +108,7 @@ function deployment({ clock = fixedClock(), env = {} } = {}) {
     config,
     provider,
     allowlist,
+    signupAttempts,
     providerRef,
     /** The token endpoint's recorded calls, whichever impl is current. */
     get providerCalls() {
@@ -1133,18 +1143,67 @@ test("with the gate off, a sign-in reads no allowlist at all", async () => {
   assert.deepEqual(app.provider.calls, [], "the allowlist store was never opened");
 });
 
-test("with the gate on, an address that is not on the list gets no session", async () => {
+test("with the gate on, an unadmitted verified address is offered the request page, not a session", async () => {
   const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
   const landed = await attemptSignIn(app);
 
   assert.equal(landed.status, 303);
-  /* The destination is carried through, so a visitor who is later invited
-     lands where they were going instead of silently on the default. */
-  assert.equal(
-    landed.headers.get("location"),
-    "/?status=not_allowed&destination=%2Fwelcome",
-  );
+  /* #6: a verified-but-unadmitted sign-in is no longer dead-ended on the splash;
+     it is sent to the request-access page. It still gets no session. */
+  assert.equal(landed.headers.get("location"), "/request-access/");
   assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined, "no session cookie is issued");
+});
+
+test("a refused verified sign-in records the attempt and binds the request form to the verified address", async () => {
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  const landed = await attemptSignIn(app);
+  assert.equal(landed.headers.get("location"), "/request-access/");
+
+  /* The attempt is recorded under the VERIFIED address, so an admin sees who was
+     turned away even if they never submit the form. */
+  const attempts = await readSignupAttempts(app.signupAttempts);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].email, "ann@example.com");
+  assert.equal(attempts[0].count, 1);
+
+  /* The request form's cookie names a one-time token whose stored payload is the
+     verified address - never a string the form will submit. */
+  const cookies = setCookies(landed);
+  const token = cookieValue(cookies.get(ACCESS_REQUEST_COOKIE));
+  assert.match(token ?? "", /^[A-Za-z0-9_-]{32,}$/, "an access-request token is issued");
+  const pending = await app.store.readTransient("access_request", token);
+  assert.equal(pending.payload.email, "ann@example.com");
+  /* The proven OAuth binding is cleared on this path like every other; no session
+     is created. */
+  assert.equal(cookieValue(cookies.get(OAUTH_COOKIE)), "");
+  assert.equal(cookies.get(SESSION_COOKIE), undefined);
+});
+
+test("a repeated refusal of the same address bumps its count rather than adding a row", async () => {
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  await attemptSignIn(app);
+  await attemptSignIn(app);
+  const attempts = await readSignupAttempts(app.signupAttempts);
+  assert.equal(attempts.length, 1, "one address is one row");
+  assert.equal(attempts[0].email, "ann@example.com");
+  assert.equal(attempts[0].count, 2);
+});
+
+test("recording the attempt fails safe: a census outage still refuses and never admits", async () => {
+  /* The security property #6 asks for by name: a store outage while recording an
+     attempt must not crash the callback into granting access, and must not admit
+     anyone. The refusal stands; only the audit row and the form binding are lost. */
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  /* The allowlist read (the first read on the shared provider) succeeds; the
+     attempt census read (the second) fails, so `recordSignupAttempt` throws its
+     `unavailable`. `skip: 1` targets that second read rather than draining the
+     fault on the allowlist read that precedes it. */
+  app.provider.failNextRead({ throws: true, skip: 1 });
+  const landed = await attemptSignIn(app);
+  assert.equal(landed.status, 303, "a store outage while recording is not an error page");
+  assert.equal(landed.headers.get("location"), "/request-access/");
+  assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined, "no session is ever created");
+  assert.deepEqual(await readSignupAttempts(app.signupAttempts), [], "nothing was recorded");
 });
 
 test("with the gate on, an allowlisted address signs in", async () => {
@@ -1183,8 +1242,12 @@ test("an unreadable allowlist is an outage, never 'you are not allowed'", async 
 
 test("every landing word the callback can use is in the closed set", async () => {
   /* The sign-in page renders a fixed message per word and ignores anything else,
-     so a word that escaped this set would be a status a visitor never sees. */
-  for (const status of ["not_allowed", "verify_email", "unavailable"]) {
+     so a word that escaped this set would be a status a visitor never sees.
+     `not_allowed` is deliberately gone: a verified-but-unadmitted sign-in now
+     lands on the request-access page rather than the splash, so the callback
+     never emits that word. */
+  for (const status of ["verify_email", "unavailable", "denied", "expired"]) {
     assert.ok(CALLBACK_STATUSES.includes(status), `${status} is announced by the sign-in page`);
   }
+  assert.ok(!CALLBACK_STATUSES.includes("not_allowed"), "the splash no longer refuses the unadmitted");
 });

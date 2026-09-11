@@ -115,10 +115,13 @@ test("isRenderPrefix and isApplicationPassThrough classify application paths", (
   assert.equal(isRenderPrefix("/_render"), true);
   assert.equal(isRenderPrefix("/_renderer"), false);
   assert.equal(isRenderPrefix("/docs/abcdef"), false);
-  for (const pass of ["/api/session", "/api/hosted/session", "/_assets/x.js", "/login/", "/docs/abcdef", "/publish/authorize", "/invite/"]) {
+  for (const pass of ["/api/session", "/api/hosted/session", "/_assets/x.js", "/login/", "/docs/abcdef", "/publish/authorize", "/invite/", "/request-access/", "/request-access/request-access.js"]) {
     assert.equal(isApplicationPassThrough(pass), true, `${pass} passes through`);
   }
-  for (const gated of ["/", "/some-slug/", "/renderer.js", "/_render/index.html"]) {
+  /* The prefix does not leak into look-alike collaboration slugs: a document
+     named `request-access-x` is a slug and stays gated, exactly as `/admin` and
+     `/welcome` are guarded from their near misses. */
+  for (const gated of ["/", "/some-slug/", "/renderer.js", "/_render/index.html", "/request-access-x/", "/request-accessing/"]) {
     assert.equal(isApplicationPassThrough(gated), false, `${gated} is not a pass-through`);
   }
 });

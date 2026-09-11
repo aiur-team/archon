@@ -1,17 +1,21 @@
 /**
- * The invite-request form's abuse controls, and the message it produces.
+ * The access-request form's abuse controls, and the message it produces.
  *
- * This is the only route in the hosted tree an anonymous stranger can make the
- * deployment send email from, so the interesting part is not the sending. Four
- * properties carry it, and each is here because the obvious version of this
- * feature does not have it:
+ * A visitor who signs in with a verified address that this deployment does not
+ * admit is not simply refused: the callback records the attempt and lands them
+ * on `/request-access/`, whose form asks what they want to use Archon for and
+ * mails the operator. This module is the abuse story of that form, and every
+ * property here exists because the obvious version of the feature does not have
+ * it:
  *
  *  1. **It is not an open relay.** The recipient is the configured operator
- *     address and nothing on the wire can change it; the requester's address is
- *     *content* of a message sent to the operator, never a `to`, never a
- *     `reply-to` header, never a `from`. A form that mailed the requester - even
- *     a "thanks, we got it" - would let anybody send mail from this deployment's
- *     domain to any address they can type, which is what a relay is.
+ *     address and nothing on the wire can change it. The requester's address is
+ *     not on the wire at all: it is the *verified* address the sign-in callback
+ *     stored server-side, read back from a one-time token, never a string the
+ *     form submitted. So the form cannot be made to send mail from this
+ *     deployment's domain to an address a stranger typed, which is what a relay
+ *     is - and it cannot be made to attribute a request to an address the
+ *     requester does not control.
  *  2. **It leaks no membership.** Nothing here reads the allowlist, the
  *     publication store or the session store, so there is no query whose timing
  *     or result could differ between a known address and an unknown one. The
@@ -36,27 +40,26 @@
  */
 
 import { HostedContractError } from "./contracts.mjs";
-import { normalizeEmailOrNull } from "./email.mjs";
 import { createRecordStore } from "./record-store.mjs";
 import { sha256Base64Url } from "./secrets.mjs";
 
 /** The store key the counter lives at. One key, forever. */
-export const INVITE_RATE_KEY = "access/invite-rate";
+export const REQUEST_RATE_KEY = "access/request-rate";
 
 /** The schema version. A record carrying any other is one this version refuses. */
-export const INVITE_RATE_SCHEMA_VERSION = 1;
+export const REQUEST_RATE_SCHEMA_VERSION = 1;
 
 /**
  * The bounds on the form.
  *
  * The per-source limit is the one a person notices and is set where a genuine
- * retry - a typo in the address, a second thought about the message - still
- * works. The window total is the one that matters under abuse: it bounds what
- * this deployment can be made to send in an hour no matter how many sources the
+ * retry - a second thought about the message, a provider hiccup - still works.
+ * The window total is the one that matters under abuse: it bounds what this
+ * deployment can be made to send in an hour no matter how many sources the
  * requests appear to come from, which is the only limit that survives an
- * attacker who can vary their address.
+ * attacker who can vary their apparent source.
  */
-export const INVITE_LIMITS = Object.freeze({
+export const REQUEST_LIMITS = Object.freeze({
   /** Submissions one source may make in one window. */
   MAX_PER_SOURCE: 3,
   /** Submissions this deployment will send in one window, from all sources. */
@@ -74,7 +77,7 @@ export const INVITE_LIMITS = Object.freeze({
 });
 
 /** Domain separation for the source digest, so it has one meaning. */
-const SOURCE_CONTEXT = "archon-invite-source-v1:";
+const SOURCE_CONTEXT = "archon-access-request-source-v1:";
 
 function invalid(message, field) {
   return new HostedContractError("invalid_request", message, { field });
@@ -82,7 +85,7 @@ function invalid(message, field) {
 
 /** The window an instant falls in, as a stable stamp. */
 export function windowOf(at) {
-  return String(Math.floor(at.getTime() / INVITE_LIMITS.WINDOW_MS));
+  return String(Math.floor(at.getTime() / REQUEST_LIMITS.WINDOW_MS));
 }
 
 /**
@@ -97,7 +100,7 @@ export function validateRateRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw invalid("the rate record must be an object", "rate");
   }
-  if (value.v !== INVITE_RATE_SCHEMA_VERSION) {
+  if (value.v !== REQUEST_RATE_SCHEMA_VERSION) {
     throw invalid("the rate record carries an unknown schema version", "rate.v");
   }
   if (typeof value.window !== "string" || !/^\d{1,15}$/.test(value.window)) {
@@ -118,22 +121,22 @@ export function validateRateRecord(value) {
     counts[source] = count;
     total += count;
   }
-  if (Object.keys(counts).length > INVITE_LIMITS.MAX_SOURCES) {
+  if (Object.keys(counts).length > REQUEST_LIMITS.MAX_SOURCES) {
     throw invalid("the rate record tracks more sources than one window may", "rate.counts");
   }
   /* The total is recomputed rather than read. A stored total that disagreed with
      the counts it sums would be the field an attacker wants to write, and
      deriving it means there is nothing to disagree with. */
-  return Object.freeze({ v: INVITE_RATE_SCHEMA_VERSION, window: value.window, counts, total });
+  return Object.freeze({ v: REQUEST_RATE_SCHEMA_VERSION, window: value.window, counts, total });
 }
 
 /** The rate-counter store, over an injected provider. */
-export function createInviteRateStore({ getStore, name } = {}) {
+export function createRequestRateStore({ getStore, name } = {}) {
   return createRecordStore({
     getStore,
     name,
-    key: INVITE_RATE_KEY,
-    label: "invite rate",
+    key: REQUEST_RATE_KEY,
+    label: "access request rate",
     validate: validateRateRecord,
   });
 }
@@ -143,9 +146,9 @@ export function createInviteRateStore({ getStore, name } = {}) {
  *
  * A digest, so the stored record holds no IP address: this counter is a
  * spam-control mechanism and has no business being a log of who visited the
- * splash page. `x-nf-client-connection-ip` is the platform's own statement of
- * the connecting address and is the only spelling trusted; `x-forwarded-for` is
- * a request header a client can set, so it is not read at all.
+ * form. `x-nf-client-connection-ip` is the platform's own statement of the
+ * connecting address and is the only spelling trusted; `x-forwarded-for` is a
+ * request header a client can set, so it is not read at all.
  *
  * A request with no platform header - a local run, a future platform change -
  * falls into one shared `unknown` bucket rather than escaping the limit. That
@@ -172,9 +175,9 @@ export function normalizeMessage(value) {
   if (value === undefined || value === null || value === "") return "";
   if (typeof value !== "string") throw invalid("message must be text", "message");
   const scalars = [...value];
-  if (scalars.length > INVITE_LIMITS.MESSAGE_MAX_SCALARS) {
+  if (scalars.length > REQUEST_LIMITS.MESSAGE_MAX_SCALARS) {
     throw invalid(
-      `message must be at most ${INVITE_LIMITS.MESSAGE_MAX_SCALARS} characters`,
+      `message must be at most ${REQUEST_LIMITS.MESSAGE_MAX_SCALARS} characters`,
       "message",
     );
   }
@@ -192,16 +195,6 @@ export function normalizeMessage(value) {
     .trim();
 }
 
-/** The requester's address, normalised, or a typed refusal. */
-export function normalizeRequesterEmail(value) {
-  const email = normalizeEmailOrNull(value);
-  /* The message says what is wrong with the value and nothing about whether the
-     address is known here. It is the same answer for an address that has an
-     account and one that does not, because this function never looks. */
-  if (email === null) throw invalid("email must be an email address", "email");
-  return email;
-}
-
 /**
  * Claim one submission against the window's budget.
  *
@@ -215,7 +208,7 @@ export function normalizeRequesterEmail(value) {
  * @throws {HostedContractError} `rate_limited` (429), or `unavailable` when the
  *   counter could not be read or written - the fail-closed direction.
  */
-export async function claimInviteSubmission({ source, now = () => new Date() }, { store }) {
+export async function claimRequestSubmission({ source, now = () => new Date() }, { store }) {
   const window = windowOf(now());
 
   await store.mutate((current) => {
@@ -224,14 +217,14 @@ export async function claimInviteSubmission({ source, now = () => new Date() }, 
     const counts = current !== null && current.window === window ? { ...current.counts } : {};
     const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
 
-    if (total >= INVITE_LIMITS.MAX_PER_WINDOW) throw rateLimited();
-    if ((counts[source] ?? 0) >= INVITE_LIMITS.MAX_PER_SOURCE) throw rateLimited();
-    if (counts[source] === undefined && Object.keys(counts).length >= INVITE_LIMITS.MAX_SOURCES) {
+    if (total >= REQUEST_LIMITS.MAX_PER_WINDOW) throw rateLimited();
+    if ((counts[source] ?? 0) >= REQUEST_LIMITS.MAX_PER_SOURCE) throw rateLimited();
+    if (counts[source] === undefined && Object.keys(counts).length >= REQUEST_LIMITS.MAX_SOURCES) {
       throw rateLimited();
     }
 
     counts[source] = (counts[source] ?? 0) + 1;
-    return { v: INVITE_RATE_SCHEMA_VERSION, window, counts };
+    return { v: REQUEST_RATE_SCHEMA_VERSION, window, counts };
   });
   return { claimed: true };
 }
@@ -247,8 +240,8 @@ export async function claimInviteSubmission({ source, now = () => new Date() }, 
 function rateLimited() {
   return new HostedContractError(
     "rate_limited",
-    "too many invite requests just now; please try again later",
-    { field: "email" },
+    "too many access requests just now; please try again later",
+    { field: "message" },
   );
 }
 
@@ -258,13 +251,14 @@ function rateLimited() {
  * Plain text, and assembled so the requester's own strings can never be mistaken
  * for the deployment's: both are on their own lines under labels, and the note
  * is last so a note containing something that looks like a label cannot appear
- * to precede a field that follows it.
+ * to precede a field that follows it. The address is the one Auth0 verified for
+ * the sign-in that was turned away, so an operator can act on it directly.
  */
-export function inviteMessage({ email, message, at }) {
+export function accessRequestMessage({ email, message, at }) {
   const lines = [
-    "Someone asked for an invite to Archon.",
+    "Someone was turned away at sign-in and asked for access to Archon.",
     "",
-    `Email: ${email}`,
+    `Verified email: ${email}`,
     `Received: ${at.toISOString()}`,
     "",
     message === "" ? "(no message)" : "Message:",
@@ -274,4 +268,4 @@ export function inviteMessage({ email, message, at }) {
 }
 
 /** The subject line. Fixed: a subject built from input is a spam vector. */
-export const INVITE_SUBJECT = "Archon: invite request";
+export const ACCESS_REQUEST_SUBJECT = "Archon: access request";

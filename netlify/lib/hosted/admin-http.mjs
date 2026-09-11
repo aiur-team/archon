@@ -21,6 +21,7 @@ import { createAllowlistStore } from "./allowlist.mjs";
 import { openAuthStore } from "./auth-store.mjs";
 import { readHostedConfig } from "./config.mjs";
 import { createPublicationStore } from "./publication-store.mjs";
+import { createSignupAttemptsStore } from "./signup-attempts.mjs";
 
 /**
  * The production dependency set for an admin route.
@@ -37,5 +38,6 @@ export function adminDependencies(env = process.env) {
     store: openAuthStore(),
     allowlist: createAllowlistStore({ getStore }),
     publications: createPublicationStore({ getStore }),
+    signupAttempts: createSignupAttemptsStore({ getStore }),
   });
 }
