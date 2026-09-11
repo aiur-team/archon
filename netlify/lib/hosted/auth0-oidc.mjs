@@ -53,7 +53,12 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { AuthRequestError, AuthUnavailableError } from "./auth-errors.mjs";
-import { HOSTED_LIMITS, deriveAccountId, validatePrincipal } from "./contracts.mjs";
+import {
+  AVATAR_IMAGE_ORIGINS,
+  HOSTED_LIMITS,
+  deriveAccountId,
+  validatePrincipal,
+} from "./contracts.mjs";
 import { normalizeEmailOrNull } from "./email.mjs";
 import { constantTimeEqual, randomToken, sha256Base64Url } from "./secrets.mjs";
 
@@ -392,6 +397,33 @@ function sanitizeLogin(value) {
 }
 
 /**
+ * The avatar URL from the `picture` claim, or null.
+ *
+ * Degrades rather than refuses, exactly as `sanitizeLogin` does: a claim that is
+ * absent, unparseable, over-long or served from a host this deployment does not
+ * allow images from answers null, and the person signs in without a picture. The
+ * alternative - throwing - would turn a cosmetic claim into a failed sign-in.
+ *
+ * The origin check is here as well as in `validatePrincipal` on purpose. This one
+ * is what keeps a sign-in working; the contract's is what keeps an unvetted URL
+ * out of a stored record whatever wrote it.
+ */
+function deriveAvatarUrl(claims) {
+  const raw = claims.picture;
+  if (typeof raw !== "string" || raw === "") return null;
+  if (raw.length > HOSTED_LIMITS.AVATAR_URL_MAX_LENGTH) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (!AVATAR_IMAGE_ORIGINS.includes(url.origin)) return null;
+  if (url.username !== "" || url.password !== "") return null;
+  return raw;
+}
+
+/**
  * Build the C1 v2 principal from verified ID-token claims.
  *
  * `email` is set only when the claim normalizes through the repository's one
@@ -421,6 +453,7 @@ export function principalFromClaims(claims) {
      answers null and the address is simply absent. */
   const email = normalizeEmailOrNull(claims.email);
   const emailVerified = email !== null && claims.email_verified === true;
+  const avatarUrl = deriveAvatarUrl(claims);
 
   try {
     return validatePrincipal({
@@ -430,6 +463,9 @@ export function principalFromClaims(claims) {
       login: deriveLogin(claims, providerUserId),
       email,
       emailVerified,
+      /* Spread, so a claim set with no usable picture builds the same six-key
+         record it always did rather than one carrying an explicit null. */
+      ...(avatarUrl === null ? {} : { avatarUrl }),
     });
   } catch {
     throw new AuthRequestError();

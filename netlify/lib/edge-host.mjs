@@ -520,6 +520,33 @@ export function withApplicationHeaders(response) {
 const AUTH_HOST = /^(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})+$/i;
 
 /**
+ * The image origins a landing page's signed-in nav may draw an avatar from.
+ *
+ * Four named hosts, no wildcard and no scheme-only source: these are the hosts
+ * the identity connections in use actually serve profile pictures from, and the
+ * point of naming them rather than writing `https:` is that `img-src https:`
+ * would let any URL the identity tenant chose become a request every signed-in
+ * visitor's browser makes.
+ *
+ * **Written twice on purpose.** `AVATAR_IMAGE_ORIGINS` in
+ * `netlify/lib/hosted/contracts.mjs` is the same list, and it is what refuses an
+ * avatar URL from anywhere else before one is ever stored. This module cannot
+ * import it: `netlify/test/edge-host.test.mjs` and `scripts/test-access-row.mjs`
+ * copy this file alone into a synthetic bundle root to drive the gate, so an
+ * import of a sibling under `lib/hosted/` would not resolve there. The two lists
+ * are held equal by a test in `netlify/test/edge-host.test.mjs` instead, which
+ * is the same arrangement `ADMIN_DESTINATION` already has.
+ */
+const AVATAR_IMAGE_ORIGINS = Object.freeze([
+  "https://avatars.githubusercontent.com",
+  "https://cdn.auth0.com",
+  "https://lh3.googleusercontent.com",
+  "https://s.gravatar.com",
+]);
+
+export { AVATAR_IMAGE_ORIGINS as LANDING_AVATAR_IMAGE_ORIGINS };
+
+/**
  * The `form-action` directive for a page that carries a sign-in form. `'self'`
  * alone is not enough: the submission redirects to the identity provider, and
  * `form-action` is enforced across that redirect. A page with no configured
@@ -584,8 +611,12 @@ export function withFirstPartyPageHeaders(response, authOrigin) {
  * credential form and no user data, so it may take a looser CSP than
  * firstPartyPageHeaders -- the framing and base-uri denials and the same
  * security headers still hold. The extra grants are exactly what these static
- * pages need: inline script, the two Google Font origins, and same-origin
- * images.
+ * pages need: inline script, the two Google Font origins, same-origin images,
+ * and the four named avatar hosts the signed-in nav draws a profile picture
+ * from. A landing page now asks `/api/hosted/session` who the visitor is and
+ * shows their handle when there is one - `connect-src 'self'` already allowed
+ * that call - but it still holds no credential form of its own and stores
+ * nothing, so the rest of the set is unchanged.
  *
  * @returns {Array<[string, string]>}
  */
@@ -595,7 +626,7 @@ export function landingPageHeaders(authOrigin) {
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src https://fonts.gstatic.com",
-    "img-src 'self' data:",
+    `img-src 'self' data: ${AVATAR_IMAGE_ORIGINS.join(" ")}`,
     "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
     formAction(authOrigin),
     "frame-ancestors 'none'",

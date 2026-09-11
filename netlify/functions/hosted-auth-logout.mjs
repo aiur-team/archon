@@ -40,6 +40,13 @@
  * sign-out is U6's job (one session for the collaboration layer); until then the
  * fetch path keeps the behaviour its callers were built against.
  *
+ * **Where the CSRF token may be carried.** A `fetch` caller presents it in the
+ * `X-Archon-Csrf` header. A form cannot set a header, so a form-encoded body may
+ * carry it as a `csrfToken` field instead - the same shape
+ * `/api/hosted/auth/start` already accepts for its different-account control.
+ * The token itself is unchanged: still derived from the session cookie, still
+ * compared in constant time, still unobtainable without a live session.
+ *
  * The pending publication binding is left alone. Logging out is not a decision
  * on a pending publication, and C1 keeps that binding alive until a decision or
  * expiry.
@@ -57,6 +64,32 @@ function wantsJson(request) {
   return (request.headers.get("accept") ?? "").toLowerCase().includes("application/json");
 }
 
+/**
+ * The CSRF token a form navigation submitted, or null for a `fetch` caller.
+ *
+ * The header this route used to rely on alone is unreachable from a real
+ * `<form method="post">` - a form cannot set a request header - so the sign-out
+ * control in the signed-in nav had no way to present its binding and was
+ * refused. A form-encoded body is therefore read for a `csrfToken` field, and
+ * `requireBrowserMutation` still compares it in constant time against the token
+ * derived from the session cookie: this widens *where* the token may be carried
+ * and not *what* counts as one. A `fetch` caller sends no such body, gets null
+ * here, and falls through to the header exactly as before.
+ *
+ * A body this route cannot parse yields null rather than an exception, so the
+ * request is refused by the CSRF check rather than by a parser error that would
+ * tell a prober their body shape was interesting.
+ */
+async function presentedCsrfField(request) {
+  const type = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/x-www-form-urlencoded") return null;
+  try {
+    return new URLSearchParams(await request.text()).get("csrfToken");
+  } catch {
+    return null;
+  }
+}
+
 /** The route, over injected dependencies. */
 export function createLogoutRoute({ store, config: hostedConfig }) {
   return async function logoutRoute(request) {
@@ -71,6 +104,7 @@ export function createLogoutRoute({ store, config: hostedConfig }) {
     const { sessionToken } = await requireBrowserMutation(request, {
       store,
       config: hostedConfig,
+      presentedCsrf: await presentedCsrfField(request),
       formNavigation: true,
     });
     /* Throws `AuthUnavailableError` when it could not establish that the token

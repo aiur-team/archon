@@ -275,6 +275,7 @@ test("the signed-in session body names the account and carries no secret materia
   assert.deepEqual(Object.keys(body).sort(), [
     "accountId",
     "authenticated",
+    "avatarUrl",
     "csrfToken",
     "email",
     "emailVerified",
@@ -286,6 +287,9 @@ test("the signed-in session body names the account and carries no secret materia
   assert.equal(body.email, "ann@example.com");
   assert.equal(body.emailVerified, true);
   assert.equal(body.csrfToken, deriveCsrfToken(token));
+  /* Always present, so the signed-in nav reads "no picture" as null rather than
+     having to tell it apart from a deployment that does not report one. */
+  assert.equal(body.avatarUrl, PRINCIPAL_GOOGLE.avatarUrl ?? null);
 
   const rendered = JSON.stringify(body);
   assert.ok(!rendered.includes(token), "the raw session cookie must never reach the body");
@@ -1031,6 +1035,57 @@ test("a valid logout revokes, clears the cookie, and redirects to the Auth0 logo
 
   const copied = browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } });
   assert.equal(await identifyHosted(copied, { store: app.store }), null, "a copied old cookie must fail");
+});
+
+test("the nav's Log out form signs out, carrying its token in the body a form can send", async () => {
+  /* The signed-in nav's Log out is a real `<form method="post">`, which is the
+     only shape that lets the browser navigate out to the tenant's own logout.
+     A form cannot set the `X-Archon-Csrf` header, so it submits the same token
+     as a `csrfToken` field - exactly as the different-account control on the
+     sign-in form already does. `Referrer-Policy: no-referrer` makes a navigation
+     arrive with `Origin: null`, so the request below is spelled the way a real
+     browser spells it: no CSRF header, a form body, and the Fetch Metadata pair
+     that is the only reason the null origin is accepted at all. */
+  const app = deployment();
+  const { token } = await signIn(app);
+  const response = await app.logout(
+    browserRequest("/api/hosted/auth/logout", {
+      method: "POST",
+      cookies: { [SESSION_COOKIE]: token },
+      origin: "null",
+      form: { csrfToken: deriveCsrfToken(token) },
+      headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+    }),
+  );
+  assert.equal(response.status, 303);
+  assert.equal(cookieValue(setCookies(response).get(SESSION_COOKIE)), "");
+  const copied = browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } });
+  assert.equal(await identifyHosted(copied, { store: app.store }), null, "the token is dead server-side");
+});
+
+test("a Log out form with no token, or somebody else's, revokes nothing", async () => {
+  /* Widening where the token may be carried must not widen what counts as one.
+     A cross-site form post is the attack this is guarding: it arrives with the
+     visitor's cookie, because `SameSite=Lax` sends it on a top-level POST from
+     another site in no browser - but a form field an attacker controls is the
+     one thing they could try to fill. */
+  const app = deployment();
+  const { token } = await signIn(app);
+  const other = await signIn(app);
+  for (const form of [{}, { csrfToken: "" }, { csrfToken: "wrong-token-value-that-is-long-enough" }, { csrfToken: deriveCsrfToken(other.token) }]) {
+    const response = await app.logout(
+      browserRequest("/api/hosted/auth/logout", {
+        method: "POST",
+        cookies: { [SESSION_COOKIE]: token },
+        origin: "null",
+        form,
+        headers: { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" },
+      }),
+    );
+    assert.equal(response.status, 403, `refused: ${JSON.stringify(form)}`);
+  }
+  const still = browserRequest("/x", { cookies: { [SESSION_COOKIE]: token } });
+  assert.notEqual(await identifyHosted(still, { store: app.store }), null, "the session is still live");
 });
 
 test("a fetch sign-out revokes server-side and returns the signed-out body, no cross-origin redirect", async () => {
