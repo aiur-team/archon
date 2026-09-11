@@ -93,7 +93,7 @@
     account.hidden = true;
     const landing = LANDING[new URL(window.location.href).searchParams.get("status")];
     if (landing !== undefined) say(landing, "error");
-    else say("Ready. Archon will ask Auth0 to confirm who you are.", "ok");
+    else say("", "ok");
   }
 
   form.addEventListener("submit", (event) => {
