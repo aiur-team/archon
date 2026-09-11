@@ -23,11 +23,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applicationHeaders,
+  documentHeaders,
   applicationOrigin,
   classifyHost,
   firstPartyPageHeaders,
+  withDocumentHeaders,
+  APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
   isApplicationPassThrough,
+  isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -118,6 +122,52 @@ test("isRenderPrefix and isApplicationPassThrough classify application paths", (
   }
 });
 
+test("isPublicDocument matches the reference documents by exact path only", () => {
+  assert.deepEqual(
+    [...APP_PUBLIC_DOCUMENT_PATHS].sort(),
+    ["/components/", "/d/3c7f1a", "/d/52c164", "/d/a2e912", "/example/", "/how-archon-works/"],
+    "the public set is the three reference documents, each at its slug and its permanent link",
+  );
+  for (const pub of APP_PUBLIC_DOCUMENT_PATHS) {
+    assert.equal(isPublicDocument(pub), true, `${pub} is a public document`);
+  }
+  /* The whole safety argument of the public document set is that membership is
+     equality, never a prefix. Each of these shares a prefix with a public route
+     and is a path a collaboration document could legitimately be served at, so
+     each one being false is what keeps the public set from leaking into the slug
+     namespace around it. */
+  for (const gated of [
+    "/example",
+    "/example-thing/",
+    "/example/deeper/",
+    "/example//",
+    "/examples/",
+    "/Example/",
+    "/components",
+    "/components-v2/",
+    "/how-archon-works",
+    "/how-archon-works-2/",
+    "/",
+    "/some-slug/",
+    // The permanent links are exact too: no prefix, no trailing slash, and no
+    // other six-hex id rides in on them.
+    "/d/",
+    "/d/a2e912/",
+    "/d/a2e912x",
+    "/d/a2e91",
+    "/d/000000",
+    "/d",
+  ]) {
+    assert.equal(isPublicDocument(gated), false, `${gated} is not a public document`);
+  }
+  /* The two public sets are disjoint and stay that way: one is the landing
+     page's images, the other is documents, and neither answers for the other. */
+  for (const pub of APP_PUBLIC_DOCUMENT_PATHS) {
+    assert.equal(isApplicationPublic(pub), false, `${pub} is not a landing-page subresource`);
+  }
+  assert.equal(isPublicDocument("/assets/logo.png"), false, "an image is not a public document");
+});
+
 test("rendererHeaders is the renderer set: one CSP, no X-Frame-Options", () => {
   const headers = rendererHeaders(APP_ORIGIN);
   const names = headers.map(([name]) => name.toLowerCase());
@@ -188,6 +238,84 @@ test("withFirstPartyPageHeaders adds the page set only when no CSP is present", 
     "a response that already carries a CSP keeps its own",
   );
   assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no page X-Frame-Options");
+});
+
+test("documentHeaders is a built artifact's CSP: inline script and style, its fonts and its realtime stream", () => {
+  const headers = documentHeaders();
+  const csp = headers.find(([name]) => name === "Content-Security-Policy")[1];
+  assert.ok(csp.startsWith("default-src 'none'"), "still default-deny");
+  assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), "the artifact's inline <script> may run");
+  assert.ok(
+    csp.includes("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com"),
+    "its inline <style> may apply and its font stylesheet may load",
+  );
+  assert.ok(csp.includes("font-src https://fonts.gstatic.com"), "the font files it links may load");
+  assert.ok(csp.includes("connect-src 'self'"), "/api/edit and /api/realtime-token may be called");
+  assert.ok(csp.includes("img-src 'self' data:"), "an authored image may load");
+  assert.ok(csp.includes("form-action 'none'"), "a document posts with fetch, never a form");
+  assert.ok(csp.includes("frame-ancestors 'none'"), "a document is still unframable");
+  assert.ok(csp.includes("base-uri 'none'"));
+  assert.equal(headers.find(([name]) => name === "X-Frame-Options")[1], "DENY");
+  assert.equal(headers.find(([name]) => name === "X-Content-Type-Options")[1], "nosniff");
+  assert.equal(headers.find(([name]) => name === "Referrer-Policy")[1], "no-referrer");
+
+  /* The set a document must NOT be served under. `applicationHeaders` names no
+     script-src, style-src, font-src or connect-src, so each falls back to
+     'none' and the artifact renders as unstyled text with nothing running
+     (#235). Pinning the inequality means loosening documentHeaders back into
+     the API set fails here rather than only in the two gate assertions. */
+  const api = applicationHeaders().find(([name]) => name === "Content-Security-Policy")[1];
+  assert.notEqual(csp, api, "a document never takes the API header set's CSP");
+  for (const directive of ["script-src", "style-src", "font-src", "connect-src", "img-src"]) {
+    assert.ok(!api.includes(directive), `applicationHeaders still omits ${directive}`);
+  }
+});
+
+test("the document CSP names the realtime origin the document actually opens", () => {
+  /* `DOCUMENT_REALTIME_ORIGIN` is a third hand copy of a literal that lives in
+     the browser client the build inlines and in the Node module that mints the
+     client's token, neither of which the edge bundle can import. If the
+     realtime origin ever moves, this fails rather than leaving every document's
+     presence, comments and cursors silently blocked by connect-src. */
+  const csp = documentHeaders().find(([name]) => name === "Content-Security-Policy")[1];
+  const connect = /(^|; )connect-src ([^;]+)/.exec(csp)[2].split(" ");
+  const named = connect.filter((source) => source !== "'self'");
+  assert.equal(named.length, 1, "connect-src grants exactly one origin beyond same-origin");
+
+  for (const file of ["templates/base/realtime.js", "netlify/lib/realtime.mjs"]) {
+    const source = readFileSync(join(ROOT, file), "utf8");
+    const found = /ABLY_ORIGIN = "([^"]+)"/.exec(source);
+    assert.ok(found !== null, `${file} still declares ABLY_ORIGIN`);
+    assert.equal(found[1], named[0], `${file}'s realtime origin is the one the document CSP grants`);
+  }
+});
+
+test("withDocumentHeaders adds the document set only when no CSP is present", () => {
+  const bare = new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
+  withDocumentHeaders(bare);
+  assert.ok(
+    bare.headers.get("Content-Security-Policy").includes("script-src 'self' 'unsafe-inline'"),
+    "a bare document gains the document CSP",
+  );
+  assert.equal(bare.headers.get("X-Frame-Options"), "DENY");
+
+  const owned = new Response("x", {
+    headers: { "content-security-policy": "default-src 'none'; frame-ancestors 'none'" },
+  });
+  withDocumentHeaders(owned);
+  assert.equal(
+    owned.headers.get("Content-Security-Policy"),
+    "default-src 'none'; frame-ancestors 'none'",
+    "a response that already carries a CSP keeps its own",
+  );
+  assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no document X-Frame-Options");
+
+  /* The same unreadable-headers contract its siblings hold: it returns the
+     response rather than throwing out of the gate's answer path. */
+  const opaque = { get headers() { throw new Error("unreadable"); } };
+  assert.equal(withDocumentHeaders(opaque), opaque, "an unreadable response is returned untouched");
+  const wrong = { headers: { set() { throw new Error("must not be called"); } } };
+  assert.equal(withDocumentHeaders(wrong), wrong, "a non-Headers headers object is left alone");
 });
 
 test("notFoundForeignHost is a bodyless 404 with noindex", async () => {
@@ -362,7 +490,7 @@ async function loadGate() {
 /** The cookie header a request carries unless a test says otherwise. */
 const SESSION_COOKIE_HEADER = "__Host-archon_session=opaque-session-token";
 
-async function runGate(host, path, { next, rewrite, env, session, cookie } = {}) {
+async function runGate(host, path, { next, rewrite, env, session, cookie, method } = {}) {
   const { gate } = await loadGate();
   control.identifyCalls = 0;
   control.resolveCalls = 0;
@@ -406,7 +534,7 @@ async function runGate(host, path, { next, rewrite, env, session, cookie } = {})
     const presented = cookie === undefined ? SESSION_COOKIE_HEADER : cookie;
     const response = await gate(
       new Request(`https://${host}${path}`, {
-        method: "GET",
+        method: method ?? "GET",
         headers: presented === null ? {} : { cookie: presented },
       }),
       context,
@@ -427,6 +555,9 @@ async function runGate(host, path, { next, rewrite, env, session, cookie } = {})
  * so this is 1 when a policy is present and 0 when none is -- which is the
  * "exactly one CSP" invariant the matrix asserts.
  */
+/** The header names `applicationHeaders()` owns, lowercased for comparison. */
+const applicationHeaderNames = new Set(applicationHeaders().map(([name]) => name.toLowerCase()));
+
 function cspCount(response) {
   return [...response.headers].filter(([name]) => name.toLowerCase() === "content-security-policy").length;
 }
@@ -615,8 +746,169 @@ test("application host session-checks a collaboration slug and serves a readable
   assert.equal(control.identifyCalls, 1, "the slug path performs the session lookup");
   assert.equal(control.resolveCalls, 1, "and resolves the role");
   assert.equal(await response.text(), PAGE, "the whole document is replayed");
-  assert.equal(cspCount(response), 1, "with exactly one application CSP");
+  assert.equal(cspCount(response), 1, "with exactly one CSP");
   assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
+  /* A granted reader's copy is a built artifact too, so it takes the document
+     set rather than the `default-src 'none'` application set that blocks its
+     own inline style and script (#235). Asserting the exact set here and the
+     identical one on the public branch above is what pins the property that a
+     document's policy does not depend on who asked for it. */
+  assert.deepEqual(
+    [...response.headers].filter(([name]) => applicationHeaderNames.has(name.toLowerCase())).sort(),
+    documentHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
+    "a gated document gets exactly the document header set",
+  );
+});
+
+test("the built reference documents are served to an anonymous visitor with no session check", async (t) => {
+  /* The acceptance property of #232: each public reference route answers 200
+     with the built document body to a visitor carrying no session cookie -- no
+     303 to /login/, no 403 "You do not have access to this document". If the
+     public-document passlist is removed these assertions fail loudly, because
+     the path falls straight back to `sessionGate` and an anonymous request
+     there is a redirect. */
+  for (const path of APP_PUBLIC_DOCUMENT_PATHS) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      next: () => docPage(),
+    });
+    assert.equal(response.status, 200, `${path} is served, not a redirect or a refusal`);
+    assert.equal(calls.next, 1, `${path} is fetched downstream exactly once`);
+    assert.equal(response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(await response.text(), PAGE, `${path} replays the whole built document`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
+    assert.equal(cspCount(response), 1, `${path} carries exactly one CSP`);
+    /* The exact policy, not merely "some CSP with frame-ancestors". The
+       application set, the first-party page set and the document set all
+       satisfy a looser assertion, so a looser one would stay green if the
+       public branch fell through to `finalizePassThrough` -- which is the
+       single line the comment beside it argues hardest for -- or if it kept the
+       `default-src 'none'` application set that renders the artifact unstyled
+       and inert (#235). */
+    assert.deepEqual(
+      [...response.headers].filter(([name]) => applicationHeaderNames.has(name.toLowerCase())).sort(),
+      documentHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
+      `${path} gets exactly the document header set`,
+    );
+    assert.equal(response.headers.get("Set-Cookie"), null, `${path} carries no Set-Cookie`);
+  }
+
+  /* A public document's `doc-id` is never even read, so its answer cannot
+     depend on an access row. Presenting a session changes nothing about what
+     comes back, which is what makes it a publication rather than a grant. */
+  const withSession = await runGate(APP_HOST, "/example/", { next: () => docPage() });
+  assert.equal(withSession.response.status, 200, "a signed-in visitor gets the same answer");
+  assert.equal(control.identifyCalls, 0, "whose session is not even resolved");
+  assert.equal(control.resolveCalls, 0, "and still no role is resolved");
+  t.diagnostic(`public reference routes: ${APP_PUBLIC_DOCUMENT_PATHS.join(" ")}`);
+});
+
+test("a public document's permanent link, HEAD and query spellings are public too", async () => {
+  /* `/d/<id>` is served by a `_redirects` 301 rather than a document body, and
+     the gate answers before `_redirects` does -- so without the route on the
+     list an anonymous visitor following the permanent link the document prints
+     in its own masthead gets a sign-in redirect that has already thrown the
+     destination away. It relays the redirect untouched instead. */
+  const moved = await runGate(APP_HOST, "/d/a2e912", {
+    cookie: null,
+    next: () => new Response(null, { status: 301, headers: { location: "/example/" } }),
+  });
+  assert.equal(moved.response.status, 301, "the permanent link relays its redirect");
+  assert.equal(moved.response.headers.get("Location"), "/example/");
+  assert.equal(control.identifyCalls, 0, "and is never session-checked");
+
+  // A query string is not part of `pathname`, so it neither publishes nor gates.
+  const queried = await runGate(APP_HOST, "/example/?utm_source=x", {
+    cookie: null,
+    next: () => docPage(),
+  });
+  assert.equal(queried.response.status, 200, "a query string does not gate a public document");
+  assert.equal(control.identifyCalls, 0, "and does not provoke a session check");
+
+  /* HEAD goes downstream as HEAD. The gated path has to re-issue it as a GET to
+     read the `doc-id` line and then discard the body; a public document is
+     never read, so the cheaper method survives. */
+  const headed = await runGate(APP_HOST, "/example/", {
+    cookie: null,
+    method: "HEAD",
+    next: (request) => {
+      assert.equal(request, undefined, "HEAD is not rewritten into a GET for a public document");
+      return new Response(null, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    },
+  });
+  assert.equal(headed.response.status, 200, "HEAD on a public document is answered");
+  assert.equal(control.identifyCalls, 0, "without a session check");
+});
+
+test("a public document never relays a Set-Cookie to the anonymous caller", async () => {
+  /* Nothing that answers these routes has a session to establish today, but this
+     is the one branch whose answer goes back to a caller the gate never
+     identified -- and the site labels responses `Cache-Control: public`. A
+     cookie escaping here would be handed to whoever asked and possibly stored
+     for the next asker, so the branch drops it unconditionally. */
+  const { response } = await runGate(APP_HOST, "/example/", {
+    cookie: null,
+    next: () =>
+      new Response(PAGE, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "set-cookie": "__Host-archon_session=leaked; Path=/; Secure; HttpOnly",
+        },
+      }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Set-Cookie"), null, "the cookie is dropped, not relayed");
+  assert.equal(await response.text(), PAGE, "and the document itself is untouched");
+});
+
+test("a near miss of a public reference route is still gated", async () => {
+  /* The public set is matched by exact full path, so every path that merely
+     shares a prefix with one stays in the session gate. `example-thing` is a
+     slug `SLUG_RE` admits, which is exactly the future collaboration document a
+     prefix match would have published by accident. */
+  for (const [path, location] of [
+    ["/example-thing/", "/login/?destination=%2Fexample-thing%2F"],
+    ["/components-v2/", "/login/?destination=%2Fcomponents-v2%2F"],
+    ["/how-archon-works-2/", "/login/?destination=%2Fhow-archon-works-2%2F"],
+  ]) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${path} is not public`);
+    assert.equal(response.headers.get("Location"), location);
+    assert.equal(calls.next, 0, `${path} is refused before anything is fetched`);
+  }
+
+  /* Without its trailing slash `/example` is not the document's route and not a
+     destination ACN-005's grammar accepts, so it is the bare sign-in page. */
+  const bare = await runGate(APP_HOST, "/example", {
+    cookie: null,
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+  });
+  assert.equal(bare.response.status, 303, "/example is not the public /example/");
+  assert.equal(bare.response.headers.get("Location"), "/login/");
+});
+
+test("a signed-in visitor with no grant on a private document still gets the refusal", async (t) => {
+  /* The other half of the acceptance: widening the public set must not weaken
+     the gated one. A document outside the public set is still read for its
+     `doc-id`, still resolved, and still refused when the role cannot read. */
+  const original = control.resolveRole;
+  control.resolveRole = function refuse() {
+    this.resolveCalls += 1;
+    return { role: "none", canRead: false };
+  };
+  t.after(() => {
+    control.resolveRole = original;
+  });
+
+  const { response } = await runGate(APP_HOST, "/private-doc/", { next: () => docPage() });
+  assert.equal(response.status, 403, "a role that cannot read is refused");
+  assert.equal(await response.text(), "You do not have access to this document.");
+  assert.equal(control.resolveCalls, 1, "the private document's role is resolved");
 });
 
 /* --- the connect-consumer fallback ---------------------------------------- */

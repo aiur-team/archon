@@ -2,6 +2,7 @@
   "id": "a2e912",
   "slug": "example",
   "aliases": [],
+  "public": true,
   "title": "Remote Build Cache",
   "eyebrow": "Example document · Architecture docs",
   "status": "Worked example",

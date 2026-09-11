@@ -1,6 +1,6 @@
 /**
- * Host classification, the refusal matrix and the two security header sets for
- * the one Archon site.
+ * Host classification, the refusal matrix and the security header sets for the
+ * one Archon site.
  *
  * This is the single authority on which hostname the site is answering on and
  * what security headers each answer carries. `gate.ts` imports it and applies
@@ -102,6 +102,71 @@ const APP_PUBLIC_PATHS = Object.freeze([
 
 /** The one public tree: the homepage's images, which land at `_site/assets/`. */
 const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
+
+/**
+ * The built reference documents, served to anybody with no session check.
+ *
+ * These are the documents this repository composes from its own committed
+ * `doc.json` files. They are the product's documentation, so an anonymous
+ * visitor reads them without signing in, while every other document stays
+ * behind the session and access gate exactly as before. They are a separate set
+ * from `APP_PUBLIC_PATHS` above deliberately: that one is the landing page's
+ * own subresources and reaches no document at all, and merging the two would
+ * hide a document route inside a list a reader scans for images.
+ *
+ * Two properties make it safe to publish a document this way, and both are
+ * load-bearing:
+ *
+ *   * **Exact full paths, never prefixes.** These are not a namespace the site
+ *     owns outright: `/example/` is one document among a namespace of sibling
+ *     documents, and `SLUG_RE` in `templates/docbuild/src/site.ts` admits
+ *     `example-thing`. A prefix match would silently publish every future slug
+ *     beginning with a published one -- the same defect `APP_PASS_THROUGH_PATHS`
+ *     above exists to avoid for `/admin`. Membership is equality.
+ *   * **The list is closed, and the repo-backed build holds it equal.** A route
+ *     may only appear here when the document that owns it declares
+ *     `"public": true` in its `doc.json`, and `preflightPublicRoutes` in
+ *     `templates/docbuild/src/site.ts` fails the build when the two sets differ
+ *     in either direction. So a reference document that is renamed, deleted or
+ *     made private cannot leave a stale entry behind for a later document to
+ *     inherit, and a list that is both the input and the check never drifts in
+ *     silence.
+ *
+ *     That equality is a property of the `templates/build --site` build rather
+ *     than of every deploy of this file, and the difference is worth naming
+ *     instead of glossing. `scripts/connect.mjs` copies `netlify/` verbatim and
+ *     deploys with `--no-build`, so a connected site carries this list with the
+ *     preflight never having run. Nothing leaks there: that site's publish tree
+ *     is a single `index.html` at the root, so each of these routes is an
+ *     anonymous 404, and its one document is already public at `/` by the
+ *     design of standalone mode. But a connected tree that ever gained a file
+ *     under one of these names would serve it with no session check and no
+ *     build to object -- see #239.
+ *
+ * A document is reachable by more than its slug directory, so the set names
+ * every route the build emits for it: `/<slug>/` and the permanent `/d/<id>`
+ * link, plus both spellings of each prior slug when a document has aliases. The
+ * permanent link is the one `templates/README.md` tells an author to share
+ * because it survives a rename, and a publication whose permanent link answers
+ * with a sign-in redirect is not published. The bare `/<slug>` is deliberately
+ * absent: it is a near miss rather than a route the build emits.
+ *
+ * It cannot be derived at runtime instead: the deploy tree the connect tool
+ * copies is `netlify/`, `netlify.toml` and the lockfiles, so no `doc.json` is
+ * present on the edge. This is the edge's copy of a fact the build owns, and
+ * the preflight is what keeps the copy honest -- it holds this list equal to
+ * the declaring documents *and* exercises `isPublicDocument` against the real
+ * inventory, so loosening the matcher without touching the list fails the build
+ * too.
+ */
+export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze([
+  "/components/",
+  "/d/3c7f1a",
+  "/d/52c164",
+  "/d/a2e912",
+  "/example/",
+  "/how-archon-works/",
+]);
 
 
 /**
@@ -262,6 +327,21 @@ export function isApplicationPassThrough(pathname) {
 export function isApplicationPublic(pathname) {
   if (APP_PUBLIC_PATHS.includes(pathname)) return true;
   return APP_PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/**
+ * Whether an application-host path is one of the built reference documents,
+ * served with no session check.
+ *
+ * Exact membership of `APP_PUBLIC_DOCUMENT_PATHS` and nothing else: no prefix,
+ * no normalization, no trailing-slash tolerance. `/example` and
+ * `/example-thing/` are both false, and each stays gated.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isPublicDocument(pathname) {
+  return APP_PUBLIC_DOCUMENT_PATHS.includes(pathname);
 }
 
 /**
@@ -469,6 +549,98 @@ export function withLandingPageHeaders(response) {
   if (!(headers instanceof Headers)) return response;
   if (headers.has("Content-Security-Policy")) return response;
   for (const [name, value] of landingPageHeaders()) headers.set(name, value);
+  return response;
+}
+
+/**
+ * The realtime origin a built document opens its event stream against. It is
+ * the same literal as `ABLY_ORIGIN` in `templates/base/realtime.js` -- the
+ * client the document embeds -- and in `netlify/lib/realtime.mjs`, which mints
+ * the token that stream carries. It cannot be imported from either: the first
+ * is browser source the build inlines into the artifact, and the second is a
+ * Node function module the edge bundle does not carry. A test asserts this
+ * copy equals both, so a move of the realtime origin cannot silently leave the
+ * document CSP naming the old one and every document's presence dark.
+ */
+const DOCUMENT_REALTIME_ORIGIN = "https://main.realtime.ably.net";
+
+/**
+ * The header set for a built document the application host serves -- the answer
+ * to a document route, whether the reader was granted access or the document
+ * published itself public.
+ *
+ * A built document cannot take the `applicationHeaders` set for the same reason
+ * the sign-in page could not (#228): that set is `default-src 'none'` naming no
+ * `script-src`, `style-src`, `font-src` or `connect-src`, so each falls back to
+ * `'none'`. A document is one self-contained HTML file whose styling and whose
+ * whole runtime -- the anchor core, the enhancer, comments, presence, inline
+ * editing -- are inline `<style>` and inline `<script>`. Under the application
+ * set the page renders as unstyled text and none of it runs.
+ *
+ * The grants are exactly what a built artifact uses and nothing more:
+ *
+ * - `script-src`/`style-src` carry `'unsafe-inline'` because the artifact is
+ *   inline by construction; `'self'` covers a same-origin file a future build
+ *   links rather than inlines.
+ * - The two Google Font origins, because the artifact links JetBrains Mono.
+ * - `connect-src` is `'self'` for `/api/edit`, `/api/realtime-token` and the
+ *   session projection, plus the realtime origin its `EventSource` opens.
+ * - `img-src 'self' data:` for an authored image; the artifact draws its own
+ *   marks as inline `<svg>`, which CSP does not govern.
+ *
+ * `form-action` stays `'none'`: a document posts with `fetch`, never a form.
+ * The framing and base-uri denials and the same `X-Frame-Options`, `nosniff`
+ * and referrer policy are identical to `applicationHeaders`, so a document is
+ * no more exposed than an API answer in any respect but the directives it must
+ * have to work.
+ *
+ * One set serves both the gated and the public answer deliberately. Publishing
+ * a document changes the session check and nothing else about the bytes or the
+ * policy they arrive under, so a document cannot render differently depending
+ * on who asked for it.
+ *
+ * @returns {Array<[string, string]>}
+ */
+export function documentHeaders() {
+  const csp = [
+    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    `connect-src 'self' ${DOCUMENT_REALTIME_ORIGIN}`,
+    "img-src 'self' data:",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+  return [
+    ["Content-Security-Policy", csp],
+    ["X-Frame-Options", "DENY"],
+    ["X-Content-Type-Options", "nosniff"],
+    ["Referrer-Policy", "no-referrer"],
+  ];
+}
+
+/**
+ * Apply the document header set to a response, but only when it carries no
+ * `Content-Security-Policy` of its own. Returns the same response instance,
+ * mutated in place, exactly as its siblings do; the caller decides a response
+ * is a built document before calling this.
+ *
+ * @param {Response} response
+ * @returns {Response}
+ */
+export function withDocumentHeaders(response) {
+  let headers;
+  try {
+    headers = response.headers;
+  } catch {
+    return response;
+  }
+  if (!(headers instanceof Headers)) return response;
+  if (headers.has("Content-Security-Policy")) return response;
+  for (const [name, value] of documentHeaders()) headers.set(name, value);
   return response;
 }
 

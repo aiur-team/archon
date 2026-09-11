@@ -2,6 +2,7 @@
   "id": "52c164",
   "slug": "components",
   "aliases": [],
+  "public": true,
   "title": "Artifact Component Reference",
   "eyebrow": "Architecture docs · Template",
   "status": "Living reference",
