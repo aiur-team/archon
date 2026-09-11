@@ -358,6 +358,60 @@ export function withFirstPartyPageHeaders(response) {
 }
 
 /**
+ * Header set for the public landing page at the application host's bare root
+ * (`site/index.html`). Unlike the sign-in page, the landing page is a marketing
+ * document: it pulls Google Fonts and runs small inline scripts (copy button,
+ * entrance animation, dismissible banner). It holds no session, no credential
+ * form and no user data, so it may take a looser CSP than firstPartyPageHeaders
+ * -- the framing and base-uri denials and the same security headers still hold.
+ * The extra grants are exactly what this one static page needs: inline script,
+ * the two Google Font origins, and same-origin images.
+ *
+ * @returns {Array<[string, string]>}
+ */
+export function landingPageHeaders() {
+  const csp = [
+    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+  return [
+    ["Content-Security-Policy", csp],
+    ["X-Frame-Options", "DENY"],
+    ["X-Content-Type-Options", "nosniff"],
+    ["Referrer-Policy", "no-referrer"],
+  ];
+}
+
+/**
+ * Apply the landing header set to a response, only when it carries no CSP of its
+ * own. Same in-place contract as its siblings; the caller decides a response is
+ * the public root before calling this.
+ *
+ * @param {Response} response
+ * @returns {Response}
+ */
+export function withLandingPageHeaders(response) {
+  let headers;
+  try {
+    headers = response.headers;
+  } catch {
+    return response;
+  }
+  if (!(headers instanceof Headers)) return response;
+  if (headers.has("Content-Security-Policy")) return response;
+  for (const [name, value] of landingPageHeaders()) headers.set(name, value);
+  return response;
+}
+
+/**
  * The refusal a hostname that is neither the application nor the renderer host
  * gets: 404, no body, and `X-Robots-Tag: noindex` so a deploy preview that runs
  * the production functions is never indexed. Answered before any store read.

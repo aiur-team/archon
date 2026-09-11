@@ -564,6 +564,49 @@ test("a static HTML page pass-through gets the page CSP; an API/JSON one keeps t
   );
 });
 
+test("the application-host root serves the public splash to an anonymous visitor, while a deeper path still redirects to sign in", async () => {
+  // The bare root is public: an anonymous visitor (no session cookie) is served
+  // the splash with no session check, not the sign-in redirect.
+  const root = await runGate(APP_HOST, "/", { cookie: null, next: () => staticPage() });
+  assert.equal(root.response.status, 200, "the splash is served, not a redirect");
+  assert.equal(root.calls.next, 1, "the static splash is fetched downstream");
+  assert.equal(root.response.headers.get("Location"), null, "the root is never a redirect");
+  assert.equal(control.identifyCalls, 0, "the root is never session-checked");
+  assert.equal(control.resolveCalls, 0, "and no role is resolved for the public root");
+  assert.equal(cspCount(root.response), 1, "the splash gains exactly one application CSP");
+  assert.ok(
+    root.response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"),
+    "the splash gains the application header set",
+  );
+  // The root is the public landing page, not an app answer or a first-party
+  // form page: its CSP admits the splash's inline scripts and Google Fonts,
+  // which the strict app CSP and the sign-in page CSP both refuse.
+  {
+    const csp = root.response.headers.get("Content-Security-Policy");
+    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), "the landing page may run its inline scripts");
+    assert.ok(csp.includes("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com"), "the landing page may load the Google Fonts stylesheet");
+    assert.ok(csp.includes("font-src https://fonts.gstatic.com"), "the landing page may load the font files");
+    assert.ok(csp.includes("frame-ancestors 'none'"), "the landing page is still frame-denied");
+    assert.equal(root.response.headers.get("X-Frame-Options"), "DENY", "and still X-Frame-Options DENY");
+  }
+  // The sign-in page, a deeper first-party HTML page, keeps the stricter page
+  // CSP -- no inline script, no font origins -- so the loose set is the root's
+  // alone.
+  {
+    const login = await runGate(APP_HOST, "/login/", { next: () => staticPage() });
+    const csp = login.response.headers.get("Content-Security-Policy");
+    assert.ok(/(^|; )script-src 'self'(;|$)/.test(csp), "the sign-in page gets no inline-script grant");
+    assert.ok(!csp.includes("fonts.googleapis.com"), "and no Google Font origins");
+  }
+
+  // Only the exact root is public: a deeper path with no session still redirects.
+  const gated = await runGate(APP_HOST, "/some-slug/", {
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+  });
+  assert.equal(gated.response.status, 303, "a deeper path stays gated");
+  assert.equal(gated.response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+});
+
 test("application host session-checks a collaboration slug and serves a readable document", async () => {
   const { response, calls } = await runGate(APP_HOST, "/some-slug/", { next: () => docPage() });
   assert.equal(response.status, 200);
@@ -579,10 +622,11 @@ test("application host session-checks a collaboration slug and serves a readable
 
 test("with neither origin configured every host reaches the application branch", async () => {
   for (const host of [APP_HOST, RENDER_HOST, OTHER_HOST]) {
-    // The homepage and a slug both reach the session path when unconfigured.
-    const home = await runGate(host, "/", { env: {}, next: () => docPage() });
+    // The homepage is the public splash on every host; a slug reaches the
+    // session path. Both prove the unconfigured request reaches the app branch.
+    const home = await runGate(host, "/", { env: {}, next: () => staticPage() });
     assert.equal(home.response.status, 200, `${host} / reaches the application branch`);
-    assert.equal(control.identifyCalls, 1, `${host} / is session-checked`);
+    assert.equal(control.identifyCalls, 0, `${host} / is the public splash, not session-checked`);
 
     const slug = await runGate(host, "/a-slug/", { env: {}, next: () => docPage() });
     assert.equal(slug.response.status, 200, `${host} /a-slug/ reaches the application branch`);
@@ -651,7 +695,7 @@ test("a visitor with no session is redirected to the one sign-in page with a des
 test("the redirect destination is only ever one ACN-005's grammar accepts", async () => {
   // Every path here is gated -- none is a pass-through -- and none is a bare
   // collaboration slug, so none may be offered back as a destination.
-  for (const path of ["/some-slug/deeper/", "/some-slug", "/Some-Slug/", "/", "/a_b/"]) {
+  for (const path of ["/some-slug/deeper/", "/some-slug", "/Some-Slug/", "/a_b/"]) {
     const { response } = await runGate(APP_HOST, path, {
       session: () => sessionResponse({ v: 1, authenticated: false }),
     });

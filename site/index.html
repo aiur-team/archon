@@ -297,6 +297,36 @@
 </style>
 </head>
 <body>
+  <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start" style="position:fixed;top:1rem;right:1.25rem;z-index:30;margin:0">
+    <input type="hidden" name="destination" value="/publish/authorize">
+    <button id="siteSigninBtn" type="submit" disabled style="cursor:pointer;font:500 .95rem/1 'Space Grotesk',system-ui,sans-serif;color:var(--accent);border:1px solid var(--pill-bd);background:var(--bg);padding:.55rem 1rem;border-radius:999px">Sign in</button>
+  </form>
+  <script>
+  (() => {
+    "use strict";
+    const form = document.getElementById("siteSignin");
+    const btn = document.getElementById("siteSigninBtn");
+    let ready = false;
+    async function boot() {
+      ready = false;
+      btn.disabled = true;
+      try {
+        const r = await fetch("/api/hosted/session", { credentials: "same-origin", headers: { accept: "application/json" } });
+        if (!r.ok) throw new Error("unavailable");
+        await r.json();
+      } catch {
+        btn.textContent = "Sign in — retry";
+        btn.disabled = false;
+        return;
+      }
+      ready = true;
+      btn.textContent = "Sign in";
+      btn.disabled = false;
+    }
+    form.addEventListener("submit", (e) => { if (!ready) { e.preventDefault(); boot(); } });
+    boot();
+  })();
+  </script>
   <aside class="banner" id="aiur-banner" hidden>
     <span><b>Introducing Aiur:</b> AI Unit Runtime for Executors</span>
     <a href="https://aiur.team">Learn More</a>

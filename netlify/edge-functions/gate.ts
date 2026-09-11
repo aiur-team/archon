@@ -15,6 +15,7 @@ import {
   rendererRewriteTarget,
   withApplicationHeaders,
   withFirstPartyPageHeaders,
+  withLandingPageHeaders,
 } from "../lib/edge-host.mjs";
 
 type GateContext = {
@@ -38,6 +39,14 @@ const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
 
 /** The route the gate asks who a request is. Outside the gate's own gated set. */
 const SESSION_ROUTE = "/api/hosted/session";
+
+/**
+ * The application-host root. It serves the public splash at
+ * `netlify/public/index.html` with no session check, so an anonymous visitor
+ * sees the landing page rather than a redirect to sign in. It is matched
+ * exactly and only -- never as a prefix -- so no other path is made public.
+ */
+const PUBLIC_ROOT = "/";
 
 /**
  * The session cookie's name, restated for one question: is there anything to ask
@@ -384,8 +393,13 @@ async function applicationHost(
      the gate runs on every path: passed through with no session check. A
      function response keeps its own headers; a static one gains the set. The
      gate's own `/api/hosted/session` subrequest is one of these, so it cannot
-     recurse into the session logic. */
-  if (isApplicationPassThrough(url.pathname)) {
+     recurse into the session logic.
+
+     The bare root is public too: it serves the splash at
+     `netlify/public/index.html` through the same pass-through, so an anonymous
+     visitor lands on the splash rather than the sign-in redirect. Only the exact
+     root is public; every deeper path stays gated. */
+  if (url.pathname === PUBLIC_ROOT || isApplicationPassThrough(url.pathname)) {
     let passed: Response;
     try {
       passed = await context.next();
@@ -394,7 +408,9 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    return finalizePassThrough(passed);
+    return url.pathname === PUBLIC_ROOT
+      ? withLandingPageHeaders(passed)
+      : finalizePassThrough(passed);
   }
 
   return withApplicationHeaders(await sessionGate(req, url, context, env));
