@@ -984,6 +984,27 @@ async function assertContractParity(rendererModule) {
     assert.throws(() => build.rendererHeaders(value), /header-safe/, `the build accepted ${JSON.stringify(value)}`);
   }
 
+  /* The headers are not the only build-owned knowledge the gate keeps a copy of.
+     `RENDERER_SHELL` is the gate's list of what the renderer hostname serves,
+     and the build owns what it actually publishes -- so a file added to the
+     build and not to the gate is a file the deployed hostname 404s while the
+     build's own output check, the renderer oracle and the header parity above
+     all stay green. The live runner's L0c probe iterates `RENDERER_SHELL` as its
+     authority, so it would not catch it either: it would ask for the four paths
+     the gate still knows and find them all served.
+
+     Asserted as the derivable relation rather than as a literal list, so adding
+     a file to the build is not also an invitation to write it down twice. */
+  const published = [...build.STATIC_FILES, ...build.GENERATED_FILES];
+  const expectedShell = Object.fromEntries(
+    published.map((name) => [name === "index.html" ? "/" : `/${name}`, `${edgeHost.RENDER_PREFIX}${name}`]),
+  );
+  assert.deepEqual(
+    { ...edgeHost.RENDERER_SHELL },
+    expectedShell,
+    "the gate's renderer shell list and what the build publishes have drifted apart",
+  );
+
   /* The one deliberate difference, asserted so it stays deliberate. The
      public-suffix rule belongs to `netlify/lib/hosted/config.mjs`, which owns the list
      through a pinned dependency and refuses to start the application when the

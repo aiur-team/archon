@@ -51,13 +51,13 @@ that is under test.
 | --- | --- |
 | `HOSTED_LIVE_APP_ORIGIN` | The application hostname — the site's primary custom domain. Exact HTTPS origin, no path. |
 | `HOSTED_LIVE_RENDER_ORIGIN` | The renderer hostname — the site's own `<name>.netlify.app` name. Must be a **different registrable site** from the app, not a sibling subdomain. |
-| `HOSTED_LIVE_FOREIGN_ORIGIN` | A **third** hostname that routes to this same deployment and must be refused. The deploy permalink `https://<deploy-id>--<site-name>.netlify.app` is always one. |
+| `HOSTED_LIVE_FOREIGN_ORIGIN` | A **third** hostname that routes to this same deployment and must be refused. Use the deploy permalink `https://<deploy-id>--<site-name>.netlify.app`: it is the one hostname that is provably routed here, and L0c reads the gate's own refusal signature (`noindex`, `private, no-store`, empty body) to tell a real refusal from a stranger's 404. |
 | `HOSTED_LIVE_AUTH0_DOMAIN` | The tenant, as a bare host — `your-tenant.us.auth0.com` or your custom domain. No scheme, port or path. Recorded only as a digest. |
 | `HOSTED_LIVE_AUTH0_CLIENT_ID` | The dedicated Auth0 application's client id. Recorded only as a digest. |
 | `HOSTED_LIVE_AUTH0_CALLBACK` | The callback URL registered on that application. Must equal `<app origin>/api/hosted/auth/callback` exactly. |
 | `HOSTED_LIVE_ACCOUNTS` | Two comma-separated opaque labels for the two test identities, e.g. `pilot-owner,pilot-other`. Never a login or an address. |
 | `HOSTED_LIVE_DOMAIN_ADMITTED` | The domain the test document's owner list admits. A domain, never an address; a public mailbox provider is refused. |
-| `HOSTED_LIVE_DOMAIN_REFUSED` | A different domain that list does **not** admit, used for L19's refusal half. |
+| `HOSTED_LIVE_DOMAIN_REFUSED` | A different domain that list does **not** admit, used for L19's refusal half. A public mailbox provider is fine here — it is the reader a domain list exists to exclude. |
 | `HOSTED_LIVE_PACKAGE` | The exact `name@version` under test. Not a tag, not a range. |
 | `HOSTED_LIVE_PACKAGE_INTEGRITY` | The `sha512-…` integrity of that exact tarball. |
 | `HOSTED_LIVE_PACKAGE_SOURCE` | An HTTPS URL a consumer without repository access can fetch. A `file:` path or local `npm pack` output is refused. |
@@ -129,8 +129,8 @@ got to is `blocked`.
 The table is #176's live assertions one for one, plus the ones the single-site
 topology added: L0, L0b and L0c for the two hostnames and the third, L4a, L4b and
 L4c for the Auth0 round trip, and L19 for the domain gate. Row ids were **not**
-renumbered when those were inserted, because the committed evidence files already
-refer to the existing rows by id. Several of these assertions are
+renumbered when those were inserted, because the committed AHU-013 evidence
+report already refers to the existing rows by id. Several of these assertions are
 one person's session at a browser rather than three separate runs, so a row may
 fold more than one; where it does, the **sub-assertions are listed in the row and
 carried in the runner's `covers` field**, and each of them needs its own recorded
@@ -159,17 +159,23 @@ acceptance guarantee. The runner is the authority for it.
 
 ### L0 — the renderer hostname answers on its own name (probe)
 
-`GET <render>/` answers **200**, not a 3xx to the primary domain. Netlify does not
+`GET <render>/` answers **200** with the renderer shell's own
+`Content-Security-Policy`, not a 3xx to the primary domain. Netlify does not
 redirect a site's `*.netlify.app` name by default, and that non-redirect is the
 renderer hostname's whole basis. A redirect here is a **failed gate**: stop, do
 not record the later rows, and escalate — the topology needs an operator decision
 before any of this procedure is valid.
 
+The policy is checked as well as the status because a 200 alone does not prove
+the *shell* answered: a deployment that lost `HOSTED_RENDER_ORIGIN` classifies
+every hostname as the application and would serve the app here, cheerfully, with
+a 200.
+
 ### L0b — the renderer hostname is cookie-free (probe)
 
 The probe asks `<render>/` twice, once carrying a `__Host-archon_session` cookie
-value that is not a session. Both answers must be identical and neither may carry
-a `Set-Cookie`. A hostname whose answer varies on a cookie is reading a
+value that is not a session. Both answers must be identical and neither of those
+two may carry a `Set-Cookie`. A hostname whose answer varies on a cookie is reading a
 credential on the origin that frames hostile HTML. (That a browser never *sends*
 the application's `__Host-` cookie to this hostname is the two-registrable-sites
 property G2 refuses to start without, plus the cookie's own prefix; L4 records
@@ -183,11 +189,16 @@ authority on which hostname serves what:
 - every renderer shell path answers 200 on `<render>`, and one with a query
   string does not;
 - `<render>` refuses an application path — `/api/hosted/session`, `/docs/<id>` —
-  with a bodyless 404 and no `Set-Cookie`;
+  with a bodyless 404, no `Set-Cookie`, and `Cache-Control: private, no-store`;
 - `<app>` refuses the internal `/_render/` prefix, so artifact HTML is never a
   first-party page on the account origin;
 - `<foreign>` — the third hostname — is a bodyless 404 carrying
-  `X-Robots-Tag: noindex`.
+  `X-Robots-Tag: noindex` and `Cache-Control: private, no-store`.
+
+The body and `private, no-store` are checked, not just the status. A 404 that
+renders something is a body on the origin that frames hostile HTML, and a
+hostname that is simply not routed here also answers 404 — the gate's refusal
+signature is what distinguishes a refusal it made from one it never saw.
 
 A hostname serving something it must not is a failure, whichever direction it
 goes in.

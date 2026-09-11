@@ -23,6 +23,7 @@ import {
   CALLBACK_PATH,
   LIVE_ENV_KEYS,
   LIVE_GUARANTEES,
+  PLACEHOLDER_CLIENT_SECRET,
   PROBE_AUTHORISATION,
   buildManifest,
   evaluatePreflight,
@@ -33,7 +34,8 @@ import {
   probeDeployment,
 } from "./test-hosted-live.mjs";
 
-import { RENDERER_SHELL, RENDER_PREFIX, rendererHeaders } from "../netlify/lib/edge-host.mjs";
+import { RENDERER_SHELL, RENDER_PREFIX, isRenderPrefix, rendererHeaders } from "../netlify/lib/edge-host.mjs";
+import { readHostedConfig } from "../netlify/lib/hosted/config.mjs";
 
 const APP = "https://app.example.com";
 /* The renderer origin is the deployed shape -- the site's own `*.netlify.app`
@@ -236,6 +238,26 @@ test("the gate never asks an operator for the runner's own placeholder secret", 
   for (const entry of result.items) {
     assert.doesNotMatch(entry.detail, /AUTH0_CLIENT_SECRET/, `${entry.id} sends the operator looking for a secret`);
   }
+
+  /* The assertion above only proves the happy path says nothing about a secret,
+     which it would even with the branch that handles the case deleted. The
+     branch exists for one condition -- the reader tightening its client-secret
+     rule until this file's placeholder stops satisfying it -- so the thing to
+     assert is that condition directly: the placeholder must remain acceptable
+     to the reader, and the day it does not, this fails here rather than sending
+     an operator to hunt for a secret the runner refuses to accept. */
+  assert.doesNotThrow(
+    () =>
+      readHostedConfig({
+        HOSTED_APP_ORIGIN: APP,
+        HOSTED_RENDER_ORIGIN: RENDER,
+        AUTH0_DOMAIN: "archon-pilot.us.auth0.com",
+        AUTH0_CLIENT_ID: "exampleAuth0ClientId0000000000000",
+        AUTH0_CLIENT_SECRET: PLACEHOLDER_CLIENT_SECRET,
+        HOSTED_PUBLISH_ENABLED: "false",
+      }),
+    "the runner's placeholder no longer satisfies the deployed reader",
+  );
 });
 
 test("the third hostname must be supplied and must be neither served hostname", () => {
@@ -261,6 +283,15 @@ test("the domain pair is judged by the deployed evaluator, and an admit is not a
   const mailbox = evaluatePreflight(completeEnv({ HOSTED_LIVE_DOMAIN_ADMITTED: "gmail.com" }));
   assert.equal(mailbox.ok, false, "a public mailbox provider was accepted as an admitted domain");
   assert.equal(gate(mailbox, "G9").status, "blocked");
+
+  /* The same domain in the *refused* slot is the opposite case and must be
+     accepted. It is the most likely address a real test account has, and it is
+     exactly the reader a domain list exists to exclude, so refusing it here
+     would leave L19's refusal half testing a domain nobody signs in from. */
+  const refusedMailbox = evaluatePreflight(completeEnv({ HOSTED_LIVE_DOMAIN_REFUSED: "gmail.com" }));
+  assert.equal(gate(refusedMailbox, "G9").status, "met", "a public mailbox provider must be usable as the unlisted domain");
+  assert.equal(refusedMailbox.ok, true);
+  assert.equal(refusedMailbox.facts.refusedDomain, "gmail.com");
 
   for (const overrides of [
     { HOSTED_LIVE_DOMAIN_REFUSED: "pilot.example.com" },
@@ -387,6 +418,11 @@ function rendererRefusal() {
   return reply(null, { "cache-control": "private, no-store" }, 404);
 }
 
+/** The gate's bodyless, noindex 404 for a hostname it does not serve. */
+function foreignRefusal() {
+  return reply(null, { "x-robots-tag": "noindex", "cache-control": "private, no-store" }, 404);
+}
+
 /**
  * A deployment that answers every probe the way a correct one must.
  *
@@ -408,9 +444,7 @@ function healthyDeployment(overrides = {}) {
     if (origin === APP && overrides[path] !== undefined) return Promise.resolve(overrides[path].clone());
 
     /* A third hostname routed here is a bodyless 404 the crawlers skip. */
-    if (origin === FOREIGN) {
-      return Promise.resolve(reply(null, { "x-robots-tag": "noindex", "cache-control": "private, no-store" }, 404));
-    }
+    if (origin === FOREIGN) return Promise.resolve(foreignRefusal());
 
     if (origin === RENDER) {
       const shell = Object.prototype.hasOwnProperty.call(RENDERER_SHELL, path);
@@ -468,6 +502,12 @@ test("a renderer hostname that redirects to the primary domain fails loudly", as
        them would send the operator to retry a gate that will never pass. */
     assert.match(l0.detail, /and redirected/);
     assert.match(l0.detail, /stop and escalate/);
+
+    /* And L0b explains itself rather than surfacing the consequence of L0's
+       failure as a runner bug. Without its guard the comparison dereferences
+       null, and the operator reads "Cannot read properties of null" next to a
+       correct topology diagnosis. */
+    assert.match(result(results, "L0b").detail, /needs L0's response/);
   }
 });
 
@@ -480,6 +520,18 @@ test("a renderer hostname that answers anything but 200 fails the topology gate"
   /* And it is not reported as a redirect, which would be a different defect
      with a different fix. */
   assert.doesNotMatch(l0.detail, /redirected/);
+});
+
+test("a renderer hostname serving the application with a 200 fails L0", async () => {
+  /* The failure a status-only check misses: a deployment that lost
+     `HOSTED_RENDER_ORIGIN` classifies every host as "app", so the renderer
+     hostname answers 200 with the application. */
+  const fetchImpl = healthyDeployment({
+    [`${RENDER}/`]: reply("<!doctype html>the app", hostedHeaders({ "content-type": "text/html; charset=utf-8" })),
+  });
+  const results = await probeDeployment(FACTS, { fetchImpl, documentId: "probe0000" });
+  assert.equal(result(results, "L0").status, "fail");
+  assert.match(result(results, "L0").detail, /may be serving the application/);
 });
 
 /* ------------------------------------------------------------------ *
@@ -520,6 +572,42 @@ test("a renderer hostname that sets a cookie on a cookie-bearing request fails",
   assert.match(result(results, "L0b").detail, /set a cookie/);
 });
 
+test("a renderer hostname that varies only its headers on a cookie fails", async () => {
+  /* Same status, same bytes, a `Vary: Cookie` the cookie-free answer did not
+     carry. The hostname read the credential; a body-only comparison calls this
+     identical. */
+  let calls = 0;
+  const healthy = healthyDeployment();
+  const fetchImpl = (url, init) => {
+    if (new URL(url).origin === RENDER && new URL(url).pathname === "/") {
+      calls += 1;
+      if (calls === 2) {
+        return Promise.resolve(reply("<!doctype html>", generatedRendererHeaders({ vary: "Cookie" })));
+      }
+    }
+    return healthy(url, init);
+  };
+  const results = await probeDeployment(FACTS, { fetchImpl, documentId: "probe0000" });
+  assert.equal(result(results, "L0b").status, "fail");
+  assert.match(result(results, "L0b").detail, /headers changed when a cookie was supplied/);
+});
+
+test("both halves of the cookie comparison ask the origin, not a cache", async () => {
+  const seen = [];
+  const healthy = healthyDeployment();
+  const fetchImpl = (url, init) => {
+    if (new URL(url).origin === RENDER && new URL(url).pathname === "/") {
+      seen.push(init.headers["cache-control"] ?? null);
+    }
+    return healthy(url, init);
+  };
+  await probeDeployment(FACTS, { fetchImpl, documentId: "probe0000" });
+  assert.ok(seen.length >= 2, "L0 and L0b must each make a request");
+  for (const value of seen.slice(0, 2)) {
+    assert.equal(value, "no-cache", "a cached answer could stand in for the origin's");
+  }
+});
+
 test("the cookie-free probe actually sends a cookie, or it proves nothing", async () => {
   const seen = [];
   const healthy = healthyDeployment();
@@ -539,6 +627,16 @@ test("the cookie-free probe actually sends a cookie, or it proves nothing", asyn
 /* ------------------------------------------------------------------ *
  * L0c: the host refusal matrix.
  * ------------------------------------------------------------------ */
+
+test("the internal render prefix the probe asks about is one the gate refuses", () => {
+  /* L0c carries a self-consistency fault for this, but that fault is only
+     reachable when the invariant is already broken -- so it can never be driven
+     from a fixture, and a deleted `isRenderPrefix` check would look tested.
+     Asserted at the module instead, which is where the invariant lives. */
+  assert.ok(isRenderPrefix(`${RENDER_PREFIX}index.html`), "the gate does not refuse its own internal render prefix");
+  assert.ok(isRenderPrefix("/_render"));
+  assert.ok(!isRenderPrefix("/docs/abc"), "an ordinary application path must not read as internal");
+});
 
 test("each violation of the host refusal matrix fails the matrix probe", async () => {
   const violations = [
@@ -570,6 +668,21 @@ test("each violation of the host refusal matrix fails the matrix probe", async (
       "a third hostname refused but left indexable",
       { [`${FOREIGN}/`]: reply(null, { "cache-control": "private, no-store" }, 404) },
       /noindex/,
+    ],
+    [
+      "a renderer refusal that renders a body",
+      { [`${RENDER}/docs/probe0000`]: reply("<h1>Not found: probe0000</h1>", { "cache-control": "private, no-store" }, 404) },
+      /404 with a body/,
+    ],
+    [
+      "a renderer refusal that is not the gate's",
+      { [`${RENDER}/api/hosted/session`]: reply(null, { "cache-control": "public, max-age=60" }, 404) },
+      /not private, no-store/,
+    ],
+    [
+      "a third hostname whose 404 is a stranger's rather than the gate's",
+      { [`${FOREIGN}/`]: reply("not found", { "x-robots-tag": "noindex", "cache-control": "public, max-age=60" }, 404) },
+      /actually routed to this deployment/,
     ],
   ];
   for (const [label, overrides, expected] of violations) {
@@ -782,7 +895,7 @@ test("every live assertion the ticket names has a row that claims it", () => {
  * more: the single-site topology added gates *ahead* of the release-order table
  * (`L0`, `L0b`, `L0c`) and split one sign-in row into four (`L4`, `L4a`, `L4b`,
  * `L4c`), and renumbering the rest would have silently renamed every row an
- * operator and the two committed evidence files already refer to by id.
+ * operator and the committed AHU-013 evidence report already refers to by id.
  *
  * So the property is asserted as membership and order against this literal
  * instead of against a formula. That is stricter, not looser: a formula accepted
@@ -820,6 +933,21 @@ test("acceptance line ids are unique and are exactly the published table", () =>
   const ids = LIVE_GUARANTEES.map((guarantee) => guarantee.id);
   assert.equal(new Set(ids).size, ids.length, "an acceptance line id is used twice");
   assert.deepEqual(ids, [...ACCEPTANCE_LINE_IDS]);
+});
+
+test("gate items print in gate order, and would still with a tenth gate", () => {
+  const ids = evaluatePreflight({}).items.map((entry) => entry.id);
+  assert.deepEqual(ids, [...ids].sort((left, right) => Number(left.slice(1)) - Number(right.slice(1))));
+  assert.equal(ids[0], "G0", "the checklist does not start at its first item");
+
+  /* The ordering an operator actually reads is numeric, not lexicographic. The
+     two agree only while every id is single-digit, so the comparator is checked
+     against a synthetic tenth gate rather than against the set that happens to
+     exist today. */
+  const withTenth = ["G10", "G2", "G0", "G9", "G1"].sort(
+    (left, right) => Number(left.slice(1)) - Number(right.slice(1)),
+  );
+  assert.deepEqual(withTenth, ["G0", "G1", "G2", "G9", "G10"]);
 });
 
 test("every probe id is an acceptance line, and every other line is the runbook's", () => {

@@ -214,6 +214,14 @@ export const FIXTURE_APP_ORIGIN = "https://app.archon.example.com";
  * hostname under it is already its own registrable site under the rule
  * `netlify/lib/hosted/config.mjs` has always applied. The retarget changes which
  * two sites the fixtures name, never what "two sites" means.
+ *
+ * One property the app origin has and this one does not: `archon-example` is a
+ * Netlify site label anyone can claim, so unlike a reserved `example.com` name
+ * this hostname can resolve to a real third party's site. That is safe only
+ * because no suite in this tree ever dials a fixture origin -- they are values
+ * fed to validators and to injected `fetch` implementations, never to the
+ * network. A test that made a real request to one would be a test contacting a
+ * stranger's deployment from CI; keep that invariant when adding one.
  */
 export const FIXTURE_RENDER_ORIGIN = "https://archon-example.netlify.app";
 /** A renderer sharing the app's registrable site - the C6 misconfiguration. */

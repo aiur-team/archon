@@ -70,15 +70,23 @@ import {
   isRenderPrefix,
   rendererHeaders,
 } from "../netlify/lib/edge-host.mjs";
-import { SCOPE as AUTH0_SCOPE } from "../netlify/lib/hosted/auth0-oidc.mjs";
+import { CALLBACK_PATH, SCOPE as AUTH0_SCOPE } from "../netlify/lib/hosted/auth0-oidc.mjs";
 import { DomainAccessError, normalizeDomainList } from "../netlify/lib/hosted/domain-access.mjs";
 import { HostedConfigError, readHostedConfig } from "../netlify/lib/hosted/config.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 
-/** The callback path C1 freezes. A registration at any other path is not this service. */
-export const CALLBACK_PATH = "/api/hosted/auth/callback";
+/**
+ * The callback path C1 freezes. A registration at any other path is not this
+ * service.
+ *
+ * Re-exported from the module that builds the redirect URI, not written down
+ * again: a forked copy would let the deployed callback move while this gate
+ * stayed green, which is the one failure this gate exists to prevent. It keeps
+ * its own name because the runner's suite and the runbook both refer to it.
+ */
+export { CALLBACK_PATH };
 
 /**
  * The scope set this deployment requests of its Auth0 tenant, taken from the
@@ -104,8 +112,15 @@ export const REQUESTED_SCOPE = AUTH0_SCOPE;
  * precisely so that a real `AUTH0_CLIENT_SECRET` cannot be in this process at
  * all, and the reader needs *a* secret only to get far enough to judge the two
  * fields this gate is about.
+ *
+ * The `!` characters are load-bearing. The reader also refuses a secret equal to
+ * the client id, and a client id is `[A-Za-z0-9._-]` — so a placeholder drawn
+ * from that alphabet is one an operator could supply as their client id, at
+ * which point the reader's refusal would be reported as a defect in this file
+ * rather than as the operator's own duplicated value. A placeholder outside the
+ * client-id alphabet cannot collide with one.
  */
-const PLACEHOLDER_CLIENT_SECRET = "placeholder-not-a-secret-0000";
+export const PLACEHOLDER_CLIENT_SECRET = "placeholder!not!a!secret!0000";
 
 /** The exact value that authorises the read-only probes to leave this machine. */
 export const PROBE_AUTHORISATION = "operator-authorized";
@@ -199,7 +214,7 @@ export const LIVE_GUARANTEES = Object.freeze([
     what: "the renderer hostname answers 200 on its own and is not redirected",
     covers: [
       "a GET of the renderer hostname's root answers 200, not a 3xx to the primary domain",
-      "the response is the renderer shell, served on that hostname rather than borrowed from the app",
+      "that answer carries the renderer shell's own policy rather than the application's",
     ],
   },
   {
@@ -209,7 +224,7 @@ export const LIVE_GUARANTEES = Object.freeze([
     what: "the renderer hostname is cookie-free in both directions",
     covers: [
       "a request carrying a cookie is answered identically to one that carries none",
-      "no response from the renderer hostname sets a cookie",
+      "neither the cookie-bearing nor the cookie-free answer sets a cookie",
     ],
   },
   {
@@ -219,9 +234,9 @@ export const LIVE_GUARANTEES = Object.freeze([
     what: "the host refusal matrix holds on both hostnames and on a third",
     covers: [
       "every renderer shell path answers on the renderer hostname, and a query string on one does not",
-      "the renderer hostname refuses an application path with no cookie and no body",
+      "the renderer hostname refuses an application path with no cookie, no body and private no-store",
       "the application hostname refuses the internal render prefix",
-      "a third hostname resolving to this deployment is a bodyless 404 marked noindex",
+      "a third hostname resolving to this deployment is a bodyless 404 marked noindex and private no-store",
     ],
   },
   {
@@ -734,37 +749,46 @@ export function evaluatePreflight(env) {
      no person, so unlike the account labels these are recorded as themselves.
 
      Both are judged by `normalizeDomainList` -- ACN-007's own evaluator -- rather
-     than by a grammar written again here, so the admitted domain is one the
-     deployed owner UI would actually accept, and a public mailbox domain is
-     refused as an admit value for the same reason the product refuses it: a list
-     containing `gmail.com` admits everyone with a mailbox, which is not a domain
-     gate. */
+     than by a grammar written again here, so each is a domain the deployed owner
+     UI would actually accept.
+
+     The two slots are judged separately, because the evaluator's public-mailbox
+     rule applies to only one of them. An *admitted* `gmail.com` is refused for
+     the reason the product refuses it: a list containing it admits everyone with
+     a mailbox, which is not a domain gate. A *refused* `gmail.com` is the
+     opposite -- it is the single most likely address a real test account has,
+     and it is exactly the reader a domain list exists to exclude. Judging the
+     pair as one list would reject it and leave the operator testing L19's
+     refusal half against a domain nobody signs in from. */
   const admitted = values.HOSTED_LIVE_DOMAIN_ADMITTED;
   const refused = values.HOSTED_LIVE_DOMAIN_REFUSED;
   const G9 = "a domain the owner list admits and a domain it refuses";
   if (admitted === null || refused === null) {
     items.push(blocked("G9", G9, "supply one domain to be admitted and one to be refused"));
   } else {
-    let pair = null;
+    let admittedDomain = null;
+    let refusedDomain = null;
     let refusal = null;
     try {
-      pair = normalizeDomainList([admitted, refused]);
+      [admittedDomain] = normalizeDomainList([admitted]);
+      [refusedDomain] = normalizeDomainList([refused], { allowPublicMailboxes: true });
     } catch (error) {
-      refusal =
-        error instanceof DomainAccessError
-          ? `${error.reason}${error.domain === null ? "" : ` at ${error.domain}`}`
-          : error.message.split("\n")[0];
+      /* The reason alone, never the offending value. `DomainAccessError.domain`
+         is the operator's own input, and the mistake most likely to land here is
+         an address typed into a domain slot -- which would put a person's
+         identifier into CI output that G4's opaque-label rule exists to keep
+         out. `item()`'s contract already says detail names a rule or a key and
+         never a supplied value. */
+      refusal = error instanceof DomainAccessError ? error.reason : error.message.split("\n")[0];
     }
     if (refusal !== null) {
       items.push(blocked("G9", G9, `the deployed domain evaluator refuses this pair -- ${refusal}`));
-    } else if (pair.length !== 2) {
+    } else if (admittedDomain === refusedDomain) {
       items.push(blocked("G9", G9, "the two domains normalise to one; an admit and a refuse cannot be the same domain"));
     } else {
-      items.push(met("G9", G9, `${admitted} admitted, ${refused} refused`));
-      [facts.admittedDomain, facts.refusedDomain] = [
-        normalizeDomainList([admitted])[0],
-        normalizeDomainList([refused], { allowPublicMailboxes: true })[0],
-      ];
+      items.push(met("G9", G9, `${admittedDomain} admitted, ${refusedDomain} refused`));
+      facts.admittedDomain = admittedDomain;
+      facts.refusedDomain = refusedDomain;
     }
   }
 
@@ -854,8 +878,14 @@ export function evaluatePreflight(env) {
   /* Evaluated grouped by subject -- the third hostname beside the two it is not,
      the domain pair beside the identities that carry the addresses -- and
      reported in gate order, because the operator reads this as a numbered
-     checklist and a list that jumped G2, G8, G3 would read as a missing item. */
-  items.sort((left, right) => left.id.localeCompare(right.id));
+     checklist and a list that jumped G2, G8, G3 would read as a missing item.
+
+     Compared on the number rather than the string: a lexicographic sort agrees
+     with a numeric one only while every id is single-digit, so it would start
+     printing G0, G1, G10, G2 the first time a tenth gate is added -- which is
+     the same missing-item reading this sort exists to prevent, arriving
+     silently. */
+  items.sort((left, right) => Number(left.id.slice(1)) - Number(right.id.slice(1)));
 
   const ok = items.every((entry) => entry.status === "met");
   return { ok, items, facts };
@@ -875,8 +905,14 @@ function probe(id, what, status, detail) {
  *
  * `redirect: "manual"` matters: a redirect is evidence about routing, and
  * following it would replace the response under test with a different one.
- * No cookie jar exists in `fetch`, so nothing this runner sends can carry a
- * session even by accident.
+ *
+ * `extraHeaders` exists for exactly one caller: L0b plants a deliberately
+ * invalid `__Host-archon_session` value to prove the renderer hostname does not
+ * vary its answer on a cookie. It is not a way to authenticate a probe, and
+ * there is nothing here to authenticate with -- this runner never signs in and
+ * never holds a session, so the only cookie it can send is one it made up. A
+ * second call site that passed a real credential would be a probe holding a
+ * session, which the module docblock rules out.
  */
 async function get(url, fetchImpl, extraHeaders = {}) {
   const controller = new AbortController();
@@ -894,6 +930,26 @@ async function get(url, fetchImpl, extraHeaders = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Header names that legitimately differ between two identical requests.
+ *
+ * Everything else is compared, because "answered identically" has to mean the
+ * headers too: a hostname that read a cookie and responded with a different
+ * `Vary`, `Cache-Control` or CSP — while serving the same bytes — is still
+ * reading a credential, and a comparison of status and body alone would call
+ * that identical.
+ */
+const VOLATILE_HEADERS = new Set(["date", "age", "x-nf-request-id", "x-request-id", "content-length", "etag"]);
+
+/** The comparable header set of a response, as a sorted, stable string. */
+function stableHeaders(headers) {
+  return [...headers]
+    .filter(([name]) => !VOLATILE_HEADERS.has(name.toLowerCase()))
+    .map(([name, value]) => `${name.toLowerCase()}: ${value}`)
+    .sort()
+    .join("\n");
 }
 
 /** Every header of `expected` present with exactly that value, or a list of faults. */
@@ -930,9 +986,17 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
      and every probe after it would be describing the application host while
      claiming to describe the renderer. `redirect: "manual"` is what makes the
      3xx observable at all; a following fetch would have reported the app's 200. */
+  /* Both halves of L0b's comparison must reach the origin. The renderer shell
+     ships `public, max-age=0, must-revalidate`, and a shell path carrying a
+     query is 404 by design, so the probe cannot cache-bust by URL -- an edge
+     cache could otherwise serve both requests from one stored answer and make
+     them identical no matter what the origin would have done with the cookie.
+     L0's response is the control, so it carries the same header. */
+  const noCache = { "cache-control": "no-cache", pragma: "no-cache" };
+
   let rendererRoot = null;
   try {
-    rendererRoot = await get(`${facts.renderOrigin}/`, fetchImpl);
+    rendererRoot = await get(`${facts.renderOrigin}/`, fetchImpl, noCache);
     if (rendererRoot.status >= 300 && rendererRoot.status < 400) {
       results.push(
         probe(
@@ -954,7 +1018,27 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
       );
       rendererRoot = null;
     } else {
-      results.push(probe("L0", "renderer hostname answers directly", "pass", "200 on its own name, not redirected"));
+      /* A 200 alone does not prove the renderer *shell* answered. A deployment
+         that lost `HOSTED_RENDER_ORIGIN` classifies every host as "app" and
+         would serve the application here with a cheerful 200 — so the row's
+         second covers line is only true if something shell-specific is read.
+         The renderer CSP is the cheapest such thing, and it is the gate's own. */
+      const faults = headerFaults(rendererRoot.headers, [
+        ["Content-Security-Policy", Object.fromEntries(rendererHeaders(facts.appOrigin))["Content-Security-Policy"]],
+      ]);
+      if (faults.length > 0) {
+        results.push(
+          probe(
+            "L0",
+            "renderer hostname answers directly",
+            "fail",
+            "answered 200 but not with the renderer shell's policy; the hostname may be serving the application",
+          ),
+        );
+        rendererRoot = null;
+      } else {
+        results.push(probe("L0", "renderer hostname answers directly", "pass", "200 on its own name, not redirected, renderer shell"));
+      }
     }
   } catch (error) {
     results.push(probe("L0", "renderer hostname answers directly", "fail", error.message.split("\n")[0]));
@@ -968,15 +1052,28 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
      reading a credential on the origin that frames hostile HTML. */
   try {
     const withCookie = await get(`${facts.renderOrigin}/`, fetchImpl, {
+      ...noCache,
       cookie: "__Host-archon_session=probe-value-that-is-not-a-session",
     });
     if (rendererRoot === null) {
       results.push(probe("L0b", "renderer hostname is cookie-free", "fail", "the cookie-free comparison needs L0's response"));
-    } else if (withCookie.headers.get("set-cookie") !== null) {
+    } else if (withCookie.headers.get("set-cookie") !== null || rendererRoot.headers.get("set-cookie") !== null) {
+      /* Both responses, not just the cookie-bearing one. `covers` claims no
+         answer from this hostname sets a cookie, and a check that looked only at
+         the request carrying one would leave the claim undecided for the request
+         that does not -- which is the ordinary case every reader makes. */
       results.push(probe("L0b", "renderer hostname is cookie-free", "fail", "the cookie-free origin set a cookie"));
     } else if (withCookie.status !== rendererRoot.status || withCookie.text !== rendererRoot.text) {
       results.push(
         probe("L0b", "renderer hostname is cookie-free", "fail", "the answer changed when a cookie was supplied"),
+      );
+    } else if (stableHeaders(withCookie.headers) !== stableHeaders(rendererRoot.headers)) {
+      /* Same status, same bytes, different headers is the quiet version of the
+         same defect: a `Vary: Cookie` or a per-cookie CSP means the hostname
+         read the credential, and stopping at the body would have called it
+         identical. */
+      results.push(
+        probe("L0b", "renderer hostname is cookie-free", "fail", "the response headers changed when a cookie was supplied"),
       );
     } else {
       results.push(probe("L0b", "renderer hostname is cookie-free", "pass", "identical answer with and without a cookie, none set"));
@@ -1002,10 +1099,21 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
     const queried = await get(`${facts.renderOrigin}/?probe=1`, fetchImpl);
     if (queried.status !== 404) faults.push(`renderer / with a query answered ${queried.status}, not 404`);
 
+    /* "A bodyless 404" is what the covers line claims, so the body is read. A
+       404 that renders something -- a debug page, or an application 404 echoing
+       the id it refused -- is a body on the origin that frames hostile HTML, and
+       a status-only check would record the claim as satisfied. `private,
+       no-store` is checked for the same reason: it is what the gate's own
+       `notFoundRenderer()` emits, so its absence means something other than the
+       gate answered. */
     for (const path of ["/api/hosted/session", `/docs/${unknown}`]) {
       const refused = await get(`${facts.renderOrigin}${path}`, fetchImpl);
       if (refused.status !== 404) faults.push(`renderer ${path} answered ${refused.status}, not 404`);
       if (refused.headers.get("set-cookie") !== null) faults.push(`renderer ${path} set a cookie`);
+      if (refused.text !== "") faults.push(`renderer ${path} answered 404 with a body`);
+      if (refused.headers.get("cache-control") !== "private, no-store") {
+        faults.push(`renderer ${path} was not refused by the gate; its 404 is not private, no-store`);
+      }
     }
 
     const internal = `${RENDER_PREFIX}index.html`;
@@ -1015,9 +1123,18 @@ export async function probeDeployment(facts, { fetchImpl = fetch, documentId = n
       faults.push(`the application host served ${internal} with ${leaked.status}; artifact HTML must never be first-party there`);
     }
 
+    /* The third hostname's 404 has to be *this gate's* 404. A hostname that is
+       not routed here also answers 404, and a status-only check could not tell
+       the two apart -- so the probe would record the foreign-host refusal as
+       observed live while the gate never saw the request. `noindex` plus
+       `private, no-store` plus an empty body is what `notFoundForeignHost()`
+       emits, and a stranger's 404 does not carry that combination. */
     const third = await get(`${facts.foreignOrigin}/`, fetchImpl);
     if (third.status !== 404) faults.push(`the third hostname answered ${third.status}, not 404`);
     else if (third.headers.get("x-robots-tag") !== "noindex") faults.push("the third hostname's 404 is not marked noindex");
+    else if (third.headers.get("cache-control") !== "private, no-store" || third.text !== "") {
+      faults.push("the third hostname's 404 is not the gate's; supply a hostname that is actually routed to this deployment");
+    }
 
     results.push(
       faults.length > 0
