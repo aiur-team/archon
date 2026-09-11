@@ -151,6 +151,17 @@ export const HOSTED_LIMITS = Object.freeze({
   /** C1/C4: the two app paths a contract record may address. */
   DOCUMENT_PATH_PREFIX: "/docs/",
   AUTHORIZE_PATH: "/publish/authorize",
+  /**
+   * The onboarding page an ordinary sign-in lands on, and the first page a
+   * person who has just discovered Archon sees.
+   *
+   * It is named here beside `AUTHORIZE_PATH` because the sign-in destination
+   * grammar is an allowlist of exact strings and this is one of them. It is not
+   * part of a frozen contract block: the approval flow still writes
+   * `AUTHORIZE_PATH` into `verificationUriComplete` itself, so a publication
+   * being approved never reaches this value.
+   */
+  WELCOME_PATH: "/welcome",
   /** C3: the poll interval the server advertises, and the floor a client honours. */
   POLL_INTERVAL_SECONDS: 5,
   /** C2 lifetimes, in seconds. Enforced on use; not a cleanup schedule. */

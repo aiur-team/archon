@@ -31,6 +31,7 @@ import {
   APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
   isApplicationPassThrough,
+  isLandingPage,
   isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
@@ -737,6 +738,40 @@ test("the application-host root serves the public splash to an anonymous visitor
   });
   assert.equal(gated.response.status, 303, "a deeper path stays gated");
   assert.equal(gated.response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+});
+
+test("the onboarding page is public, takes the landing header set, and does not widen the root", async () => {
+  // `/welcome` is where an ordinary sign-in now lands, and the callback redirect
+  // reaches it before anything has established a session on this browser's next
+  // request -- so a session check here would bounce the visitor straight back to
+  // sign in. It is served like the splash: no session check, landing headers.
+  for (const path of ["/welcome", "/welcome/"]) {
+    const page = await runGate(APP_HOST, path, { cookie: null, next: () => staticPage() });
+    assert.equal(page.response.status, 200, `${path} is served, not a redirect`);
+    assert.equal(page.response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `and no role is resolved for ${path}`);
+    assert.equal(cspCount(page.response), 1, `${path} gains exactly one CSP`);
+    const csp = page.response.headers.get("Content-Security-Policy");
+    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), `${path} may run its inline copy button`);
+    assert.ok(csp.includes("font-src https://fonts.gstatic.com"), `${path} may load the splash's fonts`);
+    assert.ok(csp.includes("frame-ancestors 'none'"), `${path} is still frame-denied`);
+    assert.equal(page.response.headers.get("X-Frame-Options"), "DENY");
+  }
+
+  // Two exact spellings and no prefix: a sibling slug that merely starts with
+  // the same letters is an ordinary gated document, and so is anything else
+  // under the page's own directory -- a file dropped into
+  // `netlify/public/welcome/` later must not become anonymous by inheritance.
+  for (const gated of ["/welcomer/", "/welcome-x/", "/welcome/index.html"]) {
+    const response = (
+      await runGate(APP_HOST, gated, {
+        session: () => sessionResponse({ v: 1, authenticated: false }),
+      })
+    ).response;
+    assert.equal(response.status, 303, `${gated} is not the onboarding page`);
+  }
+  assert.equal(isLandingPage("/welcome/anything.json"), false, "the directory is not a public tree");
 });
 
 test("application host session-checks a collaboration slug and serves a readable document", async () => {

@@ -9,6 +9,7 @@ import {
   classifyHost,
   isApplicationPassThrough,
   isApplicationPublic,
+  isLandingPage,
   isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
@@ -44,14 +45,6 @@ const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
 const SESSION_ROUTE = "/api/hosted/session";
 
 /**
- * The application-host root. It serves the public splash at
- * `netlify/public/index.html` with no session check, so an anonymous visitor
- * sees the landing page rather than a redirect to sign in. It is matched
- * exactly and only -- never as a prefix -- so no other path is made public.
- */
-const PUBLIC_ROOT = "/";
-
-/**
  * The session cookie's name, restated for one question: is there anything to ask
  * about? It is `netlify/lib/hosted/identity.mjs`'s `SESSION_COOKIE`, copied
  * rather than imported because that module reaches a store and this is an edge
@@ -82,6 +75,7 @@ const RESERVED_FIRST_SEGMENTS = [
   "publish",
   "docs",
   "api",
+  "welcome",
   "_assets",
   "_render",
 ];
@@ -434,18 +428,19 @@ async function applicationHost(
      gate's own `/api/hosted/session` subrequest is one of these, so it cannot
      recurse into the session logic.
 
-     The bare root is public too: it serves the splash at
-     `netlify/public/index.html` through the same pass-through, so an anonymous
-     visitor lands on the splash rather than the sign-in redirect. Only the exact
-     root is public; every deeper path stays gated.
+     The landing pages are public too: the bare root serves the splash and
+     `/welcome` serves the onboarding page, both through the same pass-through,
+     so an anonymous visitor lands on a page rather than the sign-in redirect.
 
      The built reference documents join them. They are the product's own
      documentation, so they are read without signing in. They are matched by
      exact full path rather than by prefix, and the list is held equal at build
      time to the documents that declare themselves public, so no private
-     collaboration document can fall inside the public set. */
+     collaboration document can fall inside the public set. Only the exact root,
+     the onboarding page and the published reference routes are public; every
+     other deeper path stays gated. */
   if (
-    url.pathname === PUBLIC_ROOT ||
+    isLandingPage(url.pathname) ||
     isApplicationPublic(url.pathname) ||
     isPublicDocument(url.pathname) ||
     isApplicationPassThrough(url.pathname)
@@ -458,7 +453,7 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    if (url.pathname === PUBLIC_ROOT) return withLandingPageHeaders(passed);
+    if (isLandingPage(url.pathname)) return withLandingPageHeaders(passed);
     /* A public reference document is the same bytes under the same header set a
        signed-in reader gets today; only the session check is skipped. It does
        not take `finalizePassThrough`'s first-party page set, because that would

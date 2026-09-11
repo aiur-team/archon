@@ -290,6 +290,13 @@ jobs:
           node --test netlify/lib/access.test.mjs
           node --test netlify/test/session.test.mjs
           node --test netlify/test/identity-removal.test.mjs
+          # `welcome-page.test.mjs` is the drift gate on the onboarding page: it
+          # reads the `#agentPrompt` line out of both the splash and the
+          # onboarding page and asserts they are the same string, because two
+          # hand-written HTML files cannot share a constant. It also holds the
+          # four onboarding steps and the one `/welcome` spelling every layer
+          # names.
+          node --test netlify/test/welcome-page.test.mjs
           # ACN-008's write-path suite: the owner-only `["doc","allowedDomains"]`
           # body variant that replaced `["doc","orgDefault"]` on
           # `PATCH /api/access`. Its accept and refuse rows are ACN-007's shared

@@ -373,7 +373,12 @@
     <button class="banner-close" id="aiur-banner-close" type="button" aria-label="Dismiss announcement">&#215;</button>
   </aside>
   <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start">
-    <input type="hidden" name="destination" value="/">
+    <!-- Somebody signing in from the splash has nothing to approve yet, so they
+         land on the onboarding page, which explains the flow. #236 landed them
+         on this same splash as an interim measure; this replaces it. A
+         publication being approved arrives on /publish/authorize through its own
+         link, not through this button. -->
+    <input type="hidden" name="destination" value="/welcome">
     <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
   </form>
   <script>

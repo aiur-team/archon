@@ -175,7 +175,8 @@ export function clearCookie(name) {
  *
  * A one-segment slug that spelled one of these would name a route the product
  * already owns - the sign-in page, the invitation page, the publish and hosted
- * document namespaces, the API, or the two underscore-prefixed asset trees - and
+ * document namespaces, the API, the onboarding page, or the two
+ * underscore-prefixed asset trees - and
  * a sign-in that landed a visitor on one of those by way of the destination
  * grammar would be a redirect into machinery rather than into a document.
  * `_assets` and `_render` cannot match the slug shape at all - it forbids `_` -
@@ -196,6 +197,7 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze([
   "publish",
   "docs",
   "api",
+  "welcome",
   "_assets",
   "_render",
 ]);
@@ -210,33 +212,34 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze([
  */
 const ADMIN_DESTINATION = "/admin";
 
-/**
- * The public splash, as a destination.
- *
- * A plain sign-in from the splash carries no pending publication, so landing it
- * on `/publish/authorize` shows "No pending publication" - a dead end. The home
- * splash is the safe interim landing: it is public, has nothing caller-controlled
- * in it, and widens the allowlist by exactly one exact string and by no shape.
- */
-const HOME_DESTINATION = "/";
-
 /** A collaboration document slug: one segment of `[a-z0-9-]`, trailing slash. */
 const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 
 /**
  * The internal destinations a callback may return a browser to.
  *
- * An allowlist of a few exact shapes, matched against the raw string with no
+ * An allowlist of five exact shapes, matched against the raw string with no
  * decoding, no normalisation and no `new URL` anywhere near it. That is what
  * makes the whole family of redirect-injection spellings uninteresting rather
  * than individually defended: `//evil.example`, `/\evil.example`,
  * `https://evil.example`, `/docs/%2e%2e/admin`, `/publish/authorize?next=...`
- * and a backslash-separated variant all fail to be one of the three.
+ * and a backslash-separated variant all fail to be one of the five.
  *
- * The shapes are `/publish/authorize`, `/` (the public splash), `/admin`,
- * `/docs/<32 hex>`, and a
- * single collaboration document slug `^/[a-z0-9-]{1,64}/$` whose one segment is not a
- * reserved route name. The slug is matched on the raw string too: a `%2e%2e`, a
+ * The five shapes are `/publish/authorize`, `/welcome`, `/admin`,
+ * `/docs/<32 hex>`, and a single collaboration document slug
+ * `^/[a-z0-9-]{1,64}/$` whose one segment is not a reserved route name.
+ * `/welcome` is the ordinary sign-in's default and, like the other two exact
+ * paths, is matched with no trailing slash, so it cannot be reached through the
+ * slug shape either: `welcome` is a reserved first segment, and `/welcome/` is
+ * refused rather than quietly treated as a document named "welcome".
+ *
+ * `/` was briefly a sixth shape. #236 added it so a plain sign-in could land on
+ * the splash rather than the approval page's "No pending publication" dead end,
+ * and said so: an interim landing until the onboarding page existed. It does
+ * now, so the interim shape is gone rather than left as a second answer to the
+ * same question - and `/` is back among the refused spellings below.
+ *
+ * The slug is matched on the raw string too: a `%2e%2e`, a
  * second segment, an absent trailing slash, or an uppercase letter all fail the
  * one pattern rather than being decoded into something that then has to be
  * defended. The legacy root login's `safeNext`, which accepted any same-site
@@ -245,10 +248,10 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 export function validateDestination(value) {
   if (typeof value !== "string") throw new AuthRequestError("unknown destination");
   if (value === HOSTED_LIMITS.AUTHORIZE_PATH) return value;
-  /* The public splash. An exact string, the safest possible landing, so a plain
-     sign-in with no pending publication returns home rather than to the approval
-     page's dead end. It widens the allowlist by one destination and no shape. */
-  if (value === HOME_DESTINATION) return value;
+  /* The onboarding page an ordinary sign-in defaults to, and what replaced
+     #236's interim `/` landing: it answers the same "where does a sign-in with
+     nothing to approve go" question, with a page that explains the flow. */
+  if (value === HOSTED_LIMITS.WELCOME_PATH) return value;
   /* The admin console. An exact string like the authorize path, and an internal
      absolute path with nothing caller-controlled in it, so it widens the
      allowlist by exactly one destination and by no shape. */

@@ -511,13 +511,14 @@ const STATIC_HEADER_SET = [
 ];
 
 /**
- * The one static rewrite, read off the builder that generates it.
+ * The static rewrites, read off the builder that generates them.
  *
- * It moved out of TOML and into the publish tree's generated `_redirects`, so
- * the builder's own declaration is where the deployment states it. Read rather
+ * They moved out of TOML and into the publish tree's generated `_redirects`, so
+ * the builder's own declaration is where the deployment states them. Read rather
  * than restated, for the reason the TOML was read before: a rewrite changed in
  * one place and copied in another is a rewrite that goes stale silently, and the
- * path it names is the one C3 freezes.
+ * paths they name are the ones C3 freezes. `/publish/authorize` must stay among
+ * them; the set grows as first-party pages are added.
  */
 async function readDeploymentHeaders() {
   const compiled = join(ROOT, "templates/docbuild/dist/site.js");
@@ -530,10 +531,21 @@ async function readDeploymentHeaders() {
         "Run `npm --prefix templates/docbuild run build` first.",
     );
   }
+  const { HOSTED_LIMITS } = await import(
+    pathToFileURL(join(ROOT, "netlify/lib/hosted/contracts.mjs")).href
+  );
   const rules = builder.HOSTED_REWRITES;
-  assert.ok(Array.isArray(rules) && rules.length === 1, "the builder declares no single hosted rewrite");
-  const parsed = rules[0].match(/^(\S+) (\S+) 200$/);
-  assert.ok(parsed, `the hosted rewrite is not a 200 rewrite: ${rules[0]}`);
+  assert.ok(Array.isArray(rules) && rules.length > 0, "the builder declares no hosted rewrite");
+  const rewrites = new Map();
+  for (const rule of rules) {
+    const parsed = rule.match(/^(\S+) (\S+) 200$/);
+    assert.ok(parsed, `the hosted rewrite is not a 200 rewrite: ${rule}`);
+    rewrites.set(parsed[1], parsed[2]);
+  }
+  assert.ok(
+    rewrites.has(HOSTED_LIMITS.AUTHORIZE_PATH),
+    `the builder no longer rewrites ${HOSTED_LIMITS.AUTHORIZE_PATH}`,
+  );
 
   /* And no second authority for the header set. A `[[headers]]` rule naming any
      of these on the merged configuration is the exact intersection failure the
@@ -544,7 +556,7 @@ async function readDeploymentHeaders() {
     assert.doesNotMatch(live, new RegExp(name, "i"), `netlify.toml declares ${name}; the gate is the authority`);
   }
 
-  return { values: STATIC_HEADER_SET, rewrite: { from: parsed[1], to: parsed[2] } };
+  return { values: STATIC_HEADER_SET, rewrites };
 }
 
 /* ------------------------------------------------------------------ *
@@ -999,7 +1011,7 @@ function compilePath(pattern) {
   return { pattern, regexp: new RegExp(`^${source}/?$`), literal: !pattern.includes(":") };
 }
 
-/** The static tree the hosted deployment publishes, and its one rewrite. */
+/** The static tree the hosted deployment publishes, and its rewrites. */
 const STATIC_ROOT = join(ROOT, "netlify", "public");
 
 /**
@@ -1049,7 +1061,7 @@ async function startApp({ routes, deployment }) {
       }
 
       /* The static tree, with the deployment's own header block. */
-      let pathname = url.pathname === deployment.rewrite.from ? deployment.rewrite.to : url.pathname;
+      let pathname = deployment.rewrites.get(url.pathname) ?? url.pathname;
       if (pathname.endsWith("/")) pathname = `${pathname}index.html`;
       const file = join(STATIC_ROOT, pathname);
       if (!file.startsWith(`${STATIC_ROOT}/`) || !existsSync(file) || !statSync(file).isFile()) {

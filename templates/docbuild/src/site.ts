@@ -84,6 +84,7 @@ const RESERVED_ROUTES = new Set([
   "skills",
   "docs",
   "publish",
+  "welcome",
   "_assets",
   "_render",
   "viewer.js",
@@ -773,8 +774,8 @@ ${rows}
 }
 
 /**
- * The one static rewrite the merged site carries, and it exists because a
- * contract names an exact path.
+ * The two static rewrites the merged site carries, and both exist because
+ * something else names an exact path.
  *
  * C3 freezes the browser URL at `/publish/authorize` with no query string, and
  * `validateStartResponse` refuses a start response whose URL is anything else.
@@ -794,13 +795,23 @@ ${rows}
  * after the TOML rules, and the document routes below cannot match this path:
  * `/publish` is a reserved route.
  *
- * It is emitted only when the hosted tree was actually copied. A repository
+ * `/welcome` is the same shape for the same reason. It is the destination an
+ * ordinary sign-in lands on, so the sign-in grammar names it exactly and with
+ * no trailing slash; without this rule Netlify would answer that spelling with
+ * a 301 to `/welcome/`, and the extra hop lands on a path the edge gate has to
+ * classify separately. The rewrite keeps the visitor on the path the grammar
+ * named and serves the committed `netlify/public/welcome/index.html`.
+ *
+ * They are emitted only when the hosted tree was actually copied. A repository
  * without one -- an installed consumer building their own documents -- would
- * otherwise get a rewrite pointing at a file that is not in its publish tree,
+ * otherwise get rewrites pointing at files that are not in its publish tree,
  * which turns a page that simply does not exist into a page that exists and
  * 404s through a rule.
  */
-export const HOSTED_REWRITES = ["/publish/authorize /publish/authorize.html 200"];
+export const HOSTED_REWRITES = [
+  "/publish/authorize /publish/authorize.html 200",
+  "/welcome /welcome/index.html 200",
+];
 
 /** Permanent-ID and alias redirects, grouped in ascending slug order. */
 function renderRedirects(docs: SiteMetadata[], hosted: boolean): string {

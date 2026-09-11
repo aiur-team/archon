@@ -84,9 +84,9 @@ const APP_PASS_THROUGH_PATHS = Object.freeze(["/admin"]);
  * looks broken.
  *
  * So this is deliberately *only* the subresources. `/` is not here and must not
- * be: `PUBLIC_ROOT` in `netlify/edge-functions/gate.ts` owns the page itself and
- * gives it the landing-page policy, and a second opinion about the root would be
- * two answers to one question.
+ * be: `isLandingPage` below owns the landing pages themselves and gives them the
+ * landing-page policy, and a second opinion about the root would be two answers
+ * to one question.
  *
  * Exact strings, plus one prefix for the image tree. A prefix of `/` would make
  * the whole application host anonymous, which is why the root is not expressible
@@ -102,6 +102,53 @@ const APP_PUBLIC_PATHS = Object.freeze([
 
 /** The one public tree: the homepage's images, which land at `_site/assets/`. */
 const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
+
+/**
+ * The public landing pages: the splash at the bare root (`site/index.html`) and
+ * the onboarding page at `/welcome` (`netlify/public/welcome/index.html`), which
+ * is where a sign-in with no pending publication lands.
+ *
+ * They are their own set rather than entries in the pass-through lists above
+ * because the two sets answer different questions. A pass-through is served with
+ * no session check and gains whichever header set its content type earns; a
+ * landing page is served with no session check *and* takes
+ * `landingPageHeaders`, which is the only set that admits the inline copy button
+ * and the two Google Font origins both pages need. Under the first-party page
+ * set the onboarding page would render unstyled with a dead copy button.
+ *
+ * Every entry is an exact path, and there is deliberately no `/welcome/` prefix
+ * among them. A prefix would make the whole of `netlify/public/welcome/`
+ * permanently anonymous under the loosened landing policy, so a future file
+ * dropped into that directory would be served to any unauthenticated caller
+ * with no test failing - a wider grant than this page needs and than the
+ * comment above claims. The page has exactly two reachable spellings, so both
+ * are named: `/welcome`, which the generated `_redirects` rewrite resolves, and
+ * `/welcome/`, which Netlify resolves as the directory index. `/welcome/index.html`
+ * is not one of them and stays gated, exactly as `/index.html` does beside `/`.
+ *
+ * Naming them rather than prefixing them is also what keeps `/welcomer/` and
+ * `/welcome-x/` out: both are legal collaboration slugs under the
+ * `[a-z0-9-]{1,64}` grammar, and a bare `"/welcome"` prefix would have served
+ * somebody else's document to whoever asked for it. It is the same reason
+ * `/admin` above is an exact path rather than a prefix entry.
+ *
+ * `netlify/lib/hosted/contracts.mjs` names the same `/welcome` as
+ * `HOSTED_LIMITS.WELCOME_PATH`. It is restated here rather than imported because
+ * that module reaches a blob store and this one runs on Deno at the edge with
+ * Web globals only; `netlify/test/welcome-page.test.mjs` holds the two equal. A
+ * wrong copy fails in the safe direction: the page is gated rather than exposed.
+ */
+const LANDING_PAGE_PATHS = Object.freeze(["/", "/welcome", "/welcome/"]);
+
+/**
+ * Whether an application-host path is a public landing page.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isLandingPage(pathname) {
+  return LANDING_PAGE_PATHS.includes(pathname);
+}
 
 /**
  * The built reference documents, served to anybody with no session check.
@@ -499,14 +546,16 @@ export function withFirstPartyPageHeaders(response) {
 }
 
 /**
- * Header set for the public landing page at the application host's bare root
- * (`site/index.html`). Unlike the sign-in page, the landing page is a marketing
- * document: it pulls Google Fonts and runs small inline scripts (copy button,
- * entrance animation, dismissible banner). It holds no session, no credential
- * form and no user data, so it may take a looser CSP than firstPartyPageHeaders
- * -- the framing and base-uri denials and the same security headers still hold.
- * The extra grants are exactly what this one static page needs: inline script,
- * the two Google Font origins, and same-origin images.
+ * Header set for the public landing pages: the splash at the application host's
+ * bare root (`site/index.html`) and the onboarding page at `/welcome`
+ * (`netlify/public/welcome/index.html`). Unlike the sign-in page, a landing page
+ * is a marketing document: it pulls Google Fonts and runs small inline scripts
+ * (copy button, entrance animation, dismissible banner). It holds no session, no
+ * credential form and no user data, so it may take a looser CSP than
+ * firstPartyPageHeaders -- the framing and base-uri denials and the same
+ * security headers still hold. The extra grants are exactly what these static
+ * pages need: inline script, the two Google Font origins, and same-origin
+ * images.
  *
  * @returns {Array<[string, string]>}
  */
@@ -534,7 +583,7 @@ export function landingPageHeaders() {
 /**
  * Apply the landing header set to a response, only when it carries no CSP of its
  * own. Same in-place contract as its siblings; the caller decides a response is
- * the public root before calling this.
+ * a public landing page before calling this.
  *
  * @param {Response} response
  * @returns {Response}

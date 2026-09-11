@@ -95,6 +95,8 @@ const SKILL = "---\nname: archon-doc\n---\n\nThe complete instruction set.\n";
 /** The root sign-in page, and the hosted one that has to beat it. */
 const ROOT_LOGIN = "<!doctype html><title>root login</title>\n";
 const HOSTED_LOGIN = "<!doctype html><title>hosted login</title>\n";
+/** The onboarding page a fresh sign-in lands on. */
+const HOSTED_WELCOME = "<!doctype html><title>hosted welcome</title>\n";
 
 /** Two origins on two registrable sites, which is what the renderer requires. */
 const APP_ORIGIN = "https://app.example.com";
@@ -220,6 +222,8 @@ const root = (
     writeFileSync(join(dir, "netlify", "public", "login", "login.js"), "export const login = 1;\n");
     writeFileSync(join(dir, "netlify", "public", "publish", "authorize.html"), "<!doctype html>\n");
     writeFileSync(join(dir, "netlify", "public", "publish", "authorize.js"), "export const go = 1;\n");
+    mkdirSync(join(dir, "netlify", "public", "welcome"), { recursive: true });
+    writeFileSync(join(dir, "netlify", "public", "welcome", "index.html"), HOSTED_WELCOME);
   }
 
   // The real renderer tree, not a stand-in: `buildRenderer` resolves its own
@@ -366,6 +370,27 @@ test("the /publish/authorize rewrite is generated into _redirects", async (t) =>
   assert.equal(redirects.split("\n")[0], "/publish/authorize /publish/authorize.html 200");
   // And the page that rule points at is really in the publish tree.
   assert.ok(existsSync(join(outDir, "publish", "authorize.html")));
+});
+
+test("the /welcome rewrite is generated into _redirects", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, hosted: true });
+
+  const { outDir } = await buildSite(dir);
+
+  const redirects = readFileSync(join(outDir, "_redirects"), "utf8");
+  // A rewrite, not a redirect: `/welcome` is the exact string the sign-in
+  // destination grammar names, so the visitor must not be bounced to
+  // `/welcome/` on the way in.
+  assert.match(redirects, /^\/welcome \/welcome\/index\.html 200$/m);
+  // Ahead of every document rule, so no alias line can claim it first.
+  assert.ok(
+    redirects.split("\n").indexOf("/welcome /welcome/index.html 200") < 2,
+    `the onboarding rewrite must precede the document rules: ${redirects}`,
+  );
+  // And the page that rule points at is really in the publish tree.
+  assert.ok(existsSync(join(outDir, "welcome", "index.html")));
 });
 
 test("a hosted page at an unreserved top-level name fails the build", async (t) => {
@@ -685,7 +710,9 @@ test("with no hosted tree the site publishes no rewrite to a page it lacks", asy
 
   const redirects = readFileSync(join(outDir, "_redirects"), "utf8");
   assert.ok(!redirects.includes("/publish/authorize"), `a rewrite named a page that was never copied: ${redirects}`);
+  assert.ok(!redirects.includes("/welcome"), `a rewrite named a page that was never copied: ${redirects}`);
   assert.equal(existsSync(join(outDir, "publish")), false);
+  assert.equal(existsSync(join(outDir, "welcome")), false);
   assert.ok(existsSync(join(outDir, "sample", "index.html")));
 });
 
@@ -693,7 +720,7 @@ test("a document that claims a hosted top-level route fails as a reserved route"
   isolate(t);
   origins(t);
 
-  for (const slug of ["docs", "publish"]) {
+  for (const slug of ["docs", "publish", "welcome"]) {
     const dir = root(t, { served: true, hosted: true, slug });
     await assert.rejects(
       buildSite(dir),

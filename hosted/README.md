@@ -355,10 +355,18 @@ The start route does the same thing for the same reason: the sign-in page
 submits a real `<form method="post">`, so a form submission that fails lands on
 `/login/?status=<word>` while a JSON caller still receives the C3 envelope.
 
-**Where `/publish/authorize` goes today: nowhere.** It is the default
-destination and AHU-007 owns the page behind it, so on this deployment a
-completed sign-in currently 303s to a 404. The session is real and the cookie is
-set; only the landing page is missing until that ticket lands.
+**Where a sign-in with no destination goes: `/welcome`.** The default used to be
+`/publish/authorize`, which is the approval page and answers "No pending
+publication" to anybody who did not arrive mid-publication — a dead end for the
+one visitor who most needs to be told what happens next. The default is now
+`HOSTED_LIMITS.WELCOME_PATH`, the onboarding page committed at
+`netlify/public/welcome/index.html`, which walks the four steps of the flow and
+shows the same agent prompt the splash shows.
+
+A sign-in that *is* completing an approval is untouched: the agent flow writes
+`AUTHORIZE_PATH` into `verificationUriComplete`, so that browser arrives with an
+explicit destination and never reaches the default. The pending binding cookie
+still survives sign-in and account switch as before.
 
 ## The AHU-007 seam
 
