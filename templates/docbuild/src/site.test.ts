@@ -61,7 +61,7 @@ nav: Problem
 <p>A paragraph.</p>
 `;
 
-const docJson = (slug: string): string =>
+const docJson = (slug: string, extra: Record<string, unknown> = {}): string =>
   `${JSON.stringify(
     {
       id: "a2e912",
@@ -72,6 +72,7 @@ const docJson = (slug: string): string =>
       lede: "A sample document.",
       meta: { Owner: "you" },
       footer: "Sample",
+      ...extra,
     },
     null,
     2,
@@ -138,7 +139,20 @@ const origins = (t: Ctx, values: { app?: string; render?: string } = {}): void =
  */
 const root = (
   t: Ctx,
-  options: { served?: boolean; slug?: string; hosted?: boolean; renderer?: boolean } = {},
+  options: {
+    served?: boolean;
+    slug?: string;
+    hosted?: boolean;
+    renderer?: boolean;
+    /** Extra `doc.json` fields for the one document, merged over the defaults. */
+    doc?: Record<string, unknown>;
+    /** A second document, so a multi-document inventory can be exercised. */
+    second?: { slug: string; id: string; doc?: Record<string, unknown> };
+    /** The `APP_PUBLIC_DOCUMENT_PATHS` a stand-in edge module exports, or no module. */
+    publicPaths?: string[];
+    /** What the stand-in edge module exports instead of the real pair. */
+    edgeModuleBody?: string;
+  } = {},
 ): string => {
   const dir = mkdtempSync(join(tmpdir(), "acn001-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -151,8 +165,18 @@ const root = (
   const slug = options.slug ?? "sample";
   const inst = join(dir, "sample");
   mkdirSync(join(inst, "sections"), { recursive: true });
-  writeFileSync(join(inst, "doc.json"), docJson(slug));
+  writeFileSync(join(inst, "doc.json"), docJson(slug, options.doc ?? {}));
   writeFileSync(join(inst, "sections", "01-problem.html"), SECTION);
+
+  if (options.second !== undefined) {
+    const other = join(dir, "second");
+    mkdirSync(join(other, "sections"), { recursive: true });
+    writeFileSync(
+      join(other, "doc.json"),
+      docJson(options.second.slug, { id: options.second.id, ...(options.second.doc ?? {}) }),
+    );
+    writeFileSync(join(other, "sections", "01-problem.html"), SECTION);
+  }
 
   if (options.served === true) {
     mkdirSync(join(dir, "site", "assets"), { recursive: true });
@@ -162,6 +186,26 @@ const root = (
     writeFileSync(join(dir, "skills", "archon-doc", "SKILL.md"), SKILL);
     writeFileSync(join(dir, "AGENTS.md"), AGENTS);
     writeFileSync(join(dir, "llms.txt"), LLMS);
+  }
+
+  /* A stand-in for the deployed gate's own module, carrying the two exports the
+     public-route preflight reads and an `isPublicDocument` that agrees with its
+     own list. The real one is a Deno edge function's helper and importing it
+     here would drag the whole header matrix into a packaging test; what is under
+     test is that the build holds the list and the matcher equal to the
+     documents, not what else that file says. `edgeModuleBody` replaces both, so
+     a module whose matcher disagrees with its list -- the drift the check exists
+     for -- can be planted. */
+  if (options.publicPaths !== undefined || options.edgeModuleBody !== undefined) {
+    mkdirSync(join(dir, "netlify", "lib"), { recursive: true });
+    writeFileSync(
+      join(dir, "netlify", "lib", "edge-host.mjs"),
+      options.edgeModuleBody ??
+        `export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(${JSON.stringify(options.publicPaths)});\n` +
+          "export function isPublicDocument(pathname) {\n" +
+          "  return APP_PUBLIC_DOCUMENT_PATHS.includes(pathname);\n" +
+          "}\n",
+    );
   }
 
   if (options.hosted === true) {
@@ -368,6 +412,292 @@ test("a hosted page at an unreserved top-level name fails the build", async (t) 
         error.message,
       ),
   );
+});
+
+test("a public document builds when the gate publishes every route it is served at", async (t) => {
+  isolate(t);
+  origins(t);
+  // Both routes the build emits for it: the slug directory and the permanent
+  // `/d/<id>` link. Publishing only one of them is the next two tests.
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    publicPaths: ["/example/", "/d/a2e912"],
+  });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "example", "index.html")), "the public document is published");
+  assert.match(
+    readFileSync(join(outDir, "_redirects"), "utf8"),
+    /^\/d\/a2e912 \/example\/ 301$/m,
+    "and the permanent link the passlist names is the one the build emits",
+  );
+});
+
+test("a public document's permanent link must be published with it", async (t) => {
+  isolate(t);
+  origins(t);
+  /* `/d/<id>` is what `templates/README.md` tells an author to share, and the
+     gate answers before `_redirects` does -- so a passlist naming only the slug
+     leaves the permanent link of a published document at a sign-in wall. */
+  const dir = root(t, { served: true, slug: "example", doc: { public: true }, publicPaths: ["/example/"] });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError && /but the documents declaring 'public': true are served at \/d\/a2e912, \/example\//.test(error.message),
+  );
+});
+
+test("a public document's aliases must be published in both spellings", async (t) => {
+  isolate(t);
+  origins(t);
+  /* `renderRedirects` emits `/<alias>` and `/<alias>/*` for a prior slug, so
+     both spellings are routes the site serves and both have to be public or the
+     old link a rename was supposed to keep working answers with a sign-in. */
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true, aliases: ["old-example"] },
+    publicPaths: ["/example/", "/d/a2e912", "/old-example"],
+  });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) => error instanceof BuildError && /\/old-example\//.test(error.message),
+  );
+
+  const ok = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true, aliases: ["old-example"] },
+    publicPaths: ["/example/", "/d/a2e912", "/old-example", "/old-example/"],
+  });
+  const { outDir } = await buildSite(ok);
+  assert.ok(existsSync(join(outDir, "example", "index.html")), "with both spellings listed it builds");
+});
+
+test("a public document the deployed gate does not serve is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  // The silent half of the drift: a document starts declaring itself public and
+  // nobody adds its routes to the edge module, so it deploys still gated with no
+  // diagnostic anywhere.
+  const dir = root(t, { served: true, slug: "example", doc: { public: true }, publicPaths: [] });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /netlify\/lib\/edge-host\.mjs serves nothing without a session, but the documents declaring 'public': true are served at \/d\/a2e912, \/example\//.test(
+        error.message,
+      ),
+  );
+});
+
+test("a gate public route no document declares is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  /* The dangerous half. `/example/` stands in the edge module with no document
+     behind it, so whatever claims the `example` slug next inherits a route that
+     is served with no session check. Holding the two lists equal is what makes
+     this a failed build rather than a quietly published private document. */
+  const dir = root(t, { served: true, slug: "sample", publicPaths: ["/example/"] });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /serves \/example\/ without a session, but the documents declaring 'public': true are served at no routes/.test(
+        error.message,
+      ),
+  );
+});
+
+test("a matcher wider than its own list is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  /* The list is not what the gate serves -- `isPublicDocument` is. An edit that
+     leaves the array alone and loosens the predicate to a prefix match publishes
+     every slug beginning with a published one, and would sail past a check that
+     only compared arrays. `example-internal/` is the document that leaks. */
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    second: { slug: "example-internal", id: "b1c2d3" },
+    edgeModuleBody:
+      'export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(["/example/", "/d/a2e912"]);\n' +
+      "export function isPublicDocument(pathname) {\n" +
+      "  return APP_PUBLIC_DOCUMENT_PATHS.some((path) => pathname.startsWith(path.replace(/\\/$/, \"\")));\n" +
+      "}\n",
+  });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /isPublicDocument\("\/example-internal\/"\) is not false.*matcher is wider than its list/s.test(error.message),
+  );
+});
+
+test("a matcher narrower than its own list is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  // The other direction: the route is listed but the gate would still gate it.
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    edgeModuleBody:
+      'export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(["/example/", "/d/a2e912"]);\n' +
+      "export function isPublicDocument() {\n  return false;\n}\n",
+  });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /isPublicDocument\("[^"]+"\) is not true.*matcher disagrees with its own list/s.test(error.message),
+  );
+});
+
+test("a renamed or missing export is a build failure once anything is public", async (t) => {
+  isolate(t);
+  origins(t);
+  /* Renaming the export in edge-host.mjs is exactly the drift this preflight
+     exists to catch, so it must not read as "no public surface". */
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    edgeModuleBody: 'export const PUBLIC_ROUTES = Object.freeze(["/example/"]);\n',
+  });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError && /APP_PUBLIC_DOCUMENT_PATHS must be an array of strings/.test(error.message),
+  );
+});
+
+test("a list without a matcher is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    edgeModuleBody: 'export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(["/example/", "/d/a2e912"]);\n',
+  });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) => error instanceof BuildError && /isPublicDocument must be a function/.test(error.message),
+  );
+});
+
+test("an older edge module with nothing public still builds", async (t) => {
+  isolate(t);
+  origins(t);
+  /* A vendored tree carrying an edge-host.mjs from before this feature, and no
+     document asking to be published: there is no public surface to keep honest,
+     so it builds exactly as it did before rather than failing on a missing
+     export it has no use for. */
+  const dir = root(t, {
+    served: true,
+    edgeModuleBody: "export function classifyHost() {\n  return \"app\";\n}\n",
+  });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "sample", "index.html")), "the gated document still publishes");
+});
+
+test("a public document with no edge module to serve it is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, slug: "example", doc: { public: true } });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /netlify\/lib\/edge-host\.mjs is absent, but \/d\/a2e912, \/example\/ would be published/.test(error.message),
+  );
+});
+
+test("a symlinked edge module is a build failure", async (t) => {
+  isolate(t);
+  origins(t);
+  /* `import()` follows a link, so a symlinked module would have the build
+     validate one file while the deploy tree carries another. Every other tree
+     this builder preflights refuses a symlink; the security list is not the
+     place to start making an exception. */
+  const dir = root(t, { served: true, slug: "example", doc: { public: true }, publicPaths: [] });
+  const target = join(dir, "elsewhere.mjs");
+  writeFileSync(target, 'export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(["/example/", "/d/a2e912"]);\n');
+  rmSync(join(dir, "netlify", "lib", "edge-host.mjs"));
+  symlinkSync(target, join(dir, "netlify", "lib", "edge-host.mjs"));
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /netlify\/lib\/edge-host\.mjs: expected a regular file, not a symbolic link/.test(error.message),
+  );
+});
+
+test("two public documents are held equal as a set, not by luck of order", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, {
+    served: true,
+    slug: "example",
+    doc: { public: true },
+    second: { slug: "components", id: "52c164", doc: { public: true } },
+    // Deliberately not in sorted order: the comparison sorts both sides.
+    publicPaths: ["/example/", "/d/52c164", "/components/", "/d/a2e912"],
+  });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "example", "index.html")));
+  assert.ok(existsSync(join(outDir, "components", "index.html")));
+});
+
+test("'public': false is a gated document, and needs no edge module", async (t) => {
+  isolate(t);
+  origins(t);
+  // The explicit spelling of the default. It must not be read as "mentioned it,
+  // so publish it".
+  const dir = root(t, { served: true, doc: { public: false } });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "sample", "index.html")), "the gated document still publishes");
+});
+
+test("'public' must be a boolean when a document states it", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, doc: { public: "yes" } });
+
+  await assert.rejects(
+    buildSite(dir),
+    (error: unknown) =>
+      error instanceof BuildError &&
+      /sample\/doc\.json: invalid 'public' \(expected a boolean when present\)/.test(error.message),
+  );
+});
+
+test("a document that says nothing about publicity is gated, and needs no edge module", async (t) => {
+  isolate(t);
+  origins(t);
+  // The default every existing document and every installed consumer relies on:
+  // absent means gated, and a deployment with no public surface is unaffected.
+  const dir = root(t, { served: true });
+
+  const { outDir } = await buildSite(dir);
+  assert.ok(existsSync(join(outDir, "sample", "index.html")), "the gated document still publishes");
 });
 
 test("with no hosted tree the site publishes no rewrite to a page it lacks", async (t) => {

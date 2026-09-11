@@ -10,12 +10,14 @@ import {
   isApplicationPassThrough,
   isApplicationPublic,
   isLandingPage,
+  isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
   rendererHeaders,
   rendererRewriteTarget,
   withApplicationHeaders,
+  withDocumentHeaders,
   withFirstPartyPageHeaders,
   withLandingPageHeaders,
 } from "../lib/edge-host.mjs";
@@ -182,6 +184,33 @@ function finalizePassThrough(response: Response): Response {
   return isHtml
     ? withFirstPartyPageHeaders(response)
     : withApplicationHeaders(response);
+}
+
+/**
+ * Finalize a public reference document.
+ *
+ * It takes the document header set -- the same one a granted reader's copy gets
+ * (`withDocumentHeaders` on the gated answer below) -- so publishing a document
+ * changes the session check and nothing else about the answer.
+ *
+ * Any `Set-Cookie` is dropped first. Nothing that answers one of these routes
+ * has a session to establish: they are static files the build composed, and the
+ * route is on a closed list a build preflight holds equal to the documents that
+ * declared themselves public. But this is the one branch whose answer is
+ * returned to a caller the gate never identified, so a cookie set here would be
+ * handed to whoever asked and, under the site's shared-cache headers, possibly
+ * to the next asker too. Dropping it costs nothing today and removes the whole
+ * class.
+ */
+function publicDocumentResponse(response: Response): Response {
+  try {
+    const headers = response.headers;
+    if (headers instanceof Headers) headers.delete("Set-Cookie");
+  } catch {
+    /* A response whose headers cannot be read cannot be carrying a cookie we
+       could drop either; the header applier below fails the same way safely. */
+  }
+  return withDocumentHeaders(response);
 }
 
 function isUnavailableError(value: unknown): boolean {
@@ -402,11 +431,18 @@ async function applicationHost(
      The landing pages are public too: the bare root serves the splash and
      `/welcome` serves the onboarding page, both through the same pass-through,
      so an anonymous visitor lands on a page rather than the sign-in redirect.
-     Only the exact root and the onboarding page's own directory are public;
-     every other deeper path stays gated. */
+
+     The built reference documents join them. They are the product's own
+     documentation, so they are read without signing in. They are matched by
+     exact full path rather than by prefix, and the list is held equal at build
+     time to the documents that declare themselves public, so no private
+     collaboration document can fall inside the public set. Only the exact root,
+     the onboarding page and the published reference routes are public; every
+     other deeper path stays gated. */
   if (
     isLandingPage(url.pathname) ||
     isApplicationPublic(url.pathname) ||
+    isPublicDocument(url.pathname) ||
     isApplicationPassThrough(url.pathname)
   ) {
     let passed: Response;
@@ -417,9 +453,15 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    return isLandingPage(url.pathname)
-      ? withLandingPageHeaders(passed)
-      : finalizePassThrough(passed);
+    if (isLandingPage(url.pathname)) return withLandingPageHeaders(passed);
+    /* A public reference document is the same bytes under the same header set a
+       signed-in reader gets today; only the session check is skipped. It does
+       not take `finalizePassThrough`'s first-party page set, because that would
+       make a document's policy depend on whether it was gated -- and the whole
+       point of publishing one is that the answer no longer depends on who
+       asked. */
+    if (isPublicDocument(url.pathname)) return publicDocumentResponse(passed);
+    return finalizePassThrough(passed);
   }
 
   return withApplicationHeaders(await sessionGate(req, url, context, env));
@@ -786,6 +828,14 @@ async function sessionGate(
       return plainResponse(403, DENIED);
     }
 
+    /* The granted reader's copy of the document, under the document header
+       set. `applicationHost` wraps every `sessionGate` answer in
+       `withApplicationHeaders`, which leaves a response that already carries a
+       CSP alone -- so naming the policy here is what keeps the document set on
+       the answer rather than the `default-src 'none'` application set that
+       blocks the artifact's own inline style and script (#235). The public
+       branch applies the identical set, so the policy a document arrives under
+       does not depend on who asked for it. */
     if (isHead) {
       const response = new Response(null, {
         status,
@@ -793,9 +843,11 @@ async function sessionGate(
         headers,
       });
       await cancelAndRelease(reader);
-      return response;
+      return withDocumentHeaders(response);
     }
-    return replayResponse(status, statusText, headers, reader, retained);
+    return withDocumentHeaders(
+      replayResponse(status, statusText, headers, reader, retained),
+    );
   } catch {
     await cancelAndRelease(reader);
     return plainResponse(500, UNVERIFIED);

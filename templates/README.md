@@ -56,7 +56,7 @@ Open `cache-notes/dist/cache-notes.html` in a browser, or publish it as an artif
 
 ## Document identity and URLs
 
-Every `doc.json` requires `id`, `slug`, and `aliases`. For example:
+Every `doc.json` requires `id`, `slug`, and `aliases`, and may set `public`. For example:
 
 ```json
 {
@@ -75,6 +75,10 @@ Every `doc.json` requires `id`, `slug`, and `aliases`. For example:
   hosted URL at `/<slug>/` and may change.
 - **`aliases`** is a required array of prior slugs. Every alias follows the same grammar, is globally
   unique across all current slugs and aliases, and must not equal the document's current slug.
+- **`public`** is optional and defaults to `false`. `true` asks the deployment's edge gate to serve this
+  document with no sign-in. It is only meaningful on a repo-backed deployment that carries its own
+  `netlify/lib/edge-host.mjs`, which must list every route the document is served at; the build fails
+  naming them otherwise. Anything but a boolean is rejected.
 
 The routes `api`, `d`, `login`, `invite`, and `_assets` are reserved and cannot be slugs or aliases.
 The copied skeleton's placeholder `id` and `slug` are not publishable values.

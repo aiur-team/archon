@@ -269,29 +269,37 @@
   }
   .what .hl { color: var(--accent); }
 
+  /* The one action on the page. The prompt above it is a bordered monospace
+     pill, so the action takes the opposite shape: a solid accent fill, no
+     border, a full radius and the page's sans face. It reads as a button at
+     rest, not only under a cursor that a touch device never has. */
   .cta {
     display: inline-flex;
     align-items: center;
-    gap: 13px;
+    gap: 11px;
     margin-top: clamp(30px, 6vh, 52px);
-    padding: 13px 20px 13px 24px;
-    border: 1px solid var(--pill-bd);
-    border-radius: 11px;
-    background: var(--pill-bg);
-    color: var(--fg);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
+    max-width: 100%;
+    padding: 13px 22px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg);
+    font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
+    font-weight: 500;
     font-size: clamp(13px, 1.8vw, 15px);
+    letter-spacing: 0.01em;
     text-decoration: none;
-    transition: border-color 0.2s ease, background-color 0.2s ease;
+    transition: background-color 0.2s ease;
   }
+  /* Mixing toward the foreground darkens in light and brightens in dark, so
+     one rule covers both themes. */
   .cta:hover {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    background: color-mix(in srgb, var(--accent) 82%, var(--fg));
   }
   .cta svg {
     width: 15px;
     height: 15px;
-    color: var(--accent);
+    flex: none;
     transition: transform 0.2s ease;
   }
   .cta:hover svg { transform: translateX(3px); }
@@ -426,10 +434,9 @@
   </div>
 
   <a class="cta keepout" href="how-archon-works/">
-    Read the example document
+    Example Doc
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"></path></svg>
   </a>
-
 
   <section class="invite keepout" aria-labelledby="invite-heading">
     <h2 id="invite-heading">Request an invite</h2>
@@ -452,7 +459,7 @@
     </form>
   </section>
 
-  <p class="aside keepout">built with <a href="https://github.com/aiur-team/archon">aiur-team/archon</a></p>
+  <p class="aside keepout">built with <a href="https://aiur.team">Aiur</a></p>
   </main>
 
 <script>
