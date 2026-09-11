@@ -65,7 +65,13 @@
     position: relative;
     z-index: 1;
     border-bottom: 1px solid var(--hairline);
-    background: var(--pill-bg);
+    /* The tint is painted over the page colour rather than straight onto the
+       page. `--pill-bg` is a 3%-alpha wash, so on its own the flow field behind
+       the banner reads straight through it and the band looks like part of the
+       diagonals. Layering it on an opaque `--bg` gives the same tint over a
+       solid band, which is how the matching announcement reads on aiur.team,
+       where no field runs behind it. */
+    background: linear-gradient(var(--pill-bg), var(--pill-bg)), var(--bg);
     font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: clamp(11px, 1.5vw, 13px);
     letter-spacing: 0.02em;
