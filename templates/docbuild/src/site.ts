@@ -75,7 +75,9 @@ const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * accident of another regular expression is one edit away from not being.
  */
 const RESERVED_ROUTES = new Set([
+  "admin",
   "api",
+  "assets",
   "d",
   "login",
   "invite",

@@ -34,6 +34,12 @@
 import { inspect } from "node:util";
 
 import { isLoopbackOrigin, registrableSite, validateOrigin, HostedContractError } from "./contracts.mjs";
+import { normalizeEmailOrNull } from "./email.mjs";
+import {
+  ALLOWLIST_LIMITS,
+  PlatformAccessError,
+  normalizeAllowlist,
+} from "./platform-access.mjs";
 
 /** What a secret renders as everywhere it could be rendered. */
 export const REDACTED = "[redacted]";
@@ -51,7 +57,23 @@ export const HOSTED_CONFIG_KEYS = Object.freeze([
   "AUTH0_CLIENT_SECRET",
   "HOSTED_PUBLISH_ENABLED",
   "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
+  "ARCHON_ADMINS",
+  "ARCHON_PLATFORM_ALLOWLIST",
+  "ARCHON_PLATFORM_ALLOWLIST_ENFORCED",
 ]);
+
+/**
+ * The widest `ARCHON_ADMINS` this module will read.
+ *
+ * Operator decision 3 makes admin a seeded operator identity rather than a
+ * grantable role: there is no promote-others path, so the realistic list is one
+ * address and the generous bound is ten. A cap at all is here because this value
+ * is parsed on every request through `readHostedConfig`, and an environment
+ * variable is the one input an operator can make arbitrarily long by accident -
+ * a pasted address book would otherwise be re-split and re-normalised on every
+ * hosted request forever.
+ */
+export const MAX_ADMINS = 10;
 
 /**
  * The two deployment modes, selected by argument.
@@ -140,6 +162,81 @@ function optionalBoolean(env, key) {
 }
 
 /**
+ * A comma-separated environment list, split and bounded, before any per-entry
+ * grammar runs.
+ *
+ * Unset and empty are one condition and produce the empty list, because an
+ * operator who has not set the key and one who set it to `""` have both declined
+ * the feature. Whitespace-only fragments are dropped rather than refused: a
+ * trailing comma on a list an operator edited by hand is a typo with an obvious
+ * intent, unlike a value that is not an address at all.
+ */
+function environmentList(env, key, max) {
+  const value = env[key];
+  if (typeof value !== "string" || value.trim() === "") return [];
+  const parts = value.split(",").map((part) => part.trim()).filter((part) => part !== "");
+  if (parts.length > max) {
+    throw new HostedConfigError(key, `may name at most ${max} entries`);
+  }
+  return parts;
+}
+
+/**
+ * The seeded admin addresses.
+ *
+ * Every entry must be an address this deployment could ever match, so each one
+ * goes through the same normaliser a principal's address goes through. A typo
+ * is a configuration error rather than an entry that silently matches nobody:
+ * an admin list is discovered to be wrong only when somebody needs it, and the
+ * person who needs it is locked out at that moment.
+ *
+ * The message names the key and the *position*, never the value: a misconfigured
+ * `ARCHON_ADMINS` is still a list of real people's addresses, and this message
+ * reaches a deploy log.
+ */
+function adminList(env) {
+  const parts = environmentList(env, "ARCHON_ADMINS", MAX_ADMINS);
+  const admins = new Set();
+  parts.forEach((part, index) => {
+    const email = normalizeEmailOrNull(part);
+    if (email === null) {
+      throw new HostedConfigError("ARCHON_ADMINS", `entry ${index + 1} is not an email address`);
+    }
+    admins.add(email);
+  });
+  return Object.freeze([...admins].sort());
+}
+
+/**
+ * The seeded platform-allowlist entries.
+ *
+ * These are a *seed*, not the list: the mutable list lives in the store so an
+ * admin can change it without a redeploy, and this half exists so a deployment
+ * can come up with a working operator already admitted. An entry here cannot be
+ * removed from the admin page - the page would have to write to the environment
+ * to do it - and the page says so rather than accepting a removal that the next
+ * request undoes.
+ */
+function allowlistSeed(env) {
+  const parts = environmentList(env, "ARCHON_PLATFORM_ALLOWLIST", ALLOWLIST_LIMITS.MAX_ENTRIES);
+  try {
+    return Object.freeze(normalizeAllowlist(parts).map((entry) => Object.freeze({ ...entry })));
+  } catch (error) {
+    if (error instanceof PlatformAccessError) {
+      /* The entry the parser echoed back is dropped here on purpose. It is
+         useful on the admin page, where an admin is reading back their own
+         typing; it is somebody's address in a deploy log. */
+      throw new HostedConfigError(
+        "ARCHON_PLATFORM_ALLOWLIST",
+        "must be a comma-separated list of email addresses and domains",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+/**
  * The Auth0 OIDC credential, with the secret behind a call rather than a
  * property.
  *
@@ -186,6 +283,9 @@ function buildAuth0Credential(domain, clientId, clientSecret) {
  *   renderSite: string | null,
  *   publishEnabled: boolean,
  *   allowPublicMailboxes: boolean,
+ *   admins: readonly string[],
+ *   platformAllowlistSeed: readonly {kind: string, value: string}[],
+ *   platformAllowlistEnforced: boolean,
  *   auth0: Readonly<{domain: string, clientId: string, readClientSecret: () => string}>,
  * }>}
  * @throws {HostedConfigError} naming the offending key, never its value
@@ -287,6 +387,14 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
      other flag here. */
   const allowPublicMailboxes = optionalBoolean(env, "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS");
 
+  /* The site-level operator identities and the platform allowlist. All three
+     are optional, and all three are validated here rather than at the point of
+     use for the same reason every other key is: a deployment whose admin list
+     is a typo must refuse to serve rather than serve with nobody admitted. */
+  const admins = adminList(env);
+  const platformAllowlistSeed = allowlistSeed(env);
+  const platformAllowlistEnforced = optionalBoolean(env, "ARCHON_PLATFORM_ALLOWLIST_ENFORCED");
+
   const auth0 = buildAuth0Credential(domain, clientId, clientSecret);
   const redactedView = () => ({
     mode,
@@ -297,6 +405,9 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     renderSite,
     publishEnabled,
     allowPublicMailboxes,
+    admins,
+    platformAllowlistSeed,
+    platformAllowlistEnforced,
     auth0: { domain, clientId, clientSecret: REDACTED },
   });
 
@@ -309,6 +420,9 @@ export function readHostedConfig(env, { mode = PRODUCTION } = {}) {
     renderSite,
     publishEnabled,
     allowPublicMailboxes,
+    admins,
+    platformAllowlistSeed,
+    platformAllowlistEnforced,
     auth0,
   };
   Object.defineProperties(config, {
@@ -336,6 +450,11 @@ export function formatHostedConfig(config) {
     `render=${config.renderOrigin}`,
     `publish=${config.publishEnabled ? "enabled" : "disabled"}`,
     `publicMailboxDomains=${config.allowPublicMailboxes ? "allowed" : "refused"}`,
+    /* Counts, never the entries. This line is written to a deploy log, and the
+       admin list and the allowlist are both lists of real people's addresses. */
+    `admins=${config.admins.length}`,
+    `allowlistSeed=${config.platformAllowlistSeed.length}`,
+    `allowlist=${config.platformAllowlistEnforced ? "enforced" : "recorded"}`,
     `auth0Domain=${config.auth0.domain}`,
     `auth0ClientId=${config.auth0.clientId}`,
     `auth0ClientSecret=${REDACTED}`,

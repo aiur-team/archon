@@ -1547,9 +1547,12 @@ test("a complete production configuration is accepted, with publishing off", () 
   assert.ok(Object.isFrozen(config));
 });
 
-test("the reader consults exactly C6's operator variables and ACN-007's override", () => {
+test("the reader consults exactly C6's operator variables, the override and the site roles", () => {
   assert.deepEqual([...HOSTED_CONFIG_KEYS].sort(), [
+    "ARCHON_ADMINS",
     "ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS",
+    "ARCHON_PLATFORM_ALLOWLIST",
+    "ARCHON_PLATFORM_ALLOWLIST_ENFORCED",
     "AUTH0_CLIENT_ID",
     "AUTH0_CLIENT_SECRET",
     "AUTH0_DOMAIN",
@@ -1557,6 +1560,15 @@ test("the reader consults exactly C6's operator variables and ACN-007's override
     "HOSTED_PUBLISH_ENABLED",
     "HOSTED_RENDER_ORIGIN",
   ]);
+  /* The three the admin console added are all optional, so an environment that
+     names none of them is still a complete configuration. The mail transport's
+     four keys are deliberately absent from this list: `mailer.mjs` reads them,
+     because a deployment that has not configured email must serve every other
+     hosted request normally rather than refuse to start. */
+  const bare = readHostedConfig(FIXTURE_ENV);
+  assert.deepEqual([...bare.admins], []);
+  assert.deepEqual([...bare.platformAllowlistSeed], []);
+  assert.equal(bare.platformAllowlistEnforced, false);
   /* An environment carrying nothing but the required ones is enough, and an
      extra variable changes nothing - in particular there is no environment
      value that selects the relaxed mode. */
@@ -1773,6 +1785,11 @@ test("the log line names every field an operator needs to read", () => {
       ` render=${FIXTURE_RENDER_ORIGIN}` +
       " publish=disabled" +
       " publicMailboxDomains=refused" +
+      /* Counts, never the entries: this line reaches a deploy log and both
+         lists are lists of real people's addresses. */
+      " admins=0" +
+      " allowlistSeed=0" +
+      " allowlist=recorded" +
       ` auth0Domain=${FIXTURE_ENV.AUTH0_DOMAIN}` +
       ` auth0ClientId=${FIXTURE_ENV.AUTH0_CLIENT_ID}` +
       ` auth0ClientSecret=${REDACTED}`,
@@ -1781,4 +1798,19 @@ test("the log line names every field an operator needs to read", () => {
     formatHostedConfig(readHostedConfig({ ...FIXTURE_ENV, HOSTED_PUBLISH_ENABLED: "true" })),
     /publish=enabled/,
   );
+
+  /* The counts move with the configuration, and no address appears in the line
+     however many there are. */
+  const seeded = formatHostedConfig(
+    readHostedConfig({
+      ...FIXTURE_ENV,
+      ARCHON_ADMINS: "ops@example.com",
+      ARCHON_PLATFORM_ALLOWLIST: "acme.example, named@gmail.com",
+      ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true",
+    }),
+  );
+  assert.match(seeded, /admins=1 allowlistSeed=2 allowlist=enforced/);
+  for (const secret of ["ops@example.com", "acme.example", "named@gmail.com"]) {
+    assert.ok(!seeded.includes(secret), `the log line does not carry ${secret}`);
+  }
 });

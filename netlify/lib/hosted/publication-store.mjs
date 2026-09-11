@@ -84,6 +84,19 @@ export const PUBLICATION_KEY_PREFIX = "publications/";
  */
 export const MAX_WRITE_ATTEMPTS = 6;
 
+/**
+ * How many publications one census may enumerate.
+ *
+ * A bound exists because `list` reads each record individually, so an
+ * unbounded enumeration is an unbounded number of provider reads inside one
+ * request, on a route a person is waiting on. Five hundred is far above what
+ * this deployment holds and far below anything that would time out; a census
+ * that hits it says so through `truncated` rather than silently returning a
+ * prefix, because a partial list an admin reads as complete is worse than a
+ * short one they know is short.
+ */
+export const MAX_LIST_RECORDS = 500;
+
 /** Storage is what failed, not the request. Always retryable, never detailed. */
 function unavailable(reason) {
   return new HostedContractError("unavailable", `publication storage ${reason}`, {
@@ -173,6 +186,7 @@ function isWellFormedWriteResult(result) {
  *   read: (id: string) => Promise<{record: object, etag: string} | null>,
  *   create: (record: object) => Promise<{outcome: "created"|"exists", record?: object, etag?: string}>,
  *   update: (record: object, etag: string) => Promise<{outcome: "committed"|"observed"|"refused", record?: object, etag?: string}>,
+ *   list: (options?: {limit?: number}) => Promise<{records: object[], unreadable: string[], truncated: boolean}>,
  * }>}
  */
 export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME } = {}) {
@@ -340,5 +354,62 @@ export function createPublicationStore({ getStore, name = PUBLICATION_STORE_NAME
     return { outcome: "refused" };
   }
 
-  return Object.freeze({ read, create, update });
+  /**
+   * Every publication in the store, for the admin census and nothing else.
+   *
+   * Three properties are deliberate.
+   *
+   * **It reports what it could not read rather than omitting it.** A record this
+   * version cannot interpret is the one an operator most needs to know exists,
+   * and a census that quietly dropped it would show an admin a shorter list than
+   * the truth and give them no way to notice. So a per-record read failure lands
+   * in `unreadable` as an id, and only a failure to enumerate the keys at all -
+   * where there is no list to be partial about - is an outage.
+   *
+   * **It reads each record through `read`.** The same validation, the same
+   * strong consistency and the same refusals as every other reader, so the
+   * census cannot become a second, laxer interpretation of a stored record.
+   *
+   * **It returns records, not a projection.** Deciding which fields an admin may
+   * see is an access decision and belongs to the route that made it, not to the
+   * storage adapter - this module has no idea who is asking.
+   */
+  async function list({ limit = MAX_LIST_RECORDS } = {}) {
+    let listing;
+    try {
+      listing = await handle().list({ prefix: PUBLICATION_KEY_PREFIX });
+    } catch {
+      throw unavailable("could not be enumerated");
+    }
+    const blobs = listing === null || typeof listing !== "object" ? null : listing.blobs;
+    if (!Array.isArray(blobs)) throw unavailable("returned an unusable listing");
+
+    const ids = blobs
+      .map((blob) => (typeof blob?.key === "string" ? blob.key.slice(PUBLICATION_KEY_PREFIX.length) : ""))
+      .filter((id) => id !== "")
+      .sort();
+    const truncated = ids.length > limit;
+
+    const records = [];
+    const unreadable = [];
+    for (const id of ids.slice(0, limit)) {
+      let entry;
+      try {
+        entry = await read(id);
+      } catch {
+        /* One unreadable record is a fact about that record, not an outage of
+           the census. The id is safe to report here and nowhere else: this
+           result reaches an admin and never an anonymous caller. */
+        unreadable.push(id);
+        continue;
+      }
+      /* A key that vanished between the listing and the read. Neither present
+         nor unreadable, so it is simply not in the census. */
+      if (entry === null) continue;
+      records.push(entry.record);
+    }
+    return { records, unreadable, truncated };
+  }
+
+  return Object.freeze({ read, create, update, list });
 }
