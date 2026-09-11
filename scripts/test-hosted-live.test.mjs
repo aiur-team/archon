@@ -309,6 +309,24 @@ test("the domain pair is judged by the deployed evaluator, and an admit is not a
   }
 });
 
+test("a refused domain is named by its rule, never by the value the operator supplied", () => {
+  /* `item()`'s contract is that a detail names a rule or a key and never a
+     supplied value, and G9 is the one gate whose evaluator hands back the
+     offending input. The mistake most likely to land here is an address typed
+     into a domain slot -- so an echo would put a person's identifier into CI
+     output, which is exactly what G4's opaque-label rule exists to prevent. */
+  const address = "pilot.owner@example.com";
+  const result = evaluatePreflight(completeEnv({ HOSTED_LIVE_DOMAIN_ADMITTED: address }));
+  assert.equal(result.ok, false);
+  const detail = gate(result, "G9").detail;
+  assert.match(detail, /invalid_domain/, "the refusal does not name the rule it applied");
+  /* Sanitized or not: the evaluator strips `@`, so the bare local part and the
+     bare host are both checked rather than only the address as typed. */
+  for (const fragment of [address, "pilot.owner", "pilot.ownerexample.com"]) {
+    assert.ok(!detail.includes(fragment), `G9 echoed the supplied value: ${detail}`);
+  }
+});
+
 test("test identities are two distinct opaque labels", () => {
   for (const accounts of ["pilot-owner", "pilot-owner,pilot-owner", "owner@example.com,other@example.com", "a,b,c"]) {
     const result = evaluatePreflight(completeEnv({ HOSTED_LIVE_ACCOUNTS: accounts }));
