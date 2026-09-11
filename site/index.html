@@ -114,7 +114,12 @@
     padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
     margin: 0;
     position: relative;
-    z-index: 1;
+    /* Above `.stage`, not merely above the flow field. `position: relative` with
+       a z-index makes this bar its own stacking context, so the account menu's
+       own z-index is confined to it: at the same z-index as `.stage`, which
+       comes later in the document, the stage paints over the open menu and
+       swallows its clicks, and Log out cannot be pressed at all. */
+    z-index: 2;
   }
   /* The failed-sign-in message wraps to its own line under the button and shares
      the page's error tone. Empty by default, so it occupies no space until the

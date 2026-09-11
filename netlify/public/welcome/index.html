@@ -85,7 +85,10 @@
     padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
     margin: 0;
     position: relative;
-    z-index: 1;
+    /* Above the page body for the same reason as the splash: this bar is its own
+       stacking context, so the account menu cannot rise above a sibling that
+       shares its z-index and would otherwise swallow the Log out click. */
+    z-index: 2;
   }
   .site-signin button {
     cursor: pointer;
