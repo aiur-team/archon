@@ -65,7 +65,6 @@ import { HostedContractError } from "../lib/hosted/contracts.mjs";
 import { identifyHosted } from "../lib/hosted/identity.mjs";
 import { publicationDependencies, readAccessiblePublication } from "../lib/hosted/publications.mjs";
 import {
-  DOCUMENT_PAGE_PATH,
   PAGE_PATTERN,
   PRIVATE_HEADERS,
   documentIdFrom,
@@ -78,7 +77,7 @@ import {
   viewerShell,
 } from "../lib/hosted/documents.mjs";
 
-export const config = { path: DOCUMENT_PAGE_PATH };
+export const config = { path: "/docs/:documentId" };
 
 /** The allowed methods, advertised on the refusal. */
 const ALLOW = "GET, HEAD";

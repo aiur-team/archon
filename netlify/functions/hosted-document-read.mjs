@@ -63,8 +63,6 @@ import { publicationDependencies, readAccessiblePublication } from "../lib/hoste
 import {
   CONTENT_DISPOSITION,
   CONTENT_PATTERN,
-  DOCUMENT_CONTENT_PATH,
-  DOCUMENT_METADATA_PATH,
   METADATA_PATTERN,
   PRIVATE_HEADERS,
   RAW_CONTENT_CSP,
@@ -74,7 +72,7 @@ import {
 } from "../lib/hosted/documents.mjs";
 import { errorResponse, jsonResponse } from "../lib/hosted/publications-http.mjs";
 
-export const config = { path: [DOCUMENT_METADATA_PATH, DOCUMENT_CONTENT_PATH] };
+export const config = { path: ["/api/hosted/docs/:documentId", "/api/hosted/docs/:documentId/content"] };
 
 /** The allowed methods. C4 requires HEAD to authorise exactly as GET does. */
 const ALLOW = "GET, HEAD";

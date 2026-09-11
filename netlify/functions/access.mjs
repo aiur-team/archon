@@ -1940,4 +1940,4 @@ export default async function handler(req, context) {
   return productionHandler(req);
 }
 
-export const config = { path: [BASE_PATH, TRANSFER_PATH] };
+export const config = { path: ["/api/access", "/api/access/transfer"] };
