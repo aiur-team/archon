@@ -26,9 +26,10 @@ import {
   applicationOrigin,
   classifyHost,
   firstPartyPageHeaders,
-  APP_PUBLIC_PATHS,
-  isApplicationPassThrough,
+  APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
+  isApplicationPassThrough,
+  isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -119,19 +120,19 @@ test("isRenderPrefix and isApplicationPassThrough classify application paths", (
   }
 });
 
-test("isApplicationPublic matches the reference documents by exact path only", () => {
+test("isPublicDocument matches the reference documents by exact path only", () => {
   assert.deepEqual(
-    [...APP_PUBLIC_PATHS].sort(),
+    [...APP_PUBLIC_DOCUMENT_PATHS].sort(),
     ["/components/", "/example/", "/how-archon-works/"],
-    "the public set is the three built reference documents and nothing else",
+    "the public document set is the three built reference documents and nothing else",
   );
-  for (const pub of APP_PUBLIC_PATHS) {
-    assert.equal(isApplicationPublic(pub), true, `${pub} is public`);
+  for (const pub of APP_PUBLIC_DOCUMENT_PATHS) {
+    assert.equal(isPublicDocument(pub), true, `${pub} is a public document`);
   }
-  /* The whole safety argument of the public set is that membership is equality,
-     never a prefix. Each of these shares a prefix with a public route and is a
-     path a collaboration document could legitimately be served at, so each one
-     being false is what keeps the public set from leaking into the slug
+  /* The whole safety argument of the public document set is that membership is
+     equality, never a prefix. Each of these shares a prefix with a public route
+     and is a path a collaboration document could legitimately be served at, so
+     each one being false is what keeps the public set from leaking into the slug
      namespace around it. */
   for (const gated of [
     "/example",
@@ -147,8 +148,14 @@ test("isApplicationPublic matches the reference documents by exact path only", (
     "/",
     "/some-slug/",
   ]) {
-    assert.equal(isApplicationPublic(gated), false, `${gated} is not public`);
+    assert.equal(isPublicDocument(gated), false, `${gated} is not a public document`);
   }
+  /* The two public sets are disjoint and stay that way: one is the landing
+     page's images, the other is documents, and neither answers for the other. */
+  for (const pub of APP_PUBLIC_DOCUMENT_PATHS) {
+    assert.equal(isApplicationPublic(pub), false, `${pub} is not a landing-page subresource`);
+  }
+  assert.equal(isPublicDocument("/assets/logo.png"), false, "an image is not a public document");
 });
 
 test("rendererHeaders is the renderer set: one CSP, no X-Frame-Options", () => {
@@ -653,13 +660,13 @@ test("application host session-checks a collaboration slug and serves a readable
 });
 
 test("the built reference documents are served to an anonymous visitor with no session check", async (t) => {
-  /* The acceptance property of ACN #232: each public reference route answers
-     200 with the built document body to a visitor carrying no session cookie --
-     no 303 to /login/, no 403 "You do not have access to this document". If the
-     public passlist is removed these three assertions fail loudly, because the
-     path falls straight back to `sessionGate` and an anonymous request there is
-     a redirect. */
-  for (const path of APP_PUBLIC_PATHS) {
+  /* The acceptance property of #232: each public reference route answers 200
+     with the built document body to a visitor carrying no session cookie -- no
+     303 to /login/, no 403 "You do not have access to this document". If the
+     public-document passlist is removed these assertions fail loudly, because
+     the path falls straight back to `sessionGate` and an anonymous request
+     there is a redirect. */
+  for (const path of APP_PUBLIC_DOCUMENT_PATHS) {
     const { response, calls } = await runGate(APP_HOST, path, {
       cookie: null,
       next: () => docPage(),
@@ -678,13 +685,13 @@ test("the built reference documents are served to an anonymous visitor with no s
   }
 
   /* A public document's `doc-id` is never even read, so its answer cannot
-     depend on an access row. Presenting a session that would be refused the
-     document changes nothing about what comes back. */
+     depend on an access row. Presenting a session changes nothing about what
+     comes back, which is what makes it a publication rather than a grant. */
   const withSession = await runGate(APP_HOST, "/example/", { next: () => docPage() });
   assert.equal(withSession.response.status, 200, "a signed-in visitor gets the same answer");
   assert.equal(control.identifyCalls, 0, "whose session is not even resolved");
   assert.equal(control.resolveCalls, 0, "and still no role is resolved");
-  t.diagnostic(`public reference routes: ${APP_PUBLIC_PATHS.join(" ")}`);
+  t.diagnostic(`public reference routes: ${APP_PUBLIC_DOCUMENT_PATHS.join(" ")}`);
 });
 
 test("a near miss of a public reference route is still gated", async () => {
@@ -706,8 +713,8 @@ test("a near miss of a public reference route is still gated", async () => {
     assert.equal(calls.next, 0, `${path} is refused before anything is fetched`);
   }
 
-  /* Without its trailing slash `/example` is not the document's route and not
-     a destination ACN-005's grammar accepts, so it is the bare sign-in page. */
+  /* Without its trailing slash `/example` is not the document's route and not a
+     destination ACN-005's grammar accepts, so it is the bare sign-in page. */
   const bare = await runGate(APP_HOST, "/example", {
     cookie: null,
     session: () => sessionResponse({ v: 1, authenticated: false }),
@@ -823,6 +830,65 @@ test("the redirect destination is only ever one ACN-005's grammar accepts", asyn
       `${path} is not expressible as a destination and none is offered`,
     );
   }
+});
+
+test("a landing subresource costs no session lookup and resolves no role", async () => {
+  for (const path of ["/favicon.ico", "/assets/aiur-logo.png"]) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+      next: () => staticPage(),
+    });
+    assert.equal(response.status, 200, `${path} is served with no session`);
+    assert.equal(calls.session.length, 0, `${path} costs no session lookup`);
+    assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
+  }
+});
+
+test("the landing page's own subresources are served to an anonymous visitor", () => {
+  /* #229 made the splash at `/` public; it did not make what the page loads
+     public with it, and every one of those is a deeper path that still reaches
+     the session gate. Without this the page is public and looks broken: each
+     image answers a sign-in redirect. */
+  for (const path of ["/favicon.ico", "/apple-touch-icon.png", "/assets/aiur-logo.png"]) {
+    assert.equal(isApplicationPublic(path), true, `${path} is a public subresource`);
+  }
+  /* And the root is deliberately absent: `PUBLIC_ROOT` in the gate owns the page
+     itself and gives it the landing-page policy. A second opinion here would be
+     two answers to one question. */
+  assert.equal(isApplicationPublic("/"), false, "the root is not this set's business");
+  assert.equal(isApplicationPublic("/some-slug/"), false, "a document slug is still gated");
+  assert.equal(isApplicationPublic("/assets"), false, "the tree is a prefix, not a bare name");
+  /* The trailing-slash case is the dangerous one: `/assets/` is slug-shaped, so
+     it is only safe to answer it publicly because `assets` is a reserved first
+     segment (in this gate and in the builder's RESERVED_ROUTES) and can never be
+     a collaboration document. It is the marketing image tree's root, public. */
+  assert.equal(isApplicationPublic("/assets/"), true, "the image tree root is public, and `assets` is a reserved slug so it is never a gated document");
+});
+
+test("a document slug that merely starts with admin is still gated", () => {
+  /* `/admin` is the console's own address and carries no trailing slash, so it
+     cannot go in the prefix list: those are tested with `startsWith`, and a bare
+     "/admin" also matches `/adminfoo/` and `/admin-x/`. Both are legal
+     collaboration slugs -- the grammar is `[a-z0-9-]{1,64}` -- so that spelling
+     would pass somebody else's document straight through the session gate. */
+  assert.equal(isApplicationPassThrough("/admin"), true, "the console itself passes through");
+  assert.equal(isApplicationPassThrough("/admin/admin.js"), true, "and so does its asset tree");
+  for (const slug of ["/adminfoo/", "/admin-x/", "/administrator/", "/admins/"]) {
+    assert.equal(isApplicationPassThrough(slug), false, `${slug} is a document slug and stays gated`);
+  }
+});
+
+test("the admin console passes through to its own authorisation", async () => {
+  // `/admin` decides for itself: a signed-out visitor gets a redirect from the
+  // route and a signed-in non-admin gets a 403 from it. The gate must not turn
+  // the first of those into its own sign-in redirect, because a route that
+  // knows `ARCHON_ADMINS` is the only thing that can tell the two apart.
+  const { response, calls } = await runGate(APP_HOST, "/admin", {
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+    next: () => staticPage(),
+  });
+  assert.equal(response.status, 200, "the route's own answer is returned");
+  assert.equal(calls.session.length, 0, "the gate performs no session lookup of its own");
 });
 
 test("a session-store outage is a 503 and never a sign-in redirect", async () => {

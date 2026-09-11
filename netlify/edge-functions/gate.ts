@@ -9,6 +9,7 @@ import {
   classifyHost,
   isApplicationPassThrough,
   isApplicationPublic,
+  isPublicDocument,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -73,6 +74,8 @@ const SESSION_COOKIE = "__Host-archon_session";
  */
 const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 const RESERVED_FIRST_SEGMENTS = [
+  "admin",
+  "assets",
   "login",
   "invite",
   "publish",
@@ -368,9 +371,10 @@ async function renderHost(
 
 /**
  * The application host serves the collaboration app, the hosted viewer and the
- * APIs. It refuses the renderer shell prefix, passes the API, assets, sign-in,
- * viewer, publish and invitation paths through with no session check, and
- * applies the existing session and access logic to everything else. Every
+ * APIs. It refuses the renderer shell prefix, serves the public splash page to
+ * anybody, passes the API, assets, admin console, sign-in, viewer, publish and
+ * invitation paths through with no session check, and applies the existing
+ * session and access logic to everything else. Every
  * answer gains the application header set unless it already carries a CSP.
  */
 async function applicationHost(
@@ -390,6 +394,12 @@ async function applicationHost(
     );
   }
 
+  /* The landing page's own subresources - its images, its favicons - served to
+     anybody, because #229 made the page public and did not make what the page
+     loads public with it. A deeper path is still gated, so without this the
+     splash renders with broken images and an anonymous visitor's browser
+     follows a sign-in redirect for each one. They are not HTML and take the
+     application header set through the same pass-through as a built asset. */
   /* The paths that used to be `excludedPath` in TOML, decided in code now that
      the gate runs on every path: passed through with no session check. A
      function response keeps its own headers; a static one gains the set. The
@@ -401,14 +411,15 @@ async function applicationHost(
      visitor lands on the splash rather than the sign-in redirect. Only the exact
      root is public; every deeper path stays gated.
 
-     The built reference documents -- `APP_PUBLIC_PATHS` -- join it. They are
-     the product's own documentation, so they are read without signing in. They
-     are matched by exact full path rather than by prefix, and the list is held
-     equal to the documents that declare themselves public at build time, so no
-     private collaboration document can fall inside the public set. */
+     The built reference documents join them. They are the product's own
+     documentation, so they are read without signing in. They are matched by
+     exact full path rather than by prefix, and the list is held equal at build
+     time to the documents that declare themselves public, so no private
+     collaboration document can fall inside the public set. */
   if (
     url.pathname === PUBLIC_ROOT ||
     isApplicationPublic(url.pathname) ||
+    isPublicDocument(url.pathname) ||
     isApplicationPassThrough(url.pathname)
   ) {
     let passed: Response;
@@ -420,13 +431,13 @@ async function applicationHost(
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
     if (url.pathname === PUBLIC_ROOT) return withLandingPageHeaders(passed);
-    /* A public reference document is the same bytes under the same header set
-       a signed-in reader gets today; only the session check is skipped. It does
+    /* A public reference document is the same bytes under the same header set a
+       signed-in reader gets today; only the session check is skipped. It does
        not take `finalizePassThrough`'s first-party page set, because that would
-       make the answer depend on who asked -- the one thing a public document
-       must not do. */
-    if (isApplicationPublic(url.pathname))
-      return withApplicationHeaders(passed);
+       make a document's policy depend on whether it was gated -- and the whole
+       point of publishing one is that the answer no longer depends on who
+       asked. */
+    if (isPublicDocument(url.pathname)) return withApplicationHeaders(passed);
     return finalizePassThrough(passed);
   }
 

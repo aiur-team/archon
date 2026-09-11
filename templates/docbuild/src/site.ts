@@ -75,7 +75,9 @@ const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * accident of another regular expression is one edit away from not being.
  */
 const RESERVED_ROUTES = new Set([
+  "admin",
   "api",
+  "assets",
   "d",
   "login",
   "invite",
@@ -437,7 +439,7 @@ function preflightHostedRoutes(root: string): void {
  * Hold the deployed gate's public-route list equal to the documents that
  * declare themselves public.
  *
- * `netlify/lib/edge-host.mjs` carries `APP_PUBLIC_PATHS`, the closed set of
+ * `netlify/lib/edge-host.mjs` carries `APP_PUBLIC_DOCUMENT_PATHS`, the closed set of
  * exact paths the edge gate serves with no session check. The edge cannot
  * derive that set: the deploy tree is `netlify/` and the lockfiles, and no
  * `doc.json` travels with it. So it is a copy -- and an unchecked copy of a
@@ -476,12 +478,12 @@ async function preflightPublicRoutes(root: string, docs: SiteMetadata[]): Promis
   let listed: unknown;
   try {
     const mod = await import(pathToFileURL(join(root, EDGE_HOST_MODULE)).href);
-    listed = mod.APP_PUBLIC_PATHS;
+    listed = mod.APP_PUBLIC_DOCUMENT_PATHS;
   } catch (e) {
     return fail(`${EDGE_HOST_MODULE}: ${osError(e)}`);
   }
   if (!Array.isArray(listed) || listed.some((path) => typeof path !== "string")) {
-    return fail(`${EDGE_HOST_MODULE}: APP_PUBLIC_PATHS must be an array of strings`);
+    return fail(`${EDGE_HOST_MODULE}: APP_PUBLIC_DOCUMENT_PATHS must be an array of strings`);
   }
   const published = [...(listed as string[])].sort();
 

@@ -143,7 +143,7 @@ const root = (
     renderer?: boolean;
     /** `doc.json`'s `public`, omitted entirely when undefined. */
     documentPublic?: unknown;
-    /** The `APP_PUBLIC_PATHS` a stand-in edge module exports, or no module. */
+    /** The `APP_PUBLIC_DOCUMENT_PATHS` a stand-in edge module exports, or no module. */
     publicPaths?: string[];
   } = {},
 ): string => {
@@ -185,7 +185,7 @@ const root = (
     mkdirSync(join(dir, "netlify", "lib"), { recursive: true });
     writeFileSync(
       join(dir, "netlify", "lib", "edge-host.mjs"),
-      `export const APP_PUBLIC_PATHS = Object.freeze(${JSON.stringify(options.publicPaths)});\n`,
+      `export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze(${JSON.stringify(options.publicPaths)});\n`,
     );
   }
 

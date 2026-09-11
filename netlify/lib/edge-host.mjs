@@ -40,8 +40,11 @@ export const RENDER_PREFIX = "/_render/";
 
 /**
  * The application-host paths that pass through with no session check: the API,
- * the built assets, the sign-in and invitation pages, the hosted viewer and the
- * publish flow. `excludedPath` used to carve these out of the gate in TOML; the
+ * the built assets, the admin console, the sign-in and invitation pages, the
+ * hosted viewer and the publish flow. Each one is served by a function that
+ * makes its own authorisation decision - `/admin` answers a signed-out visitor
+ * with a redirect to sign in and a signed-in non-admin with a 403, which is a
+ * decision only the route holding `ARCHON_ADMINS` can make. `excludedPath` used to carve these out of the gate in TOML; the
  * gate runs on every path now, so it names them itself. A path here that a
  * function serves keeps the function's own headers; a static one gains the
  * application header set.
@@ -49,6 +52,7 @@ export const RENDER_PREFIX = "/_render/";
 const APP_PASS_THROUGH_PREFIXES = Object.freeze([
   "/api/",
   "/_assets/",
+  "/admin/",
   "/login/",
   "/docs/",
   "/publish/",
@@ -56,23 +60,69 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
 ]);
 
 /**
- * The application-host paths served publicly with no session check: the built
- * reference documents this repository composes from its own committed
- * `doc.json` files. They are documentation of the product, so an anonymous
- * visitor reads them without signing in, while every other document stays
- * behind the session and access gate exactly as before.
+ * The pass-through paths that are a whole path rather than a prefix.
  *
- * Two properties make this safe to widen the public surface with, and both are
+ * `/admin` is the admin console's own address and has no trailing slash, so it
+ * cannot be spelled in the list above: every entry there is tested with
+ * `startsWith`, and a bare `"/admin"` would also match `/adminfoo/` and
+ * `/admin-x/` - both of which are legal collaboration slugs, since the grammar
+ * is `[a-z0-9-]{1,64}`. That would have passed somebody else's document straight
+ * through the session gate to whoever asked for it.
+ *
+ * So the exact page is matched by equality and its asset tree by the `/admin/`
+ * prefix above, and nothing between the two is reachable.
+ */
+const APP_PASS_THROUGH_PATHS = Object.freeze(["/admin"]);
+
+/**
+ * The landing page's own subresources, readable with no session at all.
+ *
+ * #229 made the splash at `/` public; it did not make what the page *loads*
+ * public with it, and every one of those is a deeper path that still reaches the
+ * session gate. The visible symptom is a landing page whose logo and favicons
+ * each answer a sign-in redirect to an anonymous visitor - the page is public and
+ * looks broken.
+ *
+ * So this is deliberately *only* the subresources. `/` is not here and must not
+ * be: `PUBLIC_ROOT` in `netlify/edge-functions/gate.ts` owns the page itself and
+ * gives it the landing-page policy, and a second opinion about the root would be
+ * two answers to one question.
+ *
+ * Exact strings, plus one prefix for the image tree. A prefix of `/` would make
+ * the whole application host anonymous, which is why the root is not expressible
+ * here at all. Nothing that reads a document, a session or a store is reachable
+ * through this set.
+ */
+const APP_PUBLIC_PATHS = Object.freeze([
+  "/favicon.ico",
+  "/favicon-16x16.png",
+  "/favicon-32x32.png",
+  "/apple-touch-icon.png",
+]);
+
+/** The one public tree: the homepage's images, which land at `_site/assets/`. */
+const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
+
+/**
+ * The built reference documents, served to anybody with no session check.
+ *
+ * These are the documents this repository composes from its own committed
+ * `doc.json` files. They are the product's documentation, so an anonymous
+ * visitor reads them without signing in, while every other document stays
+ * behind the session and access gate exactly as before. They are a separate set
+ * from `APP_PUBLIC_PATHS` above deliberately: that one is the landing page's
+ * own subresources and reaches no document at all, and merging the two would
+ * hide a document route inside a list a reader scans for images.
+ *
+ * Two properties make it safe to publish a document this way, and both are
  * load-bearing:
  *
- *   * **Exact full paths, never prefixes.** `isApplicationPassThrough` above
- *     matches with `startsWith` because its entries are directory namespaces
- *     the site owns outright. These are not: `/example/` is one document among
- *     a namespace of sibling documents, and `SLUG_RE` in
- *     `templates/docbuild/src/site.ts` admits `example-thing`. A prefix match
- *     here would silently publish every future slug that happens to begin with
- *     one of these names, which is the class of defect a broad `/assets/`
- *     prefix has already caused on this site. Membership is equality.
+ *   * **Exact full paths, never prefixes.** These are not a namespace the site
+ *     owns outright: `/example/` is one document among a namespace of sibling
+ *     documents, and `SLUG_RE` in `templates/docbuild/src/site.ts` admits
+ *     `example-thing`. A prefix match would silently publish every future slug
+ *     beginning with a published one -- the same defect `APP_PASS_THROUGH_PATHS`
+ *     above exists to avoid for `/admin`. Membership is equality.
  *   * **The list is closed and held equal to the build.** A route may only
  *     appear here when the document that owns it declares `"public": true` in
  *     its `doc.json`, and `preflightPublicRoutes` in
@@ -87,11 +137,12 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
  * present on the edge. This is the edge's copy of a fact the build owns, and
  * the preflight is what keeps the copy honest.
  */
-export const APP_PUBLIC_PATHS = Object.freeze([
+export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze([
   "/components/",
   "/example/",
   "/how-archon-works/",
 ]);
+
 
 /**
  * A header-safe origin serialization, the same shape `renderer/scripts/build.mjs`
@@ -238,22 +289,34 @@ export function rendererRewriteTarget(pathname, search) {
  * @returns {boolean}
  */
 export function isApplicationPassThrough(pathname) {
+  if (APP_PASS_THROUGH_PATHS.includes(pathname)) return true;
   return APP_PASS_THROUGH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 /**
- * Whether an application-host path is one of the public reference documents,
- * served with no session check.
- *
- * Exact membership of `APP_PUBLIC_PATHS` and nothing else: no prefix, no
- * normalization, no trailing-slash tolerance. `/example` and `/example-thing/`
- * are both false, and each stays gated.
+ * Whether an application-host path is public: readable with no session at all.
  *
  * @param {string} pathname
  * @returns {boolean}
  */
 export function isApplicationPublic(pathname) {
-  return APP_PUBLIC_PATHS.includes(pathname);
+  if (APP_PUBLIC_PATHS.includes(pathname)) return true;
+  return APP_PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/**
+ * Whether an application-host path is one of the built reference documents,
+ * served with no session check.
+ *
+ * Exact membership of `APP_PUBLIC_DOCUMENT_PATHS` and nothing else: no prefix,
+ * no normalization, no trailing-slash tolerance. `/example` and
+ * `/example-thing/` are both false, and each stays gated.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isPublicDocument(pathname) {
+  return APP_PUBLIC_DOCUMENT_PATHS.includes(pathname);
 }
 
 /**

@@ -40,6 +40,13 @@ exhaustive component reference, built by this template so it cannot drift from t
 | `DOC_OWNERS` | Comma-separated document-owner seeds in `<document>:<email>` form. |
 | `HOSTED_PUBLISH_ENABLED` | The publishing tap. Spelled exactly `true` or `false`; anything else is a configuration error, and unset means disabled. A deployment that ships with it unset refuses to start a publication or commit uploaded bytes. |
 | `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | Optional. Whether a document owner may list a public mailbox provider — `gmail.com`, `outlook.com` and the rest of the frozen list — as a domain that may read their document. Spelled exactly `true` or `false`; unset means refused. Enforced when an owner writes a list, not when a reader is admitted by one. Applies to hosted documents and collaboration documents alike. |
+| `ARCHON_ADMINS` | Optional. Comma-separated email addresses that hold the site-level admin capability: the `/admin` console, the document census and the platform allowlist. Seeded here and nowhere else — there is no path that grants it to anybody else. An admin is admitted only on a *verified* address matching an entry exactly, and a malformed entry is a configuration error rather than a silently empty list. |
+| `ARCHON_PLATFORM_ALLOWLIST` | Optional. Comma-separated seed for the platform allowlist: individual email addresses, whole domains, or both. An entry admits its holder to sign in and use the deployment; it shares no document, because which documents someone may open is still decided per document. This is the initial list only — the mutable one lives in the store and an admin edits it from `/admin` with no redeploy. An entry seeded here cannot be removed from that page. |
+| `ARCHON_PLATFORM_ALLOWLIST_ENFORCED` | Optional. Whether the platform allowlist actually gates sign-in. Spelled exactly `true` or `false`; unset means not enforced, and the list is recorded but inert. With it on, signing in requires an admin address, an allowlisted address, or an address at an allowlisted domain; an allowlist the store cannot be read for refuses with a retryable outage rather than admitting or denying. It is a separate switch rather than "a non-empty list is a gate" so that adding the first entry, or removing the last one, never changes the admission rule silently. |
+| `ARCHON_EMAIL_PROVIDER` | Optional. The transactional email provider for invite requests. The only accepted value is `resend`; the endpoint is a constant in `netlify/lib/hosted/mailer.mjs` and is deliberately not configurable. Set all four `ARCHON_EMAIL_*` keys or none — a partial configuration is an error, and none at all means the invite form reports itself unavailable. |
+| `ARCHON_EMAIL_API_KEY` | Optional. The provider API key. A real secret: never logged, never rendered, and reachable only through `readApiKey()`. |
+| `ARCHON_EMAIL_SENDER` | Optional. The address invite-request mail is sent from. Must be an address the provider will accept for your domain. |
+| `ARCHON_EMAIL_RECIPIENT` | Optional. The administrator address invite requests are delivered to. It is the only recipient: a requester's address is content of the message and never a `to`, so the form cannot be used as an open relay. |
 | `ABLY_API_KEY` | Optional Ably API key for realtime presence and events. |
 | `SLACK_WEBHOOK_URL` | Optional Slack webhook for notifications. |
 | `DOCS_REPO` | Source repository in `<owner>/<repository>` form for repository-backed edits. |
@@ -90,7 +97,7 @@ session. A document listing no domains admits its owner and the people the owner
 ### Publishing a document to everyone
 
 A document read without signing in is not a share, it is a publication, and it takes two edits rather than
-one. Set `"public": true` in its `doc.json`, and add its exact route to `APP_PUBLIC_PATHS` in
+one. Set `"public": true` in its `doc.json`, and add its exact route to `APP_PUBLIC_DOCUMENT_PATHS` in
 `netlify/lib/edge-host.mjs`. Omitting either is a build failure naming the route and the file, because the
 two lists are held equal: the gate runs on the edge, where no `doc.json` exists, so its copy of the public
 set is checked against the documents rather than trusted.
@@ -209,6 +216,13 @@ headers it gets. Every value below is a placeholder under a reserved documentati
    | `ABLY_API_KEY` | **yes** | Optional; presence and realtime events |
    | `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`; unset means disabled |
    | `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | no | Optional; exactly `true` or `false`; unset means refused |
+   | `ARCHON_ADMINS` | no | Optional; comma-separated admin addresses for `/admin` |
+   | `ARCHON_PLATFORM_ALLOWLIST` | no | Optional; comma-separated seed addresses and domains |
+   | `ARCHON_PLATFORM_ALLOWLIST_ENFORCED` | no | Optional; exactly `true` or `false`; unset means not enforced |
+   | `ARCHON_EMAIL_PROVIDER` | no | Optional; exactly `resend`. Set all four `ARCHON_EMAIL_*` keys or none |
+   | `ARCHON_EMAIL_API_KEY` | **yes** | Optional; the provider API key |
+   | `ARCHON_EMAIL_SENDER` | no | Optional; the address invite requests are sent from |
+   | `ARCHON_EMAIL_RECIPIENT` | no | Optional; the admin address invite requests go to |
 
    The free plan has no per-scope environment variables, so every value here is site-wide and the client
    secret is readable by the build step. The mitigation is that no build-time code reads it: only the

@@ -34,6 +34,7 @@ export function createProviderDouble() {
   let sequence = 0;
   const readFaults = [];
   const writeFaults = [];
+  const listFaults = [];
   const opened = [];
   const calls = [];
   let onBeforeWrite = null;
@@ -69,6 +70,27 @@ export function createProviderDouble() {
       if (fault?.data !== undefined) return { data: fault.data, etag: entry.etag, metadata: {} };
       if (fault?.unusable) return { data: null, etag: entry.etag, metadata: {} };
       return { data: entry.data, etag: entry.etag, metadata: {} };
+    },
+
+    /**
+     * The keys under a prefix, in the shape `@netlify/blobs` returns them.
+     *
+     * Only the fields the adapter reads are modelled - `blobs`, each with a
+     * `key` - because a double that invented an `etag` or a `size` here would be
+     * inviting a census to depend on something the real listing may not carry.
+     */
+    async list(options = {}) {
+      calls.push({ op: "list", options });
+      const fault = listFaults.shift() ?? null;
+      if (fault?.throws) throw new Error("provider list failure");
+      if (fault?.unusable) return { blobs: null, directories: [] };
+      const prefix = options.prefix ?? "";
+      return {
+        blobs: [...blobs.keys()]
+          .filter((key) => key.startsWith(prefix))
+          .map((key) => ({ key })),
+        directories: [],
+      };
     },
 
     async setJSON(key, value, options = {}) {
@@ -150,6 +172,10 @@ export function createProviderDouble() {
     failNextWrite(fault) {
       writeFaults.push(fault);
     },
+    /** Plant a listing fault: the enumeration itself failing, not one record. */
+    failNextList(fault) {
+      listFaults.push(fault);
+    },
     /** Reads issued so far, for a test that needs to plant a fault relative to now. */
     readCount: () => reads,
     /**
@@ -160,9 +186,10 @@ export function createProviderDouble() {
      * double is supposed to make impossible.
      */
     assertFaultsConsumed() {
-      if (readFaults.length > 0 || writeFaults.length > 0) {
+      if (readFaults.length > 0 || writeFaults.length > 0 || listFaults.length > 0) {
         throw new Error(
-          `unconsumed fault(s): ${readFaults.length} read, ${writeFaults.length} write`,
+          `unconsumed fault(s): ${readFaults.length} read, ${writeFaults.length} write, ` +
+            `${listFaults.length} list`,
         );
       }
     },
