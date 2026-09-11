@@ -23,9 +23,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applicationHeaders,
+  documentHeaders,
   applicationOrigin,
   classifyHost,
   firstPartyPageHeaders,
+  withDocumentHeaders,
   APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
   isApplicationPassThrough,
@@ -236,6 +238,84 @@ test("withFirstPartyPageHeaders adds the page set only when no CSP is present", 
     "a response that already carries a CSP keeps its own",
   );
   assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no page X-Frame-Options");
+});
+
+test("documentHeaders is a built artifact's CSP: inline script and style, its fonts and its realtime stream", () => {
+  const headers = documentHeaders();
+  const csp = headers.find(([name]) => name === "Content-Security-Policy")[1];
+  assert.ok(csp.startsWith("default-src 'none'"), "still default-deny");
+  assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), "the artifact's inline <script> may run");
+  assert.ok(
+    csp.includes("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com"),
+    "its inline <style> may apply and its font stylesheet may load",
+  );
+  assert.ok(csp.includes("font-src https://fonts.gstatic.com"), "the font files it links may load");
+  assert.ok(csp.includes("connect-src 'self'"), "/api/edit and /api/realtime-token may be called");
+  assert.ok(csp.includes("img-src 'self' data:"), "an authored image may load");
+  assert.ok(csp.includes("form-action 'none'"), "a document posts with fetch, never a form");
+  assert.ok(csp.includes("frame-ancestors 'none'"), "a document is still unframable");
+  assert.ok(csp.includes("base-uri 'none'"));
+  assert.equal(headers.find(([name]) => name === "X-Frame-Options")[1], "DENY");
+  assert.equal(headers.find(([name]) => name === "X-Content-Type-Options")[1], "nosniff");
+  assert.equal(headers.find(([name]) => name === "Referrer-Policy")[1], "no-referrer");
+
+  /* The set a document must NOT be served under. `applicationHeaders` names no
+     script-src, style-src, font-src or connect-src, so each falls back to
+     'none' and the artifact renders as unstyled text with nothing running
+     (#235). Pinning the inequality means loosening documentHeaders back into
+     the API set fails here rather than only in the two gate assertions. */
+  const api = applicationHeaders().find(([name]) => name === "Content-Security-Policy")[1];
+  assert.notEqual(csp, api, "a document never takes the API header set's CSP");
+  for (const directive of ["script-src", "style-src", "font-src", "connect-src", "img-src"]) {
+    assert.ok(!api.includes(directive), `applicationHeaders still omits ${directive}`);
+  }
+});
+
+test("the document CSP names the realtime origin the document actually opens", () => {
+  /* `DOCUMENT_REALTIME_ORIGIN` is a third hand copy of a literal that lives in
+     the browser client the build inlines and in the Node module that mints the
+     client's token, neither of which the edge bundle can import. If the
+     realtime origin ever moves, this fails rather than leaving every document's
+     presence, comments and cursors silently blocked by connect-src. */
+  const csp = documentHeaders().find(([name]) => name === "Content-Security-Policy")[1];
+  const connect = /(^|; )connect-src ([^;]+)/.exec(csp)[2].split(" ");
+  const named = connect.filter((source) => source !== "'self'");
+  assert.equal(named.length, 1, "connect-src grants exactly one origin beyond same-origin");
+
+  for (const file of ["templates/base/realtime.js", "netlify/lib/realtime.mjs"]) {
+    const source = readFileSync(join(ROOT, file), "utf8");
+    const found = /ABLY_ORIGIN = "([^"]+)"/.exec(source);
+    assert.ok(found !== null, `${file} still declares ABLY_ORIGIN`);
+    assert.equal(found[1], named[0], `${file}'s realtime origin is the one the document CSP grants`);
+  }
+});
+
+test("withDocumentHeaders adds the document set only when no CSP is present", () => {
+  const bare = new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
+  withDocumentHeaders(bare);
+  assert.ok(
+    bare.headers.get("Content-Security-Policy").includes("script-src 'self' 'unsafe-inline'"),
+    "a bare document gains the document CSP",
+  );
+  assert.equal(bare.headers.get("X-Frame-Options"), "DENY");
+
+  const owned = new Response("x", {
+    headers: { "content-security-policy": "default-src 'none'; frame-ancestors 'none'" },
+  });
+  withDocumentHeaders(owned);
+  assert.equal(
+    owned.headers.get("Content-Security-Policy"),
+    "default-src 'none'; frame-ancestors 'none'",
+    "a response that already carries a CSP keeps its own",
+  );
+  assert.equal(owned.headers.get("X-Frame-Options"), null, "and gains no document X-Frame-Options");
+
+  /* The same unreadable-headers contract its siblings hold: it returns the
+     response rather than throwing out of the gate's answer path. */
+  const opaque = { get headers() { throw new Error("unreadable"); } };
+  assert.equal(withDocumentHeaders(opaque), opaque, "an unreadable response is returned untouched");
+  const wrong = { headers: { set() { throw new Error("must not be called"); } } };
+  assert.equal(withDocumentHeaders(wrong), wrong, "a non-Headers headers object is left alone");
 });
 
 test("notFoundForeignHost is a bodyless 404 with noindex", async () => {
@@ -666,8 +746,18 @@ test("application host session-checks a collaboration slug and serves a readable
   assert.equal(control.identifyCalls, 1, "the slug path performs the session lookup");
   assert.equal(control.resolveCalls, 1, "and resolves the role");
   assert.equal(await response.text(), PAGE, "the whole document is replayed");
-  assert.equal(cspCount(response), 1, "with exactly one application CSP");
+  assert.equal(cspCount(response), 1, "with exactly one CSP");
   assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
+  /* A granted reader's copy is a built artifact too, so it takes the document
+     set rather than the `default-src 'none'` application set that blocks its
+     own inline style and script (#235). Asserting the exact set here and the
+     identical one on the public branch above is what pins the property that a
+     document's policy does not depend on who asked for it. */
+  assert.deepEqual(
+    [...response.headers].filter(([name]) => applicationHeaderNames.has(name.toLowerCase())).sort(),
+    documentHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
+    "a gated document gets exactly the document header set",
+  );
 });
 
 test("the built reference documents are served to an anonymous visitor with no session check", async (t) => {
@@ -689,15 +779,17 @@ test("the built reference documents are served to an anonymous visitor with no s
     assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
     assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
     assert.equal(cspCount(response), 1, `${path} carries exactly one CSP`);
-    /* The exact policy, not merely "some CSP with frame-ancestors". Both the
-       application set and the first-party page set satisfy a looser assertion,
-       so a looser one would stay green if the public branch fell through to
-       `finalizePassThrough` -- which is the single line the comment beside it
-       argues hardest for. */
+    /* The exact policy, not merely "some CSP with frame-ancestors". The
+       application set, the first-party page set and the document set all
+       satisfy a looser assertion, so a looser one would stay green if the
+       public branch fell through to `finalizePassThrough` -- which is the
+       single line the comment beside it argues hardest for -- or if it kept the
+       `default-src 'none'` application set that renders the artifact unstyled
+       and inert (#235). */
     assert.deepEqual(
       [...response.headers].filter(([name]) => applicationHeaderNames.has(name.toLowerCase())).sort(),
-      applicationHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
-      `${path} gets exactly the application header set, not the first-party page set`,
+      documentHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
+      `${path} gets exactly the document header set`,
     );
     assert.equal(response.headers.get("Set-Cookie"), null, `${path} carries no Set-Cookie`);
   }

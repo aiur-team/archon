@@ -1,6 +1,6 @@
 /**
- * Host classification, the refusal matrix and the two security header sets for
- * the one Archon site.
+ * Host classification, the refusal matrix and the security header sets for the
+ * one Archon site.
  *
  * This is the single authority on which hostname the site is answering on and
  * what security headers each answer carries. `gate.ts` imports it and applies
@@ -549,6 +549,98 @@ export function withLandingPageHeaders(response) {
   if (!(headers instanceof Headers)) return response;
   if (headers.has("Content-Security-Policy")) return response;
   for (const [name, value] of landingPageHeaders()) headers.set(name, value);
+  return response;
+}
+
+/**
+ * The realtime origin a built document opens its event stream against. It is
+ * the same literal as `ABLY_ORIGIN` in `templates/base/realtime.js` -- the
+ * client the document embeds -- and in `netlify/lib/realtime.mjs`, which mints
+ * the token that stream carries. It cannot be imported from either: the first
+ * is browser source the build inlines into the artifact, and the second is a
+ * Node function module the edge bundle does not carry. A test asserts this
+ * copy equals both, so a move of the realtime origin cannot silently leave the
+ * document CSP naming the old one and every document's presence dark.
+ */
+const DOCUMENT_REALTIME_ORIGIN = "https://main.realtime.ably.net";
+
+/**
+ * The header set for a built document the application host serves -- the answer
+ * to a document route, whether the reader was granted access or the document
+ * published itself public.
+ *
+ * A built document cannot take the `applicationHeaders` set for the same reason
+ * the sign-in page could not (#228): that set is `default-src 'none'` naming no
+ * `script-src`, `style-src`, `font-src` or `connect-src`, so each falls back to
+ * `'none'`. A document is one self-contained HTML file whose styling and whose
+ * whole runtime -- the anchor core, the enhancer, comments, presence, inline
+ * editing -- are inline `<style>` and inline `<script>`. Under the application
+ * set the page renders as unstyled text and none of it runs.
+ *
+ * The grants are exactly what a built artifact uses and nothing more:
+ *
+ * - `script-src`/`style-src` carry `'unsafe-inline'` because the artifact is
+ *   inline by construction; `'self'` covers a same-origin file a future build
+ *   links rather than inlines.
+ * - The two Google Font origins, because the artifact links JetBrains Mono.
+ * - `connect-src` is `'self'` for `/api/edit`, `/api/realtime-token` and the
+ *   session projection, plus the realtime origin its `EventSource` opens.
+ * - `img-src 'self' data:` for an authored image; the artifact draws its own
+ *   marks as inline `<svg>`, which CSP does not govern.
+ *
+ * `form-action` stays `'none'`: a document posts with `fetch`, never a form.
+ * The framing and base-uri denials and the same `X-Frame-Options`, `nosniff`
+ * and referrer policy are identical to `applicationHeaders`, so a document is
+ * no more exposed than an API answer in any respect but the directives it must
+ * have to work.
+ *
+ * One set serves both the gated and the public answer deliberately. Publishing
+ * a document changes the session check and nothing else about the bytes or the
+ * policy they arrive under, so a document cannot render differently depending
+ * on who asked for it.
+ *
+ * @returns {Array<[string, string]>}
+ */
+export function documentHeaders() {
+  const csp = [
+    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    `connect-src 'self' ${DOCUMENT_REALTIME_ORIGIN}`,
+    "img-src 'self' data:",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+  return [
+    ["Content-Security-Policy", csp],
+    ["X-Frame-Options", "DENY"],
+    ["X-Content-Type-Options", "nosniff"],
+    ["Referrer-Policy", "no-referrer"],
+  ];
+}
+
+/**
+ * Apply the document header set to a response, but only when it carries no
+ * `Content-Security-Policy` of its own. Returns the same response instance,
+ * mutated in place, exactly as its siblings do; the caller decides a response
+ * is a built document before calling this.
+ *
+ * @param {Response} response
+ * @returns {Response}
+ */
+export function withDocumentHeaders(response) {
+  let headers;
+  try {
+    headers = response.headers;
+  } catch {
+    return response;
+  }
+  if (!(headers instanceof Headers)) return response;
+  if (headers.has("Content-Security-Policy")) return response;
+  for (const [name, value] of documentHeaders()) headers.set(name, value);
   return response;
 }
 
