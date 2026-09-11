@@ -337,9 +337,17 @@ async function renderMatrix() {
           clientWidth: document.documentElement.clientWidth,
           overflowing,
           controls: panel.querySelectorAll(".share-op").length,
+          coversToggle: (() => {
+            const toggle = document.querySelector("#doc-share-button").getBoundingClientRect();
+            return !(box.bottom <= toggle.top || box.top >= toggle.bottom
+              || box.right <= toggle.left || box.left >= toggle.right);
+          })(),
         };
       });
-      assert.equal(geometry.controls, 15, `expected every owner control at ${width}px`);
+      assert.equal(geometry.controls, 18, `expected every owner control at ${width}px`);
+      /* ACN-009 added a third section, and a panel tall enough to reach its own
+         toggle would cover the one control that closes it. */
+      assert.equal(geometry.coversToggle, false, `the panel covers its toggle at ${width}px`);
       assert.ok(geometry.documentOverflow <= 0, `the document scrolls sideways at ${width}px`);
       assert.ok(geometry.panelOverflow <= 0, `the panel scrolls sideways at ${width}px`);
       assert.ok(geometry.left >= -1 && geometry.right <= geometry.clientWidth + 1,
@@ -362,7 +370,8 @@ async function renderMatrix() {
           "#doc-share-panel button, #doc-share-panel input, #doc-share-panel select"));
         return { total: order.length, enabled: order.map((n, i) => (n.disabled ? -1 : i)).filter((i) => i !== -1) };
       });
-      assert.equal(expected.total, 16, "the owner panel has one close button and fifteen controls");
+      assert.equal(expected.total, 19,
+        "the owner panel has one close button and eighteen controls");
       const seen = [];
       for (let step = 0; step < expected.total + 2; step += 1) {
         await page.keyboard.press("Tab");

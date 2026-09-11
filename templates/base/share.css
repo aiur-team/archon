@@ -24,7 +24,11 @@
   z-index: 50;
   width: min(24rem, calc(100vw - 1rem));
   max-width: min(24rem, calc(100vw - 1rem));
-  max-height: calc(100vh - 1rem);
+  /* Bounded twice, and the second bound is why. Since ACN-009 the panel holds
+     three sections, and at a full roster it grew tall enough to reach back up
+     over the masthead toggle that opens it -- the panel then intercepted every
+     click on its own close path. The panel scrolls instead. */
+  max-height: min(calc(100vh - 1rem), 34rem);
   overflow: auto;
   padding: 1rem;
   color: var(--ink-2, #49525f);
@@ -79,12 +83,14 @@
 }
 
 .share-members,
-.share-invitations {
+.share-invitations,
+.share-domains {
   margin-top: 1rem;
 }
 
 .share-members h3,
-.share-invitations h3 {
+.share-invitations h3,
+.share-domains h3 {
   margin: 0 0 .45rem;
   font-size: .85rem;
   overflow-wrap: anywhere;
@@ -110,12 +116,25 @@
   unicode-bidi: isolate;
 }
 
+/* Off the screen, in the accessibility tree. Every remove control in the domain
+   list reads "Remove" on screen; this is what makes each one's accessible name
+   say which domain it removes, without the value reaching an attribute. */
+.share-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* P4-L — owner write controls.  Every rule stays inside P3-I's `.share-*`
    scope, inherits the panel's own colours, and distinguishes disabled, busy
    and confirmation states by more than colour alone. */
-.share-default-form,
+.share-domain-add,
 .share-invite,
 .share-row-controls,
+.share-domain-controls,
 .share-transfer-confirm {
   display: flex;
   flex-wrap: wrap;
@@ -125,7 +144,7 @@
   color: inherit;
 }
 
-.share-default-form,
+.share-domain-add,
 .share-invite {
   margin-top: .75rem;
 }
@@ -183,7 +202,7 @@ button.share-op:hover:enabled {
 }
 
 .share-pop[aria-busy="true"] .share-list li,
-.share-pop[aria-busy="true"] .share-default-form,
+.share-pop[aria-busy="true"] .share-domain-add,
 .share-pop[aria-busy="true"] .share-invite {
   opacity: .8;
 }
@@ -213,8 +232,9 @@ button.share-op:hover:enabled {
   }
 
   .share-row-controls button.share-op,
+  .share-domain-controls button.share-op,
   .share-invite button.share-op,
-  .share-default-form button.share-op {
+  .share-domain-add button.share-op {
     flex: 1 1 100%;
   }
 }

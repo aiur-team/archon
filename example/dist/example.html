@@ -1115,12 +1115,14 @@ nav.jump a.history-changed::after {
 }
 
 .share-members,
-.share-invitations {
+.share-invitations,
+.share-domains {
   margin-top: 1rem;
 }
 
 .share-members h3,
-.share-invitations h3 {
+.share-invitations h3,
+.share-domains h3 {
   margin: 0 0 .45rem;
   font-size: .85rem;
   overflow-wrap: anywhere;
@@ -1146,10 +1148,22 @@ nav.jump a.history-changed::after {
   unicode-bidi: isolate;
 }
 
+/* Off the screen, in the accessibility tree. Every remove control in the domain
+   list reads "Remove" on screen; this is what makes each one's accessible name
+   say which domain it removes, without the value reaching an attribute. */
+.share-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* P4-L — owner write controls.  Every rule stays inside P3-I's `.share-*`
    scope, inherits the panel's own colours, and distinguishes disabled, busy
    and confirmation states by more than colour alone. */
-.share-default-form,
+.share-domain-add,
 .share-invite,
 .share-row-controls,
 .share-transfer-confirm {
@@ -1161,7 +1175,7 @@ nav.jump a.history-changed::after {
   color: inherit;
 }
 
-.share-default-form,
+.share-domain-add,
 .share-invite {
   margin-top: .75rem;
 }
@@ -1219,7 +1233,7 @@ button.share-op:hover:enabled {
 }
 
 .share-pop[aria-busy="true"] .share-list li,
-.share-pop[aria-busy="true"] .share-default-form,
+.share-pop[aria-busy="true"] .share-domain-add,
 .share-pop[aria-busy="true"] .share-invite {
   opacity: .8;
 }
@@ -1250,7 +1264,7 @@ button.share-op:hover:enabled {
 
   .share-row-controls button.share-op,
   .share-invite button.share-op,
-  .share-default-form button.share-op {
+  .share-domain-add button.share-op {
     flex: 1 1 100%;
   }
 }
@@ -8524,6 +8538,14 @@ function mountSharePanel(event) {
   let inviteRole = null;
   let confirmation = null;
   let lastDomains = null;
+  /* ACN-009's domain editor. `domainEntry` is the owner's own typed value,
+     held here rather than read back off the input, so a roster refresh that
+     rebuilds the section does not throw away a domain they are mid-way through
+     correcting after a refusal. */
+  let domainSection = null;
+  let domainList = null;
+  let domainInput = null;
+  let domainEntry = "";
   let mutationMessage = "";
   let busy = false;
   let authorityUnknown = false;
@@ -8968,6 +8990,7 @@ function mountSharePanel(event) {
     inviteEmail = null;
     inviteRole = null;
     lastDomains = null;
+    domainEntry = "";
     mutationMessage = "";
     busy = false;
     pendingHeadingFocus = false;
@@ -9068,6 +9091,7 @@ function mountSharePanel(event) {
 
   function removeOwnerControls() {
     clearConfirmation(false);
+    removeDomainSection();
     if (inviteForm !== null) {
       inviteForm.remove();
       inviteForm = null;
@@ -9084,17 +9108,21 @@ function mountSharePanel(event) {
 
   /**
    * The organisation-default control used to sit here, and ACN-008 removed the
-   * tier it wrote. What the panel reports now is the document's own domain list:
-   * a read-only line, for the owner and for everybody else alike.
+   * tier it wrote. What replaces it, in ACN-009, is an editor for the thing
+   * that decides instead: the document's own domain list.
    *
-   * It is deliberately not editable yet. The list is the document's access
-   * policy and deserves a real editor -- entries, validation, the reason a
-   * mailbox provider is refused -- which is ACN-009's panel. Shipping a select
-   * that posted the retired body would be a control that fails on every click,
-   * so it is gone rather than left pointing at a route that no longer answers.
+   * Two surfaces, and the split is the point. `renderDomainPolicy` writes one
+   * read-only sentence for everybody who can see the roster, owner or editor,
+   * because "who can read this" is a fact about the document rather than an
+   * owner's secret. The editable section below it is built only for an owner
+   * and is *removed* rather than disabled for anybody else -- an editor gets no
+   * add control, no remove control and no form in the DOM at all, so there is
+   * nothing for a devtools toggle to re-enable. The server refuses their write
+   * regardless, which is the half that decides.
    */
   function renderOwnerForms(allowedDomains, owner) {
     lastDomains = allowedDomains;
+    removeDomainSection();
     if (inviteForm !== null) {
       inviteForm.remove();
       inviteForm = null;
@@ -9105,6 +9133,142 @@ function mountSharePanel(event) {
     if (!owner) return;
     inviteForm = createInviteForm();
     panel.insertBefore(inviteForm, memberSection);
+    domainSection = createDomainSection(allowedDomains);
+    panel.appendChild(domainSection);
+  }
+
+  function removeDomainSection() {
+    if (domainSection === null) return;
+    domainSection.remove();
+    domainSection = null;
+    domainList = null;
+    domainInput = null;
+  }
+
+  /**
+   * The third section, beside people and invitations.
+   *
+   * It lists domains rather than people, and offers no per-person control for
+   * anybody a domain admits, because a domain grant stores no record of who
+   * used it -- there is no person here to remove. Removing the domain is the
+   * only thing this list can offer and the only thing it does.
+   */
+  function createDomainSection(allowedDomains) {
+    const section = fixedElement("section", "share-domains", null);
+    section.setAttribute("aria-labelledby", "doc-share-domains-title");
+    const title = fixedElement("h3", "", "Email domains");
+    title.id = "doc-share-domains-title";
+    domainList = fixedElement("ul", "share-list", null);
+    domainList.replaceChildren(...allowedDomains.map(domainRow));
+
+    const form = fixedElement("form", "share-domain-add", null);
+    form.setAttribute("novalidate", "");
+    domainInput = opControl(fixedElement("input", "share-domain-input", null));
+    domainInput.setAttribute("type", "text");
+    domainInput.setAttribute("autocomplete", "off");
+    domainInput.setAttribute("autocapitalize", "none");
+    domainInput.setAttribute("spellcheck", "false");
+    domainInput.setAttribute("maxlength", "253");
+    domainInput.value = domainEntry;
+    domainInput.addEventListener("input", () => {
+      domainEntry = domainInput.value;
+    });
+    const submit = opControl(fixedElement("button", "share-domain-submit", "Add domain"));
+    submit.setAttribute("type", "submit");
+    form.append(labelled("Domain", domainInput), submit);
+    form.addEventListener("submit", handleAddDomain);
+
+    section.append(title, domainList, form);
+    return section;
+  }
+
+  function domainRow(domain) {
+    const row = document.createElement("li");
+    appendIsolatedFields(row, [domain]);
+    const group = fixedElement("div", "share-row-controls", null);
+    const remove = opButton("share-remove-domain", "Remove");
+    /* The domain rides in the control's accessible name as visually hidden
+       *text*, never an attribute, an id or a selector -- the same rule the
+       row's own value follows. Without it every row's button would be named
+       "Remove" and a reader hearing the controls alone could not tell them
+       apart. */
+    const named = fixedElement("span", "share-visually-hidden", ` ${domain}`);
+    remove.appendChild(named);
+    remove.addEventListener("click", () => {
+      if (lastDomains === null) return;
+      writeDomains(lastDomains.filter((entry) => entry !== domain), false);
+    });
+    group.appendChild(remove);
+    row.appendChild(group);
+    return row;
+  }
+
+  /**
+   * Add whatever is in the box.
+   *
+   * The value is trimmed and lowercased and otherwise sent exactly as typed.
+   * This panel holds no copy of the public-mailbox denylist and pre-validates
+   * against nothing: that list and its site-wide override are ACN-007's, and a
+   * second copy here would be a policy that drifts and a refusal an owner could
+   * not argue with. An empty box is the one thing refused locally, because
+   * there is nothing to send.
+   */
+  function handleAddDomain(event) {
+    event.preventDefault();
+    if (!ownerEligible() || domainInput === null || lastDomains === null) return;
+    if (busy || controller !== null) return;
+    const entered = domainInput.value.trim().toLowerCase();
+    if (entered === "") {
+      mutationMessage = "Enter a domain to add.";
+      status.textContent = mutationMessage;
+      return;
+    }
+    if (lastDomains.includes(entered)) {
+      domainEntry = "";
+      domainInput.value = "";
+      return;
+    }
+    writeDomains([...lastDomains, entered], true);
+  }
+
+  /**
+   * Send the whole list, as ACN-008's `["doc", "allowedDomains"]` body variant.
+   *
+   * The list is replaced rather than added to or removed from, which is the
+   * route's own shape: an owner looking at a list and pressing a control is
+   * stating what the list is, and two owners doing that at once resolve to a
+   * list one of them actually looked at rather than to a merge neither asked
+   * for.
+   *
+   * This is the one write on this panel whose success is `200` rather than
+   * `204`, because normalisation is visible -- case folds, duplicates collapse,
+   * order becomes canonical -- and the route answers with what it stored. The
+   * following roster read still owns every value the panel renders; the status
+   * code is all this call takes from the response.
+   */
+  function writeDomains(allowedDomains, clearEntry) {
+    sendMutation("PATCH", ACCESS_PATH, { doc: docId, allowedDomains }, false, () => {
+      if (!clearEntry) return;
+      domainEntry = "";
+      if (domainInput !== null) domainInput.value = "";
+    }, { okStatus: 200, reasonFor: domainRefusal });
+  }
+
+  /**
+   * What an owner is told about a refused domain list.
+   *
+   * The code is a closed enumeration this file matches against a table of its
+   * own literals; the response's text is never rendered. That keeps the panel's
+   * rule -- no mutation body becomes visible copy -- while still telling an
+   * owner which of the three refusals they hit, because the three call for
+   * three different actions: argue with a policy, cut the list, or fix a typo.
+   * Anything else, including `forbidden` and `not-found`, falls through to the
+   * generic line rather than saying why.
+   */
+  function domainRefusal(code) {
+    return Object.prototype.hasOwnProperty.call(DOMAIN_REFUSALS, code)
+      ? DOMAIN_REFUSALS[code]
+      : null;
   }
 
   function renderDomainPolicy(allowedDomains) {
@@ -9244,7 +9408,9 @@ function mountSharePanel(event) {
      request across mutation, session and roster work, no queue, no retry, and
      no response body is ever read from a mutation: the following GET owns
      every visible authoritative value. */
-  async function sendMutation(method, path, body, isTransfer, onAccepted) {
+  async function sendMutation(method, path, body, isTransfer, onAccepted, options = {}) {
+    const okStatus = options.okStatus === undefined ? 204 : options.okStatus;
+    const reasonFor = options.reasonFor === undefined ? null : options.reasonFor;
     if (removed || busy || controller !== null) return;
     if (panel === null || panel.hidden || !ownerEligible()) return;
     let endpoint;
@@ -9265,6 +9431,7 @@ function mountSharePanel(event) {
     status.textContent = "Updating access…";
     const deadline = setTimeout(() => requestController.abort(), 15_000);
     let outcome = null;
+    let rejectedCode = null;
     try {
       const response = await fetch(endpoint, {
         method,
@@ -9280,10 +9447,18 @@ function mountSharePanel(event) {
       if (response.redirected === true) outcome = "ambiguous";
       else if (code === 401) outcome = "unauthorized";
       else if (code === 403) outcome = "forbidden";
-      else if (code === 204) outcome = "ok";
+      else if (code === okStatus) outcome = "ok";
       else if (code === 400 || code === 404 || code === 413 || code === 415 || code === 429
         || (code === 409 && !isTransfer)) outcome = "rejected";
       else outcome = "ambiguous";
+      /* The one thing ever taken from a mutation response, and it is a closed
+         enumeration rather than text: which of ACN-007's three domain-list
+         refusals this was. The caller maps it to its own literals, so no string
+         a server chose reaches the panel, and the roster read that follows
+         still owns every value rendered. */
+      if (outcome === "rejected" && code === 400 && reasonFor !== null) {
+        rejectedCode = await readRefusalCode(response);
+      }
     } catch (error) {
       if (isCurrent(requestGeneration)) outcome = "ambiguous";
     } finally {
@@ -9304,7 +9479,8 @@ function mountSharePanel(event) {
     } else if (outcome === "forbidden") {
       mutationMessage = "Your access changed.";
     } else if (outcome === "rejected") {
-      mutationMessage = "Access change was not accepted.";
+      const named = reasonFor === null ? null : reasonFor(rejectedCode);
+      mutationMessage = named === null ? "Access change was not accepted." : named;
     } else {
       mutationMessage = "Access change could not be completed.";
     }
@@ -9468,6 +9644,37 @@ function mountSharePanel(event) {
     ows();
     return at === length;
   }
+
+  /**
+   * The `error` code out of a refusal envelope, or `null`.
+   *
+   * Bounded to the grammar a code has -- short, lowercase, no separators but
+   * `_` and `-` -- before it is compared against anything, so the value that
+   * reaches a table lookup cannot be a long string a response chose. It is
+   * never rendered: only the caller's own literal for a code it recognises is.
+   */
+  async function readRefusalCode(response) {
+    const header = response.headers.get("content-type");
+    if (header === null || !isJsonContentType(header)) return null;
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch (error) {
+      return null;
+    }
+    if (!isRecord(parsed) || typeof parsed.error !== "string") return null;
+    return /^[a-z][a-z0-9_-]{0,63}$/.test(parsed.error) ? parsed.error : null;
+  }
+
+  /* ACN-007's three domain-list refusals, in this panel's own words. The limit
+     is deliberately not a number here: the number lives in `domain-access.mjs`
+     and a copy of it in a browser is a copy that goes stale silently. */
+  const DOMAIN_REFUSALS = {
+    public_mailbox_domain:
+      "That domain is a public mailbox provider, so listing it would admit anyone.",
+    invalid_domain: "That is not a domain we can use.",
+    too_many_domains: "That is more domains than a document can list.",
+  };
 
   const ACCESS_PATH = "/api/access";
   const TRANSFER_PATH = "/api/access/transfer";
