@@ -46,9 +46,12 @@
  * The sign-in page submits a real `<form method="post">`, so this route's
  * response *is* what the visitor looks at. A visitor whose tab sat open past the
  * binding's fifteen minutes would otherwise be shown a raw JSON error envelope
- * with no way back. A form submission therefore lands on `/login/?status=<word>`
- * with a word from the same closed set the callback uses, while a JSON caller
- * still gets the C3 envelope. Whatever cookies the route had already decided to
+ * with no way back. A form submission therefore lands back on the splash at `/`
+ * with `?status=<word>` from the same closed set the callback uses, while a JSON
+ * caller still gets the C3 envelope. The splash is the one sign-in entry, so a
+ * failed attempt returns there rather than dead-ending on the standalone
+ * `/login` page and its second Sign-in button. Whatever cookies the route had
+ * already decided to
  * set - notably the cleared session on the different-account path, where the
  * revocation has already happened - ride along on that failure response.
  *
@@ -123,10 +126,13 @@ function isFormNavigation(request) {
   return type === "application/x-www-form-urlencoded";
 }
 
+/** The splash is the single sign-in entry; a failed attempt returns there. */
+const SPLASH_PATH = "/";
+
 /** Where a form-posted failure lands, carrying any cookies already decided. */
 function failedPage(error, cookies) {
   const status = error instanceof AuthUnavailableError ? "unavailable" : "expired";
-  return redirectResponse(`/login/?status=${status}`, { status: 303, cookies });
+  return redirectResponse(`${SPLASH_PATH}?status=${status}`, { status: 303, cookies });
 }
 
 /** The route, over injected dependencies. */
@@ -187,9 +193,16 @@ export function createStartRoute({ store, config: hostedConfig }) {
        server-side. It never travels to Auth0 and never rides in the `state`
        parameter, so the value the callback redirects to is one this service
        accepted rather than one the round trip carried back. */
-    /* `||` rather than `??`: a form that submits `destination=` sends an empty
-       string, not an absent field, and an empty string is the visitor asking for
-       the default rather than for a destination this route must refuse.
+    /* A form that submits `destination=` sends an empty string, not an absent
+       field, and an empty string is the visitor asking for the default rather
+       than for a destination this route must refuse. The splash's Sign-in form
+       is the ordinary entry, and "sign in and go home" is spelled `/` there - so
+       a bare `/` means the default too, not a destination to refuse. Both fold
+       to the default here, before `validateDestination` ever sees them, so a
+       plain splash sign-in completes rather than being turned away at the edge
+       with `?status=expired`. `/` is *translated*, never added to the allowlist:
+       `validateDestination` still refuses it as a stored landing, so this widens
+       no redirect surface.
 
        The default is the onboarding page, not the approval page. A sign-in with
        nothing to approve used to land on `/publish/authorize`, which answers
@@ -198,7 +211,12 @@ export function createStartRoute({ store, config: hostedConfig }) {
        unaffected: the agent flow puts `AUTHORIZE_PATH` in
        `verificationUriComplete`, so that browser arrives carrying an explicit
        destination and never falls back to this value. */
-    const destination = validateDestination(field("destination") || HOSTED_LIMITS.WELCOME_PATH);
+    const requested = field("destination");
+    const destination = validateDestination(
+      requested === null || requested === "" || requested === "/"
+        ? HOSTED_LIMITS.WELCOME_PATH
+        : requested,
+    );
 
     /* The `state` Auth0 carries and the cookie this browser holds are two
        different secrets. Making them one value looked like a double submit and

@@ -2347,7 +2347,7 @@ async function providerFailures(world, browser) {
   const tokenCallsBeforeReplay = provider.state.tokenCalls;
   await page.goto(callbackUrl);
   await page.waitForURL(
-    (url) => url.pathname === "/login/" && url.searchParams.get("status") !== null,
+    (url) => url.pathname === "/" && url.searchParams.get("status") !== null,
     { timeout: 30_000 },
   );
   assert.equal(
@@ -2374,7 +2374,7 @@ async function providerFailures(world, browser) {
   const strangerPage = await stranger.newPage();
   await strangerPage.goto(callbackUrl);
   await strangerPage.waitForURL(
-    (url) => url.pathname === "/login/" && url.searchParams.get("status") !== null,
+    (url) => url.pathname === "/" && url.searchParams.get("status") !== null,
     { timeout: 30_000 },
   );
   assert.equal(
@@ -2466,8 +2466,8 @@ async function providerFailures(world, browser) {
   await outagePage.waitForURL((url) => url.searchParams.get("status") !== null, { timeout: 30_000 });
   assert.equal(new URL(outagePage.url()).searchParams.get("status"), "unavailable");
   await waitFor(
-    async () => /could not reach the sign-in service/.test(await outagePage.locator("#status").innerText()),
-    "the sign-in page to say the provider was unreachable",
+    async () => /could not reach the sign-in service/.test(await outagePage.locator("#siteSigninStatus").innerText()),
+    "the splash to say the provider was unreachable",
   );
   assert.equal((await currentSession(outagePage)).authenticated, false);
   record("auth: a provider outage reaches a truthful unavailable page and no session");
