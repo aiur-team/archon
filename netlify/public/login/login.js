@@ -29,7 +29,7 @@
      single collaboration slug that is not a reserved route name. The server
      validates it again and is the authority; this is only about not submitting
      garbage. */
-  const RESERVED = new Set(["admin", "login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
+  const RESERVED = new Set(["admin", "assets", "login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
   function destinationAllowed(value) {
     if (value === "/publish/authorize") return true;
     if (value === "/welcome") return true;

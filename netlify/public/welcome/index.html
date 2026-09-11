@@ -203,7 +203,11 @@
 </head>
 <body>
   <main>
-    <h1>You&rsquo;re signed in.</h1>
+    <!-- Session-neutral on purpose. This is where a completed sign-in lands, but
+         the gate serves it to anybody with no session check, so a headline that
+         claimed "you're signed in" would be telling an anonymous visitor - or a
+         crawler - something the page never checked and cannot know. -->
+    <h1>Welcome to Archon.</h1>
     <p class="lede">Archon turns an artifact into a real document with <span class="hl">auth, editing and live collaboration</span>. Here is the whole flow, start to finish.</p>
 
     <ol class="steps">

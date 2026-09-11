@@ -28,6 +28,7 @@ import {
   firstPartyPageHeaders,
   isApplicationPublic,
   isApplicationPassThrough,
+  isLandingPage,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -613,7 +614,7 @@ test("the onboarding page is public, takes the landing header set, and does not 
   // reaches it before anything has established a session on this browser's next
   // request -- so a session check here would bounce the visitor straight back to
   // sign in. It is served like the splash: no session check, landing headers.
-  for (const path of ["/welcome", "/welcome/", "/welcome/index.html"]) {
+  for (const path of ["/welcome", "/welcome/"]) {
     const page = await runGate(APP_HOST, path, { cookie: null, next: () => staticPage() });
     assert.equal(page.response.status, 200, `${path} is served, not a redirect`);
     assert.equal(page.response.headers.get("Location"), null, `${path} is never a redirect`);
@@ -627,13 +628,19 @@ test("the onboarding page is public, takes the landing header set, and does not 
     assert.equal(page.response.headers.get("X-Frame-Options"), "DENY");
   }
 
-  // The prefix is the page's own directory and nothing else: a sibling slug that
-  // merely starts with the same letters is an ordinary gated document.
-  const neighbour = await runGate(APP_HOST, "/welcomer/", {
-    session: () => sessionResponse({ v: 1, authenticated: false }),
-  });
-  assert.equal(neighbour.response.status, 303, "/welcomer/ is not the onboarding page");
-  assert.equal(neighbour.response.headers.get("Location"), "/login/?destination=%2Fwelcomer%2F");
+  // Two exact spellings and no prefix: a sibling slug that merely starts with
+  // the same letters is an ordinary gated document, and so is anything else
+  // under the page's own directory -- a file dropped into
+  // `netlify/public/welcome/` later must not become anonymous by inheritance.
+  for (const gated of ["/welcomer/", "/welcome-x/", "/welcome/index.html"]) {
+    const response = (
+      await runGate(APP_HOST, gated, {
+        session: () => sessionResponse({ v: 1, authenticated: false }),
+      })
+    ).response;
+    assert.equal(response.status, 303, `${gated} is not the onboarding page`);
+  }
+  assert.equal(isLandingPage("/welcome/anything.json"), false, "the directory is not a public tree");
 });
 
 test("application host session-checks a collaboration slug and serves a readable document", async () => {

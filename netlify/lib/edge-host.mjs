@@ -116,13 +116,21 @@ const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
  * and the two Google Font origins both pages need. Under the first-party page
  * set the onboarding page would render unstyled with a dead copy button.
  *
- * The root is matched exactly and only, so no other path is made public by it.
- * `/welcome` is matched exactly and its own directory by prefix, so `/welcome`,
- * `/welcome/` and `/welcome/index.html` are one page rather than three
- * differently-gated spellings. The prefix carries its trailing slash for the
- * same reason `/admin` above is an exact path: a bare `"/welcome"` prefix would
- * also match `/welcomer/` and `/welcome-x/`, both legal collaboration slugs,
- * and would serve somebody else's document to whoever asked for it.
+ * Every entry is an exact path, and there is deliberately no `/welcome/` prefix
+ * among them. A prefix would make the whole of `netlify/public/welcome/`
+ * permanently anonymous under the loosened landing policy, so a future file
+ * dropped into that directory would be served to any unauthenticated caller
+ * with no test failing - a wider grant than this page needs and than the
+ * comment above claims. The page has exactly two reachable spellings, so both
+ * are named: `/welcome`, which the generated `_redirects` rewrite resolves, and
+ * `/welcome/`, which Netlify resolves as the directory index. `/welcome/index.html`
+ * is not one of them and stays gated, exactly as `/index.html` does beside `/`.
+ *
+ * Naming them rather than prefixing them is also what keeps `/welcomer/` and
+ * `/welcome-x/` out: both are legal collaboration slugs under the
+ * `[a-z0-9-]{1,64}` grammar, and a bare `"/welcome"` prefix would have served
+ * somebody else's document to whoever asked for it. It is the same reason
+ * `/admin` above is an exact path rather than a prefix entry.
  *
  * `netlify/lib/hosted/contracts.mjs` names the same `/welcome` as
  * `HOSTED_LIMITS.WELCOME_PATH`. It is restated here rather than imported because
@@ -130,8 +138,7 @@ const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
  * Web globals only; `netlify/test/welcome-page.test.mjs` holds the two equal. A
  * wrong copy fails in the safe direction: the page is gated rather than exposed.
  */
-const LANDING_PAGE_PATHS = Object.freeze(["/", "/welcome"]);
-const LANDING_PAGE_PREFIXES = Object.freeze(["/welcome/"]);
+const LANDING_PAGE_PATHS = Object.freeze(["/", "/welcome", "/welcome/"]);
 
 /**
  * Whether an application-host path is a public landing page.
@@ -140,8 +147,7 @@ const LANDING_PAGE_PREFIXES = Object.freeze(["/welcome/"]);
  * @returns {boolean}
  */
 export function isLandingPage(pathname) {
-  if (LANDING_PAGE_PATHS.includes(pathname)) return true;
-  return LANDING_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+  return LANDING_PAGE_PATHS.includes(pathname);
 }
 
 
