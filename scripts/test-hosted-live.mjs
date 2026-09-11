@@ -7,11 +7,12 @@
  *
  * Every other runner in this repository proves application behaviour against
  * something the repository controls. This one cannot: the guarantees AHU-013
- * owns are the ones a fixture is structurally unable to stand in for -- GitHub's
- * own callback registration and granted scopes, Netlify's production routing and
- * conditional writes, two real HTTPS registrable sites, and installation of a
- * release an external consumer can actually reach. So this file does the two
- * things that *are* mechanisable without inventing a live result:
+ * owns are the ones a fixture is structurally unable to stand in for -- an Auth0
+ * tenant's own connections and the claims they actually publish, Netlify's
+ * production routing and conditional writes, one site answering on two real
+ * hostnames, and installation of a release an external consumer can actually
+ * reach. So this file does the two things that *are* mechanisable without
+ * inventing a live result:
  *
  *   1. **The preflight gate.** It reads the operator-supplied description of the
  *      pilot and refuses, item by item, when a prerequisite is absent or does
@@ -20,11 +21,15 @@
  *      is what makes "the capstone is not closed yet" a machine-checkable state
  *      rather than a claim in a document.
  *   2. **Read-only deployed probes.** With every prerequisite supplied, `probe`
- *      makes unauthenticated GET requests to the two deployed origins and holds
- *      the responses against the header sets this repository actually generates
- *      -- `SECURITY_HEADERS` from `netlify/lib/hosted/http.mjs` and `rendererHeaders()`
- *      from `renderer/scripts/build.mjs`. No forked copy of either policy lives
- *      here, so a policy change fails this runner instead of drifting past it.
+ *      makes unauthenticated GET requests to the site's hostnames and holds the
+ *      responses against the policy this repository actually ships --
+ *      `SECURITY_HEADERS` from `netlify/lib/hosted/http.mjs`, and
+ *      `rendererHeaders()`, `RENDERER_SHELL` and `isRenderPrefix()` from
+ *      `netlify/lib/edge-host.mjs`, which is the gate's own module and the one
+ *      authority on which hostname serves what. No forked copy of either policy
+ *      lives here, so a policy change fails this runner instead of drifting past
+ *      it. In particular the host refusal matrix is *read* from the gate rather
+ *      than restated, so a matrix nobody implements cannot survive here.
  *
  * What this runner deliberately does NOT do, because doing it would be inventing
  * a live result: sign in, hold a session, upload an artifact, approve a
@@ -37,9 +42,9 @@
  * Secrets: `AUTH0_CLIENT_SECRET` belongs in the deployed site's environment and
  * nowhere else. This runner refuses to start if it can see one, refuses any
  * supplied value that looks like a credential, and writes no supplied value into
- * its manifest except non-secret identifiers -- the OAuth client id is recorded
- * as a digest, and the test accounts are operator-chosen opaque labels that may
- * not contain an address.
+ * its manifest except non-secret identifiers -- the Auth0 client id and tenant
+ * are recorded as digests, and the test accounts are operator-chosen opaque
+ * labels that may not contain an address.
  *
  * Output contract: one `PASS  ` line per satisfied item and one final `PASS  `
  * line on stdout with exit 0, or one `BLOCKED  ` / `FAIL  ` line per unmet item
@@ -54,16 +59,68 @@ import { fileURLToPath } from "node:url";
 
 import { SECURITY_HEADERS } from "../netlify/lib/hosted/http.mjs";
 import { registrableSite, validateOrigin, validateSessionResponse } from "../netlify/lib/hosted/contracts.mjs";
-import { rendererHeaders } from "../renderer/scripts/build.mjs";
+/* The header authority moved to the gate when the two deployments became one
+   site on two hostnames: `renderer/scripts/build.mjs` still generates a header
+   set for the build's own renderer oracle, but nothing it writes reaches the
+   deployed site any more. Comparing a live response against the build's copy
+   would therefore be comparing it against a policy the deploy does not use. */
+import {
+  RENDERER_SHELL,
+  RENDER_PREFIX,
+  isRenderPrefix,
+  rendererHeaders,
+} from "../netlify/lib/edge-host.mjs";
+import { CALLBACK_PATH, SCOPE as AUTH0_SCOPE } from "../netlify/lib/hosted/auth0-oidc.mjs";
+import { DomainAccessError, normalizeDomainList } from "../netlify/lib/hosted/domain-access.mjs";
+import { HostedConfigError, readHostedConfig } from "../netlify/lib/hosted/config.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 
-/** The callback path C1 freezes. A registration at any other path is not this service. */
-export const CALLBACK_PATH = "/api/hosted/auth/callback";
+/**
+ * The callback path C1 freezes. A registration at any other path is not this
+ * service.
+ *
+ * Re-exported from the module that builds the redirect URI, not written down
+ * again: a forked copy would let the deployed callback move while this gate
+ * stayed green, which is the one failure this gate exists to prevent. It keeps
+ * its own name because the runner's suite and the runbook both refer to it.
+ */
+export { CALLBACK_PATH };
 
-/** The single word an operator writes to say the empty-scope registration was verified. */
-export const NO_SCOPES = "none";
+/**
+ * The scope set this deployment requests of its Auth0 tenant, taken from the
+ * module that requests it rather than written down again here.
+ *
+ * The previous runner froze an *empty* scope set, because the previous design
+ * talked to GitHub directly and needed nothing from it. Brokering through Auth0
+ * inverts that: the application asks for `openid profile email`, and the address
+ * it gets back is what every domain check reads. An operator who leaves the
+ * GitHub connection without `user:email` therefore gets a tenant that answers
+ * correctly, a session with no verified address, and a domain gate that refuses
+ * every reader for a reason no error message names. That is L4b, and no
+ * acceptance input can decide it -- only a real round trip can.
+ */
+export const REQUESTED_SCOPE = AUTH0_SCOPE;
+
+/**
+ * A client secret shaped placeholder, used to run the operator's supplied tenant
+ * and client id through `readHostedConfig` -- the reader the deployed site uses
+ * -- instead of restating its rules here.
+ *
+ * It is a literal in this file and is never an operator value: G0 exists
+ * precisely so that a real `AUTH0_CLIENT_SECRET` cannot be in this process at
+ * all, and the reader needs *a* secret only to get far enough to judge the two
+ * fields this gate is about.
+ *
+ * The `!` characters are load-bearing. The reader also refuses a secret equal to
+ * the client id, and a client id is `[A-Za-z0-9._-]` — so a placeholder drawn
+ * from that alphabet is one an operator could supply as their client id, at
+ * which point the reader's refusal would be reported as a defect in this file
+ * rather than as the operator's own duplicated value. A placeholder outside the
+ * client-id alphabet cannot collide with one.
+ */
+export const PLACEHOLDER_CLIENT_SECRET = "placeholder!not!a!secret!0000";
 
 /** The exact value that authorises the read-only probes to leave this machine. */
 export const PROBE_AUTHORISATION = "operator-authorized";
@@ -94,16 +151,18 @@ const CREDENTIAL_PREFIXES = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat
 export const LIVE_ENV_KEYS = Object.freeze([
   "HOSTED_LIVE_APP_ORIGIN",
   "HOSTED_LIVE_RENDER_ORIGIN",
-  "HOSTED_LIVE_OAUTH_CLIENT_ID",
-  "HOSTED_LIVE_OAUTH_CALLBACK",
-  "HOSTED_LIVE_OAUTH_SCOPES",
+  "HOSTED_LIVE_FOREIGN_ORIGIN",
+  "HOSTED_LIVE_AUTH0_DOMAIN",
+  "HOSTED_LIVE_AUTH0_CLIENT_ID",
+  "HOSTED_LIVE_AUTH0_CALLBACK",
   "HOSTED_LIVE_ACCOUNTS",
+  "HOSTED_LIVE_DOMAIN_ADMITTED",
+  "HOSTED_LIVE_DOMAIN_REFUSED",
   "HOSTED_LIVE_PACKAGE",
   "HOSTED_LIVE_PACKAGE_INTEGRITY",
   "HOSTED_LIVE_PACKAGE_SOURCE",
   "HOSTED_LIVE_SOURCE_REVISION",
   "HOSTED_LIVE_APP_DEPLOY",
-  "HOSTED_LIVE_RENDER_DEPLOY",
   "HOSTED_LIVE_BUDGET_APPROVAL",
   "HOSTED_LIVE_RETENTION_OWNER",
   "HOSTED_LIVE_AHU012_REVISION",
@@ -121,11 +180,13 @@ const INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
 /** An opaque operator-chosen label for a test identity. Never a login or an address. */
 const ACCOUNT_LABEL = /^[a-z0-9][a-z0-9-]{1,31}$/;
 
-/** A provider deployment identifier, kept opaque because its shape is the provider's. */
+/**
+ * A provider deployment identifier, kept opaque because its shape is the
+ * provider's. There is one of them now: the renderer is a second hostname of the
+ * same site rather than a second deployment, so a second identifier would be
+ * describing a second site the topology no longer has.
+ */
 const DEPLOY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$/;
-
-/** A GitHub OAuth application client id. Public, but recorded as a digest anyway. */
-const CLIENT_ID = /^[A-Za-z0-9._-]{8,128}$/;
 
 /**
  * The live guarantees AHU-013 must record a result for.
@@ -146,6 +207,38 @@ const CLIENT_ID = /^[A-Za-z0-9._-]{8,128}$/;
  * for that row repeats it in procedure form.
  */
 export const LIVE_GUARANTEES = Object.freeze([
+  {
+    id: "L0",
+    by: "probe",
+    waits: ["G2", "G6"],
+    what: "the renderer hostname answers 200 on its own and is not redirected",
+    covers: [
+      "a GET of the renderer hostname's root answers 200, not a 3xx to the primary domain",
+      "that answer carries the renderer shell's own policy rather than the application's",
+    ],
+  },
+  {
+    id: "L0b",
+    by: "probe",
+    waits: ["G2", "G6"],
+    what: "the renderer hostname is cookie-free in both directions",
+    covers: [
+      "a request carrying a cookie is answered identically to one that carries none",
+      "neither the cookie-bearing nor the cookie-free answer sets a cookie",
+    ],
+  },
+  {
+    id: "L0c",
+    by: "probe",
+    waits: ["G2", "G6", "G8"],
+    what: "the host refusal matrix holds on both hostnames and on a third",
+    covers: [
+      "every renderer shell path answers on the renderer hostname, and a query string on one does not",
+      "the renderer hostname refuses an application path with no cookie, no body and private no-store",
+      "the application hostname refuses the internal render prefix",
+      "a third hostname resolving to this deployment is a bodyless 404 marked noindex and private no-store",
+    ],
+  },
   {
     id: "L1",
     by: "probe",
@@ -180,14 +273,45 @@ export const LIVE_GUARANTEES = Object.freeze([
     id: "L4",
     by: "runbook",
     waits: ["G2", "G3", "G4"],
-    what: "real GitHub sign-in: fixed callback, single-use state, PKCE, empty granted scopes",
+    what: "real Auth0 sign-in: fixed callback, single-use state, PKCE, host-locked cookie",
     covers: [
       "the pairing code and descriptor shown before sign-in match what the client sent",
-      "authorization goes to GitHub's fixed endpoint with the dedicated client id, a state and an S256 challenge",
-      "the scopes GitHub's consent screen says it is granting are none",
+      "authorization goes to the tenant's own endpoint with the dedicated client id, a state and an S256 challenge",
       "the callback lands on the exact frozen path and a replay of it is refused",
       "the session cookie carries __Host- prefix, Secure, HttpOnly, SameSite=Lax, Path=/ and no Domain",
       "a GET of the approval URL never approves and never logs out",
+    ],
+  },
+  {
+    id: "L4a",
+    by: "runbook",
+    waits: ["G2", "G3", "G4"],
+    what: "an Auth0 round trip completes with the operator's Google test account",
+    covers: [
+      "the Google connection completes the round trip and the session is authenticated",
+      "the account key derives from the Auth0 subject, not from the address",
+    ],
+  },
+  {
+    id: "L4b",
+    by: "runbook",
+    waits: ["G2", "G3", "G4"],
+    what: "an Auth0 round trip completes with the GitHub test account and carries a verified email",
+    covers: [
+      "the GitHub connection completes the round trip and the session is authenticated",
+      "the session body carries a non-null email with emailVerified true",
+      "the two accounts resolve to two different account keys",
+    ],
+  },
+  {
+    id: "L4c",
+    by: "runbook",
+    waits: ["G3"],
+    what: "the tenant's sign-in page offers exactly two providers and no password form",
+    covers: [
+      "Auth0's Universal Login for this application offers Google and GitHub and nothing else",
+      "the default username-password database connection is disabled on the application",
+      "no sign-up affordance is offered for a connection this deployment does not use",
     ],
   },
   {
@@ -201,7 +325,7 @@ export const LIVE_GUARANTEES = Object.freeze([
       "Claude, following only that skill, builds, starts, checkpoints and resumes the publication",
       "a separate client invocation observes the durable receipt",
       "the retained HTML is offline-readable with working section navigation and theme rendering",
-      "the tested GitHub account class is recorded and no managed-enterprise claim is made without a separate authorized test",
+      "the tested upstream account class is recorded and no managed-enterprise claim is made without a separate authorized test",
       "an organization or enterprise-managed restriction is recorded as an observed limitation with the local artifact fallback",
     ],
   },
@@ -209,9 +333,9 @@ export const LIVE_GUARANTEES = Object.freeze([
     id: "L6",
     by: "runbook",
     waits: ["G2", "G3", "G4", "G5"],
-    what: "the completed record matches the real GitHub identity and the source bytes",
+    what: "the completed record matches the real brokered identity and the source bytes",
     covers: [
-      "the persisted account key derives from the real GitHub numeric id, not a login or an address",
+      "the persisted account key is the a0_ digest of the real Auth0 subject, not a login or an address",
       "the descriptor in the completed record matches what the client sent",
       "the recorded owner matches the account that signed in",
       "the stored HTML digest matches both the receipt and the local source bytes",
@@ -247,7 +371,7 @@ export const LIVE_GUARANTEES = Object.freeze([
     what: "no private artifact is reachable outside the owner-authorized route",
     covers: [
       "no public Blobs URL, CDN copy, redirect bearer or downloadable asset path appears in the transfer",
-      "neither deployment's static output contains any private byte",
+      "the deployment's published static output contains no private byte, on either hostname",
       "the content route without the session returns nothing",
     ],
   },
@@ -360,6 +484,17 @@ export const LIVE_GUARANTEES = Object.freeze([
       "no delete API is invented for the purpose",
     ],
   },
+  {
+    id: "L19",
+    by: "runbook",
+    waits: ["G2", "G4", "G9"],
+    what: "the verified-email domain gate admits a listed reader and refuses an unlisted one",
+    covers: [
+      "a reader whose verified address is at the admitted domain opens the document",
+      "a reader whose verified address is at the unlisted domain gets the same not-found view as an id that never existed",
+      "the refusal reveals no title, no bytes and no marker of the document it refused",
+    ],
+  },
 ]);
 
 /**
@@ -445,13 +580,13 @@ export function evaluatePreflight(env) {
     items.push(
       item(
         "G0",
-        "the OAuth client secret is installed server-side only",
+        "the Auth0 client secret is installed server-side only",
         "failed",
         "AUTH0_CLIENT_SECRET is set in this runner's environment; it belongs in the deployed site and nowhere else",
       ),
     );
   } else {
-    items.push(met("G0", "the OAuth client secret is installed server-side only", "no client secret is visible here"));
+    items.push(met("G0", "the Auth0 client secret is installed server-side only", "no client secret is visible here"));
   }
 
   const values = {};
@@ -506,40 +641,85 @@ export function evaluatePreflight(env) {
     }
   }
 
-  /* The OAuth registration. The callback is checked as an exact string against
-     the app origin rather than parsed leniently: a registration that differs
-     from the deployed origin by a trailing slash is a registration for a
-     different service, and a wildcard is not a callback at all. */
-  const callback = values.HOSTED_LIVE_OAUTH_CALLBACK;
-  const clientId = values.HOSTED_LIVE_OAUTH_CLIENT_ID;
-  const scopes = values.HOSTED_LIVE_OAUTH_SCOPES;
-  if (app === null || callback === null || clientId === null || scopes === null) {
-    items.push(blocked("G3", "dedicated OAuth application with the exact callback and empty scope", "not supplied"));
-  } else if (callback !== `${app}${CALLBACK_PATH}`) {
+  /* The third hostname. One site answers on more names than the two it is
+     configured with -- a deploy permalink always exists, and a domain alias
+     usually does -- and the gate's rule for all of them is a bodyless 404. That
+     rule is only *proved* against a name that is actually routed here, so the
+     operator names one. A value equal to either configured origin would make the
+     probe assert the refusal of a hostname that must instead be served, which is
+     the exact inversion this gate exists to prevent. */
+  const foreign =
+    values.HOSTED_LIVE_FOREIGN_ORIGIN === null ? null : productionOrigin(values.HOSTED_LIVE_FOREIGN_ORIGIN);
+  if (foreign === null) {
     items.push(
       blocked(
-        "G3",
-        "dedicated OAuth application with the exact callback and empty scope",
-        `the registered callback must be exactly <app origin>${CALLBACK_PATH}`,
+        "G8",
+        "a third hostname that resolves to this deployment and must be refused",
+        "supply an exact HTTPS origin; on Netlify the deploy permalink is always one",
       ),
     );
-  } else if (scopes !== NO_SCOPES) {
+  } else if (app !== null && render !== null && (foreign === app || foreign === render)) {
     items.push(
       blocked(
-        "G3",
-        "dedicated OAuth application with the exact callback and empty scope",
-        `HOSTED_LIVE_OAUTH_SCOPES must be "${NO_SCOPES}"; Archon requests no scope and must be granted none`,
+        "G8",
+        "a third hostname that resolves to this deployment and must be refused",
+        "the third hostname must be neither the application nor the renderer hostname; those two are served, not refused",
       ),
-    );
-  } else if (!CLIENT_ID.test(clientId)) {
-    items.push(
-      blocked("G3", "dedicated OAuth application with the exact callback and empty scope", "the client id is malformed"),
     );
   } else {
-    items.push(met("G3", "dedicated OAuth application with the exact callback and empty scope", "callback and scope agree with C1"));
-    facts.callbackPath = CALLBACK_PATH;
-    facts.clientIdDigest = createHash("sha256").update(clientId).digest("hex").slice(0, 16);
-    facts.requestedScopes = NO_SCOPES;
+    items.push(met("G8", "a third hostname that resolves to this deployment and must be refused", foreign));
+    facts.foreignOrigin = foreign;
+  }
+
+  /* The Auth0 application. The callback is checked as an exact string against
+     the app origin rather than parsed leniently: a registration that differs
+     from the deployed origin by a trailing slash is a registration for a
+     different service, and a wildcard is not a callback at all.
+
+     The tenant and client id are judged by `readHostedConfig` -- the reader the
+     deployed site itself uses -- rather than by a second copy of its grammar
+     here, so a tenant spelling the deployment would refuse cannot pass this gate
+     and a rule the reader drops cannot survive in this file. */
+  const callback = values.HOSTED_LIVE_AUTH0_CALLBACK;
+  const clientId = values.HOSTED_LIVE_AUTH0_CLIENT_ID;
+  const tenant = values.HOSTED_LIVE_AUTH0_DOMAIN;
+  const G3 = "a dedicated Auth0 application with the exact callback and the configured tenant";
+  if (app === null || render === null || callback === null || clientId === null || tenant === null) {
+    items.push(blocked("G3", G3, "not supplied"));
+  } else if (callback !== `${app}${CALLBACK_PATH}`) {
+    items.push(blocked("G3", G3, `the registered callback must be exactly <app origin>${CALLBACK_PATH}`));
+  } else {
+    let refusal = null;
+    try {
+      readHostedConfig({
+        HOSTED_APP_ORIGIN: app,
+        HOSTED_RENDER_ORIGIN: render,
+        AUTH0_DOMAIN: tenant,
+        AUTH0_CLIENT_ID: clientId,
+        AUTH0_CLIENT_SECRET: PLACEHOLDER_CLIENT_SECRET,
+        HOSTED_PUBLISH_ENABLED: "false",
+      });
+    } catch (error) {
+      /* The reader's message is `<key> <rule>` and carries no supplied value, so
+         it is safe to print verbatim. The one key it may name that the operator
+         did not supply is the placeholder above; naming it would send an
+         operator looking for a secret this runner refuses to accept, so it is
+         reported as what it is -- a defect in this file. */
+      if (error instanceof HostedConfigError && error.key === "AUTH0_CLIENT_SECRET") {
+        refusal = "this runner's placeholder no longer satisfies the reader; fix PLACEHOLDER_CLIENT_SECRET";
+      } else {
+        refusal = error.message.split("\n")[0];
+      }
+    }
+    if (refusal !== null) {
+      items.push(blocked("G3", G3, `the deployed configuration reader refuses these values -- ${refusal}`));
+    } else {
+      items.push(met("G3", G3, `callback ${CALLBACK_PATH}, tenant accepted by the deployed reader`));
+      facts.callbackPath = CALLBACK_PATH;
+      facts.clientIdDigest = createHash("sha256").update(clientId).digest("hex").slice(0, 16);
+      facts.tenantDigest = createHash("sha256").update(tenant).digest("hex").slice(0, 16);
+      facts.requestedScope = REQUESTED_SCOPE;
+    }
   }
 
   /* Two test identities, named by opaque labels. A login or an address here
@@ -563,6 +743,53 @@ export function evaluatePreflight(env) {
   } else {
     items.push(met("G4", "two approved test identities in isolated browser profiles", `${accounts[0]} and ${accounts[1]}`));
     facts.accountLabels = accounts;
+  }
+
+  /* The domain pair L19 is decided against. A domain is not an address and names
+     no person, so unlike the account labels these are recorded as themselves.
+
+     Both are judged by `normalizeDomainList` -- ACN-007's own evaluator -- rather
+     than by a grammar written again here, so each is a domain the deployed owner
+     UI would actually accept.
+
+     The two slots are judged separately, because the evaluator's public-mailbox
+     rule applies to only one of them. An *admitted* `gmail.com` is refused for
+     the reason the product refuses it: a list containing it admits everyone with
+     a mailbox, which is not a domain gate. A *refused* `gmail.com` is the
+     opposite -- it is the single most likely address a real test account has,
+     and it is exactly the reader a domain list exists to exclude. Judging the
+     pair as one list would reject it and leave the operator testing L19's
+     refusal half against a domain nobody signs in from. */
+  const admitted = values.HOSTED_LIVE_DOMAIN_ADMITTED;
+  const refused = values.HOSTED_LIVE_DOMAIN_REFUSED;
+  const G9 = "a domain the owner list admits and a domain it refuses";
+  if (admitted === null || refused === null) {
+    items.push(blocked("G9", G9, "supply one domain to be admitted and one to be refused"));
+  } else {
+    let admittedDomain = null;
+    let refusedDomain = null;
+    let refusal = null;
+    try {
+      [admittedDomain] = normalizeDomainList([admitted]);
+      [refusedDomain] = normalizeDomainList([refused], { allowPublicMailboxes: true });
+    } catch (error) {
+      /* The reason alone, never the offending value. `DomainAccessError.domain`
+         is the operator's own input, and the mistake most likely to land here is
+         an address typed into a domain slot -- which would put a person's
+         identifier into CI output that G4's opaque-label rule exists to keep
+         out. `item()`'s contract already says detail names a rule or a key and
+         never a supplied value. */
+      refusal = error instanceof DomainAccessError ? error.reason : error.message.split("\n")[0];
+    }
+    if (refusal !== null) {
+      items.push(blocked("G9", G9, `the deployed domain evaluator refuses this pair -- ${refusal}`));
+    } else if (admittedDomain === refusedDomain) {
+      items.push(blocked("G9", G9, "the two domains normalise to one; an admit and a refuse cannot be the same domain"));
+    } else {
+      items.push(met("G9", G9, `${admittedDomain} admitted, ${refusedDomain} refused`));
+      facts.admittedDomain = admittedDomain;
+      facts.refusedDomain = refusedDomain;
+    }
   }
 
   /* The release. `npm pack` output on this machine is not a release: AE1 is
@@ -600,8 +827,7 @@ export function evaluatePreflight(env) {
   const revision = values.HOSTED_LIVE_SOURCE_REVISION;
   const local = values.HOSTED_LIVE_AHU012_REVISION;
   const appDeploy = values.HOSTED_LIVE_APP_DEPLOY;
-  const renderDeploy = values.HOSTED_LIVE_RENDER_DEPLOY;
-  if (revision === null || local === null || appDeploy === null || renderDeploy === null) {
+  if (revision === null || local === null || appDeploy === null) {
     items.push(blocked("G6", "frozen source revision, deploy revisions and a passing AHU-012 at that revision", "not supplied"));
   } else if (!REVISION.test(revision) || !REVISION.test(local)) {
     items.push(
@@ -619,19 +845,18 @@ export function evaluatePreflight(env) {
         "the AHU-012 pass is from a different revision than the one deployed",
       ),
     );
-  } else if (!DEPLOY_ID.test(appDeploy) || !DEPLOY_ID.test(renderDeploy)) {
+  } else if (!DEPLOY_ID.test(appDeploy)) {
     items.push(
       blocked(
         "G6",
         "frozen source revision, deploy revisions and a passing AHU-012 at that revision",
-        "both deploy identifiers must be supplied",
+        "the deploy identifier is malformed",
       ),
     );
   } else {
     items.push(met("G6", "frozen source revision, deploy revisions and a passing AHU-012 at that revision", revision));
     facts.sourceRevision = revision;
     facts.appDeploy = appDeploy;
-    facts.renderDeploy = renderDeploy;
   }
 
   /* The approvals. These are the ones no amount of code can infer: a budget
@@ -649,6 +874,18 @@ export function evaluatePreflight(env) {
     facts.budgetApproval = budget;
     facts.retentionOwner = retention;
   }
+
+  /* Evaluated grouped by subject -- the third hostname beside the two it is not,
+     the domain pair beside the identities that carry the addresses -- and
+     reported in gate order, because the operator reads this as a numbered
+     checklist and a list that jumped G2, G8, G3 would read as a missing item.
+
+     Compared on the number rather than the string: a lexicographic sort agrees
+     with a numeric one only while every id is single-digit, so it would start
+     printing G0, G1, G10, G2 the first time a tenth gate is added -- which is
+     the same missing-item reading this sort exists to prevent, arriving
+     silently. */
+  items.sort((left, right) => Number(left.id.slice(1)) - Number(right.id.slice(1)));
 
   const ok = items.every((entry) => entry.status === "met");
   return { ok, items, facts };
@@ -668,10 +905,16 @@ function probe(id, what, status, detail) {
  *
  * `redirect: "manual"` matters: a redirect is evidence about routing, and
  * following it would replace the response under test with a different one.
- * No cookie jar exists in `fetch`, so nothing this runner sends can carry a
- * session even by accident.
+ *
+ * `extraHeaders` exists for exactly one caller: L0b plants a deliberately
+ * invalid `__Host-archon_session` value to prove the renderer hostname does not
+ * vary its answer on a cookie. It is not a way to authenticate a probe, and
+ * there is nothing here to authenticate with -- this runner never signs in and
+ * never holds a session, so the only cookie it can send is one it made up. A
+ * second call site that passed a real credential would be a probe holding a
+ * session, which the module docblock rules out.
  */
-async function get(url, fetchImpl) {
+async function get(url, fetchImpl, extraHeaders = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
@@ -679,7 +922,7 @@ async function get(url, fetchImpl) {
       method: "GET",
       redirect: "manual",
       signal: controller.signal,
-      headers: { accept: "*/*" },
+      headers: { accept: "*/*", ...extraHeaders },
     });
     const buffer = await response.arrayBuffer();
     if (buffer.byteLength > MAX_RESPONSE_BYTES) throw new Error("the response exceeded the probe's byte ceiling");
@@ -687,6 +930,26 @@ async function get(url, fetchImpl) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Header names that legitimately differ between two identical requests.
+ *
+ * Everything else is compared, because "answered identically" has to mean the
+ * headers too: a hostname that read a cookie and responded with a different
+ * `Vary`, `Cache-Control` or CSP — while serving the same bytes — is still
+ * reading a credential, and a comparison of status and body alone would call
+ * that identical.
+ */
+const VOLATILE_HEADERS = new Set(["date", "age", "x-nf-request-id", "x-request-id", "content-length", "etag"]);
+
+/** The comparable header set of a response, as a sorted, stable string. */
+function stableHeaders(headers) {
+  return [...headers]
+    .filter(([name]) => !VOLATILE_HEADERS.has(name.toLowerCase()))
+    .map(([name, value]) => `${name.toLowerCase()}: ${value}`)
+    .sort()
+    .join("\n");
 }
 
 /** Every header of `expected` present with exactly that value, or a list of faults. */
@@ -716,6 +979,171 @@ export function hostedHeaderPairs() {
 export async function probeDeployment(facts, { fetchImpl = fetch, documentId = null } = {}) {
   const results = [];
   const unknown = documentId ?? `probe${Math.random().toString(36).slice(2, 10)}`;
+
+  /* L0 runs before anything else and owns the redirect verdict, because a
+     renderer hostname that 301s to the primary domain is not a slow topology or
+     a header regression -- it is the second-hostname design being unavailable,
+     and every probe after it would be describing the application host while
+     claiming to describe the renderer. `redirect: "manual"` is what makes the
+     3xx observable at all; a following fetch would have reported the app's 200. */
+  /* Both halves of L0b's comparison must reach the origin. The renderer shell
+     ships `public, max-age=0, must-revalidate`, and a shell path carrying a
+     query is 404 by design, so the probe cannot cache-bust by URL -- an edge
+     cache could otherwise serve both requests from one stored answer and make
+     them identical no matter what the origin would have done with the cookie.
+     L0's response is the control, so it carries the same header. */
+  const noCache = { "cache-control": "no-cache", pragma: "no-cache" };
+
+  let rendererRoot = null;
+  try {
+    rendererRoot = await get(`${facts.renderOrigin}/`, fetchImpl, noCache);
+    if (rendererRoot.status >= 300 && rendererRoot.status < 400) {
+      results.push(
+        probe(
+          "L0",
+          "renderer hostname answers directly",
+          "fail",
+          `the renderer hostname answered ${rendererRoot.status} and redirected: the second-hostname topology is unavailable, so stop and escalate rather than continuing`,
+        ),
+      );
+      rendererRoot = null;
+    } else if (rendererRoot.status !== 200) {
+      results.push(
+        probe(
+          "L0",
+          "renderer hostname answers directly",
+          "fail",
+          `the renderer hostname answered ${rendererRoot.status}: the second-hostname topology is unavailable`,
+        ),
+      );
+      rendererRoot = null;
+    } else {
+      /* A 200 alone does not prove the renderer *shell* answered. A deployment
+         that lost `HOSTED_RENDER_ORIGIN` classifies every host as "app" and
+         would serve the application here with a cheerful 200 — so the row's
+         second covers line is only true if something shell-specific is read.
+         The renderer CSP is the cheapest such thing, and it is the gate's own. */
+      const faults = headerFaults(rendererRoot.headers, [
+        ["Content-Security-Policy", Object.fromEntries(rendererHeaders(facts.appOrigin))["Content-Security-Policy"]],
+      ]);
+      if (faults.length > 0) {
+        results.push(
+          probe(
+            "L0",
+            "renderer hostname answers directly",
+            "fail",
+            "answered 200 but not with the renderer shell's policy; the hostname may be serving the application",
+          ),
+        );
+        rendererRoot = null;
+      } else {
+        results.push(probe("L0", "renderer hostname answers directly", "pass", "200 on its own name, not redirected, renderer shell"));
+      }
+    }
+  } catch (error) {
+    results.push(probe("L0", "renderer hostname answers directly", "fail", error.message.split("\n")[0]));
+  }
+
+  /* L0b. The renderer hostname is a different registrable site from the
+     application, so a browser never sends it the application's `__Host-` cookie
+     -- but that is a browser rule, and what this proves is the half the site
+     owns: the hostname neither sets a cookie nor behaves differently when one
+     arrives anyway. A hostname that varied its answer on a cookie would be
+     reading a credential on the origin that frames hostile HTML. */
+  try {
+    const withCookie = await get(`${facts.renderOrigin}/`, fetchImpl, {
+      ...noCache,
+      cookie: "__Host-archon_session=probe-value-that-is-not-a-session",
+    });
+    if (rendererRoot === null) {
+      results.push(probe("L0b", "renderer hostname is cookie-free", "fail", "the cookie-free comparison needs L0's response"));
+    } else if (withCookie.headers.get("set-cookie") !== null || rendererRoot.headers.get("set-cookie") !== null) {
+      /* Both responses, not just the cookie-bearing one. `covers` claims no
+         answer from this hostname sets a cookie, and a check that looked only at
+         the request carrying one would leave the claim undecided for the request
+         that does not -- which is the ordinary case every reader makes. */
+      results.push(probe("L0b", "renderer hostname is cookie-free", "fail", "the cookie-free origin set a cookie"));
+    } else if (withCookie.status !== rendererRoot.status || withCookie.text !== rendererRoot.text) {
+      results.push(
+        probe("L0b", "renderer hostname is cookie-free", "fail", "the answer changed when a cookie was supplied"),
+      );
+    } else if (stableHeaders(withCookie.headers) !== stableHeaders(rendererRoot.headers)) {
+      /* Same status, same bytes, different headers is the quiet version of the
+         same defect: a `Vary: Cookie` or a per-cookie CSP means the hostname
+         read the credential, and stopping at the body would have called it
+         identical. */
+      results.push(
+        probe("L0b", "renderer hostname is cookie-free", "fail", "the response headers changed when a cookie was supplied"),
+      );
+    } else {
+      results.push(probe("L0b", "renderer hostname is cookie-free", "pass", "identical answer with and without a cookie, none set"));
+    }
+  } catch (error) {
+    results.push(probe("L0b", "renderer hostname is cookie-free", "fail", error.message.split("\n")[0]));
+  }
+
+  /* L0c. The matrix is read off `netlify/lib/edge-host.mjs` rather than written
+     down again: the shell paths come from `RENDERER_SHELL`, the refused prefix
+     from `RENDER_PREFIX`/`isRenderPrefix`, so a gate that stopped serving a path
+     fails here instead of leaving this file asserting a policy nobody
+     implements. */
+  try {
+    const faults = [];
+    for (const path of Object.keys(RENDERER_SHELL)) {
+      const shell = await get(`${facts.renderOrigin}${path}`, fetchImpl);
+      if (shell.status !== 200) faults.push(`renderer ${path} answered ${shell.status}`);
+    }
+    /* A shell path with a query is not a shell path: `rendererRewriteTarget`
+       refuses it so the renderer can refuse to mount against a URL carrying
+       one. */
+    const queried = await get(`${facts.renderOrigin}/?probe=1`, fetchImpl);
+    if (queried.status !== 404) faults.push(`renderer / with a query answered ${queried.status}, not 404`);
+
+    /* "A bodyless 404" is what the covers line claims, so the body is read. A
+       404 that renders something -- a debug page, or an application 404 echoing
+       the id it refused -- is a body on the origin that frames hostile HTML, and
+       a status-only check would record the claim as satisfied. `private,
+       no-store` is checked for the same reason: it is what the gate's own
+       `notFoundRenderer()` emits, so its absence means something other than the
+       gate answered. */
+    for (const path of ["/api/hosted/session", `/docs/${unknown}`]) {
+      const refused = await get(`${facts.renderOrigin}${path}`, fetchImpl);
+      if (refused.status !== 404) faults.push(`renderer ${path} answered ${refused.status}, not 404`);
+      if (refused.headers.get("set-cookie") !== null) faults.push(`renderer ${path} set a cookie`);
+      if (refused.text !== "") faults.push(`renderer ${path} answered 404 with a body`);
+      if (refused.headers.get("cache-control") !== "private, no-store") {
+        faults.push(`renderer ${path} was not refused by the gate; its 404 is not private, no-store`);
+      }
+    }
+
+    const internal = `${RENDER_PREFIX}index.html`;
+    if (!isRenderPrefix(internal)) faults.push(`${internal} is not a render prefix the gate refuses`);
+    const leaked = await get(`${facts.appOrigin}${internal}`, fetchImpl);
+    if (leaked.status !== 404) {
+      faults.push(`the application host served ${internal} with ${leaked.status}; artifact HTML must never be first-party there`);
+    }
+
+    /* The third hostname's 404 has to be *this gate's* 404. A hostname that is
+       not routed here also answers 404, and a status-only check could not tell
+       the two apart -- so the probe would record the foreign-host refusal as
+       observed live while the gate never saw the request. `noindex` plus
+       `private, no-store` plus an empty body is what `notFoundForeignHost()`
+       emits, and a stranger's 404 does not carry that combination. */
+    const third = await get(`${facts.foreignOrigin}/`, fetchImpl);
+    if (third.status !== 404) faults.push(`the third hostname answered ${third.status}, not 404`);
+    else if (third.headers.get("x-robots-tag") !== "noindex") faults.push("the third hostname's 404 is not marked noindex");
+    else if (third.headers.get("cache-control") !== "private, no-store" || third.text !== "") {
+      faults.push("the third hostname's 404 is not the gate's; supply a hostname that is actually routed to this deployment");
+    }
+
+    results.push(
+      faults.length > 0
+        ? probe("L0c", "host refusal matrix", "fail", faults.join("; "))
+        : probe("L0c", "host refusal matrix", "pass", "shells served, app paths refused on the renderer, third hostname noindex 404"),
+    );
+  } catch (error) {
+    results.push(probe("L0c", "host refusal matrix", "fail", error.message.split("\n")[0]));
+  }
 
   try {
     const session = await get(`${facts.appOrigin}/api/hosted/session`, fetchImpl);

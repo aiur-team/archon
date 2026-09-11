@@ -159,15 +159,16 @@ jobs:
         run: node scripts/test-hosted-operations.mjs
 
       # AHU-013's live acceptance gate. The capstone it belongs to cannot be
-      # closed by anything in this workflow -- it is about GitHub's real
-      # callback, real deployed routing and an installed public release -- so
-      # what CI proves here is the opposite property: that the runner refuses to
-      # report a live result when the operator prerequisites are absent, which
-      # is exactly the state every build runs in. A runner that started exiting
-      # 0 without them would turn "blocked" into "passed" silently, so a zero
-      # exit fails this step.
+      # closed by anything in this workflow -- it is about a real Auth0 tenant's
+      # connections, real deployed routing on two hostnames and an installed
+      # public release -- so what CI proves here is the opposite property: that
+      # the runner refuses to report a live result when the operator
+      # prerequisites are absent, which is exactly the state every build runs in.
+      # A runner that started exiting 0 without them would turn "blocked" into
+      # "passed" silently, so a zero exit fails this step.
       #
-      # It imports `netlify/lib/hosted` and `renderer/scripts/build.mjs` rather
+      # It imports `netlify/lib/hosted` and `netlify/lib/edge-host.mjs` -- the
+      # gate that is now the deployed header and host-refusal authority -- rather
       # than restating either policy, so it runs after the root install above.
       - name: live acceptance refuses without operator prerequisites
         run: |

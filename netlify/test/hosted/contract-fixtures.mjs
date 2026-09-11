@@ -195,14 +195,35 @@ export const FIXTURE_USER_CODE = "BCDF-2345";
 /* ------------------------------------------------------------------ */
 
 /**
- * Origins under the IANA-reserved `example.com` / `example.net` names, which
- * belong to nobody and resolve to nothing. They are also under a suffix the
+ * The application origin, under the IANA-reserved `example.com` name, which
+ * belongs to nobody and resolves to nothing. It is also under a suffix the
  * public-suffix list actually lists, which the app/render site comparison
  * requires: `.example` is a reserved TLD but is *not* in the PSL, so an origin
  * under it has no registrable site to compare and is refused in production.
  */
 export const FIXTURE_APP_ORIGIN = "https://app.archon.example.com";
-export const FIXTURE_RENDER_ORIGIN = "https://render.archon.example.net";
+/**
+ * The renderer origin, spelled the way a real deploy spells it: the site's own
+ * `<name>.netlify.app` hostname. There is one Netlify site now, answering on a
+ * custom domain and on that name, so a second documentation domain is a shape
+ * no deploy will ever have — and therefore a fixture pair that cannot catch a
+ * regression in the shape that will.
+ *
+ * This needs no new rule and must not be given one. `netlify.app` is a *private*
+ * entry in the public-suffix list, exactly like the `pages.dev` pair below, so a
+ * hostname under it is already its own registrable site under the rule
+ * `netlify/lib/hosted/config.mjs` has always applied. The retarget changes which
+ * two sites the fixtures name, never what "two sites" means.
+ *
+ * One property the app origin has and this one does not: `archon-example` is a
+ * Netlify site label anyone can claim, so unlike a reserved `example.com` name
+ * this hostname can resolve to a real third party's site. That is safe only
+ * because no suite in this tree ever dials a fixture origin -- they are values
+ * fed to validators and to injected `fetch` implementations, never to the
+ * network. A test that made a real request to one would be a test contacting a
+ * stranger's deployment from CI; keep that invariant when adding one.
+ */
+export const FIXTURE_RENDER_ORIGIN = "https://archon-example.netlify.app";
 /** A renderer sharing the app's registrable site - the C6 misconfiguration. */
 export const FIXTURE_SIBLING_RENDER_ORIGIN = "https://render.archon.example.com";
 /**

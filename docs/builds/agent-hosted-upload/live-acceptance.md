@@ -5,8 +5,9 @@ other gate in this repository runs against something the repository controls: a
 handler against an injected store, a client against a protocol fixture, a package
 against a fixture service, and — in AHU-012 — all of them assembled together with
 one deterministic identity provider upstream. None of that can say anything about
-GitHub's registered callback, the scopes GitHub actually grants, Netlify's
-production routing and conditional writes, two real HTTPS registrable sites, or
+the Auth0 tenant's registered callback, which connections it actually offers,
+whether the GitHub connection publishes a verified address, Netlify's production
+routing and conditional writes, one site answering on two real hostnames, or
 whether a consumer with no repository access can install the publisher at all.
 
 Those are the guarantees below. A fixture result is not one of them.
@@ -25,7 +26,7 @@ what to record when they have not.
 Run the preflight before touching anything live:
 
 ```sh
-npm --prefix hosted ci --ignore-scripts --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund
 node scripts/test-hosted-live.mjs
 ```
 
@@ -37,27 +38,40 @@ never a skipped pass.
 The runner reads its inputs from a `HOSTED_LIVE_*` environment. These are
 *acceptance inputs*: they describe what an operator has already provisioned, and
 setting one grants nothing and provisions nothing. They are deliberately separate
-from the five C6 keys the deployed service reads out of its own site environment,
+from the C6 keys the deployed service reads out of its own site environment,
 which this runner never sees.
+
+The topology they describe is **one Netlify site, answering on two hostnames**,
+with one Auth0 tenant in front of it and two operator-owned test accounts behind
+that. There is no second deployment and no second site; `hosted/OPERATIONS.md` §1
+is the authority on the shape, and these inputs only describe the instance of it
+that is under test.
 
 | Variable | What it must be |
 | --- | --- |
-| `HOSTED_LIVE_APP_ORIGIN` | The deployed application origin. Exact HTTPS origin, no path. |
-| `HOSTED_LIVE_RENDER_ORIGIN` | The deployed renderer origin. Must be a **different registrable site**, not a sibling subdomain. |
-| `HOSTED_LIVE_OAUTH_CLIENT_ID` | The dedicated OAuth application's client id. Recorded only as a digest. |
-| `HOSTED_LIVE_OAUTH_CALLBACK` | The URL registered with GitHub. Must equal `<app origin>/api/hosted/auth/github/callback` exactly. |
-| `HOSTED_LIVE_OAUTH_SCOPES` | `none`. Archon requests no scope and must be granted none. |
+| `HOSTED_LIVE_APP_ORIGIN` | The application hostname — the site's primary custom domain. Exact HTTPS origin, no path. |
+| `HOSTED_LIVE_RENDER_ORIGIN` | The renderer hostname — the site's own `<name>.netlify.app` name. Must be a **different registrable site** from the app, not a sibling subdomain. |
+| `HOSTED_LIVE_FOREIGN_ORIGIN` | A **third** hostname that routes to this same deployment and must be refused. Use the deploy permalink `https://<deploy-id>--<site-name>.netlify.app`: it is the one hostname that is provably routed here, and L0c reads the gate's own refusal signature (`noindex`, `private, no-store`, empty body) to tell a real refusal from a stranger's 404. |
+| `HOSTED_LIVE_AUTH0_DOMAIN` | The tenant, as a bare host — `your-tenant.us.auth0.com` or your custom domain. No scheme, port or path. Recorded only as a digest. |
+| `HOSTED_LIVE_AUTH0_CLIENT_ID` | The dedicated Auth0 application's client id. Recorded only as a digest. |
+| `HOSTED_LIVE_AUTH0_CALLBACK` | The callback URL registered on that application. Must equal `<app origin>/api/hosted/auth/callback` exactly. |
 | `HOSTED_LIVE_ACCOUNTS` | Two comma-separated opaque labels for the two test identities, e.g. `pilot-owner,pilot-other`. Never a login or an address. |
+| `HOSTED_LIVE_DOMAIN_ADMITTED` | The domain the test document's owner list admits. A domain, never an address; a public mailbox provider is refused. |
+| `HOSTED_LIVE_DOMAIN_REFUSED` | A different domain that list does **not** admit, used for L19's refusal half. A public mailbox provider is fine here — it is the reader a domain list exists to exclude. |
 | `HOSTED_LIVE_PACKAGE` | The exact `name@version` under test. Not a tag, not a range. |
 | `HOSTED_LIVE_PACKAGE_INTEGRITY` | The `sha512-…` integrity of that exact tarball. |
 | `HOSTED_LIVE_PACKAGE_SOURCE` | An HTTPS URL a consumer without repository access can fetch. A `file:` path or local `npm pack` output is refused. |
 | `HOSTED_LIVE_SOURCE_REVISION` | Full 40-character commit id of the deployed source. |
-| `HOSTED_LIVE_APP_DEPLOY` / `HOSTED_LIVE_RENDER_DEPLOY` | The two provider deploy identifiers under test. |
+| `HOSTED_LIVE_APP_DEPLOY` | The provider deploy identifier under test. One deployment, one identifier. |
 | `HOSTED_LIVE_BUDGET_APPROVAL` | The accepted pilot traffic/cost envelope reference. |
 | `HOSTED_LIVE_RETENTION_OWNER` | The named person accepting retention responsibility. C2 has no delete API. |
 | `HOSTED_LIVE_AHU012_REVISION` | The revision at which AHU-012 passed. Must equal `HOSTED_LIVE_SOURCE_REVISION`. |
 
-`GITHUB_CLIENT_SECRET` must **not** be present in the shell that runs this. It
+The two Auth0 fields are judged by `netlify/lib/hosted/config.mjs` — the reader
+the deployed site itself runs — so a tenant spelling the deployment would refuse
+is refused here too, rather than passing a gate and failing at sign-in.
+
+`AUTH0_CLIENT_SECRET` must **not** be present in the shell that runs this. It
 belongs in the deployed site's environment and nowhere else; the runner fails if
 it can see one, and refuses any supplied value carrying a provider-credential
 prefix.
@@ -71,9 +85,15 @@ HOSTED_LIVE_EVIDENCE=docs/builds/agent-hosted-upload/evidence/ahu-013-manifest.j
 ```
 
 The probes are unauthenticated GETs. They never sign in, upload, approve, create
-or delete anything. They decide L1–L3 below; every other guarantee is decided by a
-person following §3, and the runner reports those as `pending` no matter what —
-there is no input that makes it claim otherwise.
+or delete anything. They decide L0, L0b, L0c and L1–L3 below; every other
+guarantee is decided by a person following §3, and the runner reports those as
+`pending` no matter what — there is no input that makes it claim otherwise.
+
+**L0 comes before everything.** If the renderer hostname redirects to the primary
+domain, the second-hostname topology does not exist and no later result means
+anything. That is a failed gate and an operator decision, never a warning to work
+around: see `hosted/OPERATIONS.md` §1, "The `*.netlify.app` hostname must keep
+answering directly".
 
 ## 2. Rules that hold for every step
 
@@ -106,7 +126,11 @@ Each item names what to do, what decides it, and what to record. Record `pass`,
 `fail` or `blocked` for every one — there is no fourth answer, and an item nobody
 got to is `blocked`.
 
-The table is #176's live assertions one for one. Several of those assertions are
+The table is #176's live assertions one for one, plus the ones the single-site
+topology added: L0, L0b and L0c for the two hostnames and the third, L4a, L4b and
+L4c for the Auth0 round trip, and L19 for the domain gate. Row ids were **not**
+renumbered when those were inserted, because the committed AHU-013 evidence
+report already refers to the existing rows by id. Several of these assertions are
 one person's session at a browser rather than three separate runs, so a row may
 fold more than one; where it does, the **sub-assertions are listed in the row and
 carried in the runner's `covers` field**, and each of them needs its own recorded
@@ -119,16 +143,65 @@ acceptance guarantee. The runner is the authority for it.
 
 | Guarantee | Waits on | Released by |
 | --- | --- | --- |
-| L1, L2, L3, L15 | G2, G6 | both deployments at a frozen revision |
-| L4 | G2, G3, G4 | the OAuth application and the two test identities |
+| L0, L0b, L1, L2, L3, L15 | G2, G6 | the site answering on both hostnames at a frozen revision |
+| L0c | G2, G6, G8 | the above plus a third hostname routed to the same deployment |
+| L4, L4a, L4b | G2, G3, G4 | the Auth0 application and the two test identities |
+| L4c | G3 | the Auth0 application alone |
 | L5, L6 | G2, G3, G4, G5 | all of the above plus a published release |
-| L7, L8, L12, L17 | G2, G4, G5 | the deployments, an identity and the released package |
+| L7, L8, L12, L17 | G2, G4, G5 | the site, an identity and the released package |
 | L9, L13 | G2, G4, G5, G6 | the above at a frozen deployed revision |
-| L10 | G2, G5, G6 | the deployments at a frozen revision and the released package |
-| L11 | G2, G5 | the deployments and the released package |
-| L14 | G2, G7 | the deployments and the accepted pilot envelope |
-| L16 | G2, G6, G7 | the deployments plus the accepted envelope and retention owner |
+| L10 | G2, G5, G6 | the site at a frozen revision and the released package |
+| L11 | G2, G5 | the site and the released package |
+| L14 | G2, G7 | the site and the accepted pilot envelope |
+| L16 | G2, G6, G7 | the site plus the accepted envelope and retention owner |
 | L18 | G7 | the named retention owner |
+| L19 | G2, G4, G9 | the site, an identity and the admit/refuse domain pair |
+
+### L0 — the renderer hostname answers on its own name (probe)
+
+`GET <render>/` answers **200** with the renderer shell's own
+`Content-Security-Policy`, not a 3xx to the primary domain. Netlify does not
+redirect a site's `*.netlify.app` name by default, and that non-redirect is the
+renderer hostname's whole basis. A redirect here is a **failed gate**: stop, do
+not record the later rows, and escalate — the topology needs an operator decision
+before any of this procedure is valid.
+
+The policy is checked as well as the status because a 200 alone does not prove
+the *shell* answered: a deployment that lost `HOSTED_RENDER_ORIGIN` classifies
+every hostname as the application and would serve the app here, cheerfully, with
+a 200.
+
+### L0b — the renderer hostname is cookie-free (probe)
+
+The probe asks `<render>/` twice, once carrying a `__Host-archon_session` cookie
+value that is not a session. Both answers must be identical and neither of those
+two may carry a `Set-Cookie`. A hostname whose answer varies on a cookie is reading a
+credential on the origin that frames hostile HTML. (That a browser never *sends*
+the application's `__Host-` cookie to this hostname is the two-registrable-sites
+property G2 refuses to start without, plus the cookie's own prefix; L4 records
+the prefix from devtools.)
+
+### L0c — the host refusal matrix (probe)
+
+Read from `netlify/lib/edge-host.mjs`, which is the gate's own module and the one
+authority on which hostname serves what:
+
+- every renderer shell path answers 200 on `<render>`, and one with a query
+  string does not;
+- `<render>` refuses an application path — `/api/hosted/session`, `/docs/<id>` —
+  with a bodyless 404, no `Set-Cookie`, and `Cache-Control: private, no-store`;
+- `<app>` refuses the internal `/_render/` prefix, so artifact HTML is never a
+  first-party page on the account origin;
+- `<foreign>` — the third hostname — is a bodyless 404 carrying
+  `X-Robots-Tag: noindex` and `Cache-Control: private, no-store`.
+
+The body and `private, no-store` are checked, not just the status. A 404 that
+renders something is a body on the origin that frames hostile HTML, and a
+hostname that is simply not routed here also answers 404 — the gate's refusal
+signature is what distinguishes a refusal it made from one it never saw.
+
+A hostname serving something it must not is a failure, whichever direction it
+goes in.
 
 ### L1 — deployed session endpoint (probe)
 
@@ -139,11 +212,13 @@ Decided by `node scripts/test-hosted-live.mjs probe`. Record the manifest entry.
 
 ### L2 — deployed renderer headers (probe)
 
-`GET <render>/` serves exactly the header set `renderer/scripts/build.mjs`
+`GET <render>/` serves exactly the header set `netlify/lib/edge-host.mjs`
 generates for the configured app origin — including `frame-ancestors <app>` —
-and sets no cookie. This is the deploy-routing assertion: the `_headers` file is
-generated at build time, and only a real deploy proves the platform applied it.
-Decided by the probe. Record the manifest entry.
+and sets no cookie. This is the deploy-routing assertion, and the edge gate is
+now the one place that emits it: `netlify.toml` declares no security header and
+the renderer build writes no `_headers` beside the shell it publishes, because
+only the gate can tell which of the two hostnames a request arrived on. Decided
+by the probe. Record the manifest entry.
 
 ### L3 — signed-out private read (probe)
 
@@ -153,7 +228,7 @@ private header set on each response. Decided by the probe against a random id th
 cannot exist, which is the only id a runner may request without touching a real
 record. The owner/other-account half of isolation is L8.
 
-### L4 — real GitHub sign-in (human)
+### L4 — real Auth0 sign-in (human)
 
 From the publisher CLI's start output, open the verification URL in a clean
 browser profile signed in as the first test account.
@@ -162,18 +237,53 @@ Record, without collecting any token:
 
 - the pairing code and descriptor shown before sign-in, and that the descriptor
   matches what the CLI sent;
-- that the authorization request goes to GitHub's fixed endpoint and carries the
-  dedicated client id, a `state`, and an S256 PKCE challenge;
-- **the scopes GitHub's consent screen says are being granted** — this must be
-  none, and this is the assertion no fixture can make;
-- that the callback lands on `<app>/api/hosted/auth/github/callback` and that a
-  replay of the same callback URL is refused (state is single-use);
+- that the authorization request goes to the tenant's own `/authorize` endpoint
+  and carries the dedicated client id, a `state`, and an S256 PKCE challenge;
+- that the callback lands on `<app>/api/hosted/auth/callback` and that a replay
+  of the same callback URL is refused (state is single-use);
 - that the resulting session cookie is `__Host-archon_session` with `Secure`,
   `HttpOnly`, `SameSite=Lax`, `Path=/` and no `Domain` (read from devtools; do
-  not copy the value anywhere);
+  not copy the value anywhere) — the `__Host-` prefix forbids `Domain`, which is
+  what keeps the cookie off the renderer hostname;
 - that a `GET` of the approval URL alone never approves and never logs out.
 
 Then perform the real approve action.
+
+### L4a — the Google connection completes a round trip (human)
+
+Sign in with the operator's **Google** test account and record that the session
+becomes authenticated and that the persisted account key is the `a0_` digest of
+the Auth0 subject rather than anything derived from the address. This is the
+assertion a fixture cannot make: the loopback runner's tenant stand-in answers
+whatever it is asked, and only the real tenant proves the connection is enabled
+and configured with the operator's own Google application.
+
+### L4b — the GitHub connection carries a verified email (human)
+
+Sign in with the operator's **GitHub** test account, in a second isolated
+profile, and record from `GET <app>/api/hosted/session`:
+
+- `authenticated` is `true`;
+- `email` is **not null** and `emailVerified` is `true`.
+
+This is the row that catches the single most silent misconfiguration in the whole
+setup. Archon requests `openid profile email`, but Auth0 can only publish a
+GitHub address if the GitHub connection was given the `user:email` scope. Without
+it the tenant answers correctly, the session is valid, and **every domain check
+refuses every reader** with a reason no error message names. A failure here is
+that scope, not the domain list.
+
+Record also that the two test accounts resolve to two different account keys.
+
+### L4c — the tenant offers exactly two providers (human)
+
+On the tenant's Universal Login screen for this application, record that the only
+choices offered are **Google** and **GitHub**, that the default
+`Username-Password-Authentication` database connection is disabled on the
+application, and that no sign-up affordance is offered for a connection this
+deployment does not use. A connection left enabled is a login path nobody
+reviewed. Decided from the rendered screen, not from the tenant's settings page
+alone.
 
 ### L5 — installed release drives a real publish (human + agent, AE1)
 
@@ -201,9 +311,9 @@ still works — never a reason to ask anyone to weaken an IT control.
 
 From the completed record and the receipt, with evidence kept content-minimal:
 
-- the persisted account key is `gh_<decimal GitHub id>` and derives from the real
-  numeric identity — a login or an address is not an ownership key, and a rename
-  of the test account must not change it;
+- the persisted account key is `a0_<digest of the Auth0 subject>` and derives
+  from that subject — a login or an address is not an ownership key, and a
+  rename of the test account, or a change of its address, must not change it;
 - the descriptor stored in the completed record is the one the client sent;
 - the recorded owner is the account that actually signed in;
 - the stored HTML digest equals both the receipt's `contentSha256` and the digest
@@ -232,8 +342,10 @@ With the document published, look for it everywhere it must not be:
 
 - no public Blobs URL, CDN copy, redirect bearer or downloadable asset path
   appears anywhere in the owner's transfer;
-- neither deployment's published static output contains any private byte — check
-  the renderer site in particular, which must hold only operator-owned code;
+- the deployment's published static output contains no private byte, on either
+  hostname — check what `<render>` serves in particular, which is the four shell
+  files under the internal `/_render/` rewrite and must hold only operator-owned
+  code;
 - the content route replayed without the session returns nothing.
 
 ### L10 — real conditional-write race (human)
@@ -287,11 +399,11 @@ could take. Do not write a network-proof or end-to-end-encryption claim.
 
 ### L14 — publish-disabled transition (human)
 
-With the operator's authority, set `HOSTED_PUBLISH_ENABLED=false` on the deployed
-site and redeploy per `hosted/OPERATIONS.md` §4. Record that new start and upload
-requests are refused with 503, that existing private reads still work, and that a
-completed receipt still recovers. Restore the previous value and record the
-restoration.
+With the operator's authority, set `HOSTED_PUBLISH_ENABLED=false` on the site and
+redeploy per `hosted/OPERATIONS.md` §4. There is one site, so this is one
+variable change and one redeploy. Record that new start and upload requests are
+refused with 503, that existing private reads still work, and that a completed
+receipt still recovers. Restore the previous value and record the restoration.
 
 ### L15 — rate rules are accepted and effective (human)
 
@@ -330,6 +442,22 @@ paused-maintenance operator process of `hosted/OPERATIONS.md` §7 after verifyin
 the exact targets, or record their intentional retention against the named
 retention owner. Record which of the two happened for each resource.
 
+### L19 — the verified-email domain gate is live (human)
+
+As the owner, add `HOSTED_LIVE_DOMAIN_ADMITTED` to the test document's domain
+list. Then, from real rendered browser output:
+
+- a reader whose **verified** address is at the admitted domain opens the
+  document;
+- a reader whose verified address is at `HOSTED_LIVE_DOMAIN_REFUSED` gets the
+  same not-found view as an id that never existed, and the metadata and content
+  routes leak no title, no bytes and no marker of the document they refused.
+
+Use the two test accounts from G4 for the two halves. If the account you intended
+as the admitted reader has no verified address on its session, that is **L4b**
+failing, not this row — fix the GitHub connection's `user:email` scope and
+re-run, rather than recording L19 as a refusal that worked.
+
 ## 4. Recording the result
 
 Write a dated report at
@@ -337,9 +465,10 @@ Write a dated report at
 containing:
 
 - the frozen facts: package version and integrity, install source, source
-  revision, both deploy identifiers, both origins and their registrable sites, the
-  OAuth client id digest, and the account labels;
-- one row per guarantee L1–L18 with `pass`, `fail` or `blocked`, the evidence it
+  revision, the deploy identifier, the three hostnames and the two registrable
+  sites the served pair resolves to, the Auth0 tenant and client id digests, the
+  account labels, and the admitted and unlisted domains;
+- one row per guarantee L0–L19 with `pass`, `fail` or `blocked`, the evidence it
   was decided from, and — for a blocked one — the gate items it is still waiting
   on, copied from the runner's `waits on` lines. A row that folds several of the
   ticket's assertions records an outcome for each line of its `covers` list;
