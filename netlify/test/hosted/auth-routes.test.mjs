@@ -25,6 +25,7 @@ import { test } from "node:test";
 
 import { AuthStore, SESSION_TTL_SECONDS, TRANSIENT_TTL_SECONDS } from "../../lib/hosted/auth-store.mjs";
 import { buildLogoutUrl, principalFromClaims } from "../../lib/hosted/auth0-oidc.mjs";
+import { HOSTED_LIMITS } from "../../lib/hosted/contracts.mjs";
 import { withErrorBoundary } from "../../lib/hosted/http.mjs";
 import {
   BINDING_COOKIE,
@@ -357,7 +358,7 @@ test("knowing the callback URL is not enough to redeem the code", async () => {
       cookies: { [OAUTH_COOKIE]: started.binding },
     }),
   );
-  assert.equal(landed.headers.get("location"), "/publish/authorize");
+  assert.equal(landed.headers.get("location"), HOSTED_LIMITS.WELCOME_PATH);
   assert.ok(setCookies(landed).has(SESSION_COOKIE));
 });
 
@@ -438,7 +439,7 @@ test("a malformed or fabricated binding cookie is refused without writing anythi
 test("a start accepts the internal destinations, including a collaboration slug", async () => {
   const app = deployment();
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
-  for (const destination of ["/publish/authorize", docs, "/how-archon-works/"]) {
+  for (const destination of ["/publish/authorize", "/welcome", docs, "/how-archon-works/"]) {
     const login = await bootstrap(app);
     const response = await app.start(
       browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination } }),
@@ -457,6 +458,8 @@ test("a start accepts the internal destinations, including a collaboration slug"
     "/api/",
     "/_render/",
     "/how/archon/works/",
+    "/welcome/",
+    "/welcome?x=1",
   ]) {
     const login = await bootstrap(app);
     const response = await app.start(
@@ -483,6 +486,53 @@ test("an empty destination field is the default, not a refusal", async () => {
     AUTHORIZE_ORIGIN,
     "a form submits an empty string, not an absent field, and empty means the default",
   );
+});
+
+test("a sign-in with nothing to approve lands on the onboarding page", async () => {
+  /* The default used to be `/publish/authorize`, which answers "No pending
+     publication" — a dead end for somebody who has just discovered Archon and
+     has never asked an agent to publish anything. Both spellings of "no
+     destination" are checked: an absent field, and the empty string a form
+     submits. */
+  for (const form of [{}, { destination: "" }]) {
+    const app = deployment();
+    const login = await bootstrap(app);
+    const started = await app.start(
+      browserRequest("/api/hosted/auth/start", {
+        method: "POST",
+        cookies: { [LOGIN_COOKIE]: login },
+        form,
+      }),
+    );
+    assert.equal(started.status, 303);
+    const location = new URL(started.headers.get("location"));
+    const binding = cookieValue(setCookies(started).get(OAUTH_COOKIE));
+    await armProvider(app, {
+      nonce: location.searchParams.get("nonce"),
+    });
+    const landed = await app.callback(
+      browserRequest(
+        `/api/hosted/auth/callback?state=${location.searchParams.get("state")}&code=fixture-code`,
+        { cookies: { [OAUTH_COOKIE]: binding } },
+      ),
+    );
+    assert.equal(landed.status, 303);
+    assert.equal(
+      landed.headers.get("location"),
+      HOSTED_LIMITS.WELCOME_PATH,
+      `a sign-in with no destination must land on the onboarding page (form ${JSON.stringify(form)})`,
+    );
+  }
+});
+
+test("a sign-in completing a pending publication still lands on the approval page", async () => {
+  /* The agent flow puts `AUTHORIZE_PATH` into `verificationUriComplete`, so the
+     browser arrives carrying that destination explicitly. Changing what an
+     ordinary sign-in defaults to must not touch it. */
+  const app = deployment();
+  const { landed } = await signIn(app, { destination: HOSTED_LIMITS.AUTHORIZE_PATH });
+  assert.equal(landed.status, 303);
+  assert.equal(landed.headers.get("location"), HOSTED_LIMITS.AUTHORIZE_PATH);
 });
 
 test("the destination never travels to Auth0", async () => {
@@ -686,7 +736,7 @@ test("a denied consent is a normal outcome with an actionable retry", async () =
   );
   assert.equal(
     response.headers.get("location"),
-    "/login/?status=denied&destination=%2Fpublish%2Fauthorize",
+    "/login/?status=denied&destination=%2Fwelcome",
     "a retry must land back where the visitor was going",
   );
   assert.equal(setCookies(response).has(SESSION_COOKIE), false);
@@ -721,7 +771,7 @@ test("a token endpoint outage is unavailable and a refusal is expired", async ()
     );
     assert.equal(
       response.headers.get("location"),
-      `/login/?status=${status}&destination=%2Fpublish%2Fauthorize`,
+      `/login/?status=${status}&destination=%2Fwelcome`,
       JSON.stringify(provider),
     );
     assert.equal(setCookies(response).has(SESSION_COOKIE), false);
@@ -747,7 +797,7 @@ test("a token that fails verification signs nobody in", async () => {
     );
     assert.equal(
       response.headers.get("location"),
-      "/login/?status=expired&destination=%2Fpublish%2Fauthorize",
+      "/login/?status=expired&destination=%2Fwelcome",
       `verification failure: ${label}`,
     );
     assert.equal(setCookies(response).has(SESSION_COOKIE), false, label);
@@ -792,7 +842,7 @@ test("a callback that cannot revoke the old session signs nobody in", async () =
   );
   assert.equal(
     landed.headers.get("location"),
-    "/login/?status=unavailable&destination=%2Fpublish%2Fauthorize",
+    "/login/?status=unavailable&destination=%2Fwelcome",
   );
   assert.equal(setCookies(landed).has(SESSION_COOKIE), false);
   assert.notEqual(await app.store.readSession(first.token), null);

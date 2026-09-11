@@ -8,6 +8,7 @@ import {
   applicationOrigin,
   classifyHost,
   isApplicationPassThrough,
+  isLandingPage,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -41,12 +42,14 @@ const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
 const SESSION_ROUTE = "/api/hosted/session";
 
 /**
- * The application-host root. It serves the public splash at
- * `netlify/public/index.html` with no session check, so an anonymous visitor
- * sees the landing page rather than a redirect to sign in. It is matched
- * exactly and only -- never as a prefix -- so no other path is made public.
+ * The public landing pages, decided by `isLandingPage` in `edge-host.mjs`: the
+ * splash at the application-host root (`site/index.html`) and the onboarding
+ * page at `/welcome` (`netlify/public/welcome/index.html`). Both are served with
+ * no session check, so an anonymous visitor sees a page rather than a redirect
+ * to sign in, and both take the landing header set rather than the stricter
+ * first-party page one. The root is matched exactly and only -- never as a
+ * prefix -- so no other path is made public by it.
  */
-const PUBLIC_ROOT = "/";
 
 /**
  * The session cookie's name, restated for one question: is there anything to ask
@@ -77,6 +80,7 @@ const RESERVED_FIRST_SEGMENTS = [
   "publish",
   "docs",
   "api",
+  "welcome",
   "_assets",
   "_render",
 ];
@@ -395,11 +399,12 @@ async function applicationHost(
      gate's own `/api/hosted/session` subrequest is one of these, so it cannot
      recurse into the session logic.
 
-     The bare root is public too: it serves the splash at
-     `netlify/public/index.html` through the same pass-through, so an anonymous
-     visitor lands on the splash rather than the sign-in redirect. Only the exact
-     root is public; every deeper path stays gated. */
-  if (url.pathname === PUBLIC_ROOT || isApplicationPassThrough(url.pathname)) {
+     The landing pages are public too: the bare root serves the splash and
+     `/welcome` serves the onboarding page, both through the same pass-through,
+     so an anonymous visitor lands on a page rather than the sign-in redirect.
+     Only the exact root is public; every deeper path outside `/welcome/` stays
+     gated. */
+  if (isLandingPage(url.pathname) || isApplicationPassThrough(url.pathname)) {
     let passed: Response;
     try {
       passed = await context.next();
@@ -408,7 +413,7 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    return url.pathname === PUBLIC_ROOT
+    return isLandingPage(url.pathname)
       ? withLandingPageHeaders(passed)
       : finalizePassThrough(passed);
   }

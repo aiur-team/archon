@@ -607,6 +607,34 @@ test("the application-host root serves the public splash to an anonymous visitor
   assert.equal(gated.response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
 });
 
+test("the onboarding page is public, takes the landing header set, and does not widen the root", async () => {
+  // `/welcome` is where an ordinary sign-in now lands, and the callback redirect
+  // reaches it before anything has established a session on this browser's next
+  // request -- so a session check here would bounce the visitor straight back to
+  // sign in. It is served like the splash: no session check, landing headers.
+  for (const path of ["/welcome", "/welcome/", "/welcome/index.html"]) {
+    const page = await runGate(APP_HOST, path, { cookie: null, next: () => staticPage() });
+    assert.equal(page.response.status, 200, `${path} is served, not a redirect`);
+    assert.equal(page.response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `and no role is resolved for ${path}`);
+    assert.equal(cspCount(page.response), 1, `${path} gains exactly one CSP`);
+    const csp = page.response.headers.get("Content-Security-Policy");
+    assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"), `${path} may run its inline copy button`);
+    assert.ok(csp.includes("font-src https://fonts.gstatic.com"), `${path} may load the splash's fonts`);
+    assert.ok(csp.includes("frame-ancestors 'none'"), `${path} is still frame-denied`);
+    assert.equal(page.response.headers.get("X-Frame-Options"), "DENY");
+  }
+
+  // The prefix is the page's own directory and nothing else: a sibling slug that
+  // merely starts with the same letters is an ordinary gated document.
+  const neighbour = await runGate(APP_HOST, "/welcomer/", {
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+  });
+  assert.equal(neighbour.response.status, 303, "/welcomer/ is not the onboarding page");
+  assert.equal(neighbour.response.headers.get("Location"), "/login/?destination=%2Fwelcomer%2F");
+});
+
 test("application host session-checks a collaboration slug and serves a readable document", async () => {
   const { response, calls } = await runGate(APP_HOST, "/some-slug/", { next: () => docPage() });
   assert.equal(response.status, 200);

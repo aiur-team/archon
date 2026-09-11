@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<!--
+  The onboarding page a sign-in lands on when there is nothing to approve.
+
+  A person who signs in from the splash has no pending publication, and the
+  approval page they used to land on answers "No pending publication" - a dead
+  end for the one visitor who most needs to be told what happens next. This page
+  is that answer: the four steps of the flow, and the prompt to hand an agent.
+
+  The prompt line is the splash's, byte for byte, and
+  `netlify/test/welcome-page.test.mjs` is what keeps it that way: it reads the
+  `#agentPrompt` text out of both files and asserts they are equal, so a change
+  to one that is not made to the other fails CI rather than drifting quietly.
+
+  It holds no session and no user data, and it runs no fetch. The gate serves it
+  publicly under `landingPageHeaders` - the same set the splash takes - because
+  it is the same kind of document and wants the same fonts and the same inline
+  copy button. The styles below are the splash's, reduced to what one page uses.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Welcome to Archon</title>
+<meta name="description" content="How to turn an artifact into an Archon doc, in four steps.">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Light is the bare :root so no colour exists only inside a media block. */
+  :root {
+    --bg: #e7d6b2;
+    --fg: #2a2520;
+    --muted: #5f5645;
+    --accent: #1f57c4;
+    --pill-bd: rgba(42, 37, 26, 0.16);
+    --pill-bg: rgba(42, 37, 26, 0.035);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1b1e;
+      --fg: #edeef0;
+      --muted: #8c8d93;
+      --accent: #2f86ff;
+      --pill-bd: rgba(221, 226, 235, 0.13);
+      --pill-bg: rgba(221, 226, 235, 0.03);
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { min-height: 100%; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100svh;
+    display: flex;
+    justify-content: center;
+  }
+
+  main {
+    width: 100%;
+    max-width: 46rem;
+    padding: clamp(40px, 9vh, 96px) clamp(20px, 5vw, 40px) 64px;
+  }
+
+  h1 {
+    font-size: clamp(26px, 4.4vw, 38px);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    margin-top: 12px;
+    max-width: 46ch;
+    font-size: clamp(15px, 2vw, 17px);
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .lede .hl { color: var(--accent); }
+
+  /* One step per row: a numbered marker in its own column so the prose and the
+     install box under step one share a single left edge. */
+  .steps {
+    margin-top: clamp(34px, 6vh, 52px);
+    list-style: none;
+    display: grid;
+    gap: clamp(26px, 4vh, 38px);
+  }
+  .steps > li {
+    display: grid;
+    grid-template-columns: 2rem 1fr;
+    column-gap: 16px;
+    align-items: start;
+  }
+  .step-no {
+    grid-row: 1 / span 2;
+    width: 2rem;
+    height: 2rem;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--pill-bd);
+    border-radius: 999px;
+    background: var(--pill-bg);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 13px;
+    color: var(--accent);
+  }
+  .step-text {
+    align-self: center;
+    font-size: clamp(15px, 2.1vw, 18px);
+    line-height: 1.45;
+  }
+  .step-extra { grid-column: 2; }
+
+  /* One copyable line, in the shape of the splash's install box: a bordered
+     pill holding the prompt a person pastes into their agent, and a copy
+     button. There is one line and no package-manager tabs, so no tab strip. */
+  .install-box {
+    display: flex;
+    align-items: stretch;
+    max-width: 100%;
+    margin-top: 12px;
+    border: 1px solid var(--pill-bd);
+    background: var(--pill-bg);
+    border-radius: 11px;
+    backdrop-filter: blur(3px);
+  }
+  .install {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    padding: 11px 10px 11px 18px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: clamp(12.5px, 1.6vw, 14px);
+    color: var(--fg);
+    text-align: left;
+  }
+  .install .prompt { color: var(--accent); flex: none; }
+  .install .cmd {
+    letter-spacing: 0.01em;
+    overflow-wrap: anywhere;
+  }
+  .install .copy {
+    flex: none;
+    position: relative;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    transition: background-color .2s, color .2s;
+  }
+  .install .copy:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 9%, transparent); }
+  .install .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .install .copy svg { width: 15px; height: 15px; }
+  .install .copy.copied { color: var(--accent); }
+  /* "Copied" is announced to a screen reader and shown as a small label above
+     the button, so the confirmation is not colour alone. */
+  .copy-status {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translate(-50%, 4px);
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--fg);
+    color: var(--bg);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .15s ease, transform .15s ease;
+  }
+  .copy.copied .copy-status { opacity: 1; transform: translate(-50%, 0); }
+
+  .aside {
+    margin-top: clamp(34px, 6vh, 52px);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    color: color-mix(in srgb, var(--muted) 78%, transparent);
+  }
+  .aside a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+  .aside a:hover { color: var(--fg); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .install .copy, .copy-status { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <main>
+    <h1>You&rsquo;re signed in.</h1>
+    <p class="lede">Archon turns an artifact into a real document with <span class="hl">auth, editing and live collaboration</span>. Here is the whole flow, start to finish.</p>
+
+    <ol class="steps">
+      <li>
+        <span class="step-no" aria-hidden="true">1</span>
+        <p class="step-text" id="prompt-hint">Tell your agent:</p>
+        <div class="step-extra">
+          <div class="install-box" role="group" aria-labelledby="prompt-hint">
+            <div class="install">
+              <span class="prompt" aria-hidden="true">&gt;</span>
+              <span class="cmd" id="agentPrompt">Turn my artifact into an Archon doc: https://archon.aiur.team</span>
+              <button class="copy" id="copyBtn" type="button" aria-label="Copy the prompt">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2.2"></rect>
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+                </svg>
+                <span class="copy-status" role="status" aria-live="polite" id="copyStatus"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </li>
+      <li>
+        <span class="step-no" aria-hidden="true">2</span>
+        <p class="step-text">Your agent redirects you to an authorise page to approve the publication.</p>
+      </li>
+      <li>
+        <span class="step-no" aria-hidden="true">3</span>
+        <p class="step-text">Your agent uploads your artifact to Archon.</p>
+      </li>
+      <li>
+        <span class="step-no" aria-hidden="true">4</span>
+        <p class="step-text">Share your doc with others and collaborate.</p>
+      </li>
+    </ol>
+
+    <p class="aside">built with <a href="https://github.com/aiur-team/archon">aiur-team/archon</a></p>
+  </main>
+
+<script>
+  /* Copy the agent prompt. Lifted from the splash, and the same in one respect
+     that matters: the text copied is the exact content of the line on the page,
+     so the two cannot disagree. When the clipboard API is refused (no secure
+     context, or permission denied) the line is selected instead so a keyboard
+     copy still works, and no "Copied" is claimed. */
+  (function () {
+    var btn = document.getElementById("copyBtn");
+    var line = document.getElementById("agentPrompt");
+    var status = document.getElementById("copyStatus");
+    if (!btn || !line || !status) return;
+
+    var timer = 0;
+    function confirm() {
+      btn.classList.add("copied");
+      status.textContent = "Copied";
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        btn.classList.remove("copied");
+        status.textContent = "";
+      }, 1300);
+    }
+    function selectLine() {
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(line);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (error) { /* nothing more to offer */ }
+    }
+
+    btn.addEventListener("click", function () {
+      var text = line.textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(confirm, selectLine);
+      } else {
+        selectLine();
+      }
+    });
+  })();
+</script>
+</body>
+</html>

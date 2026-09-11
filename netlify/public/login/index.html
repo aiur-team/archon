@@ -53,7 +53,10 @@
     </noscript>
 
     <form id="signin" method="post" action="/api/hosted/auth/start">
-      <input type="hidden" name="destination" id="destination" value="/publish/authorize" />
+      <!-- The onboarding page, matching the server's own default. A sign-in with
+           somewhere else to be arrives with ?destination= and login.js replaces
+           this value; a sign-in with nothing to approve lands on /welcome. -->
+      <input type="hidden" name="destination" id="destination" value="/welcome" />
       <button type="submit" id="submit" disabled>Sign in</button>
     </form>
 
@@ -64,7 +67,7 @@
       <form method="post" action="/api/hosted/auth/start" id="switch">
         <input type="hidden" name="switchAccount" value="true" />
         <input type="hidden" name="csrfToken" id="csrf" value="" />
-        <input type="hidden" name="destination" id="switch-destination" value="/publish/authorize" />
+        <input type="hidden" name="destination" id="switch-destination" value="/welcome" />
         <button type="submit" class="secondary">Use a different account</button>
       </form>
       <p class="lede">

@@ -298,7 +298,10 @@
 </head>
 <body>
   <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start" style="position:fixed;top:1rem;right:1.25rem;z-index:30;margin:0">
-    <input type="hidden" name="destination" value="/publish/authorize">
+    <!-- Somebody signing in from the splash has nothing to approve yet, so they
+         land on the onboarding page. A publication being approved arrives on
+         /publish/authorize through its own link, not through this button. -->
+    <input type="hidden" name="destination" value="/welcome">
     <button id="siteSigninBtn" type="submit" disabled style="cursor:pointer;font:500 .95rem/1 'Space Grotesk',system-ui,sans-serif;color:var(--accent);border:1px solid var(--pill-bd);background:var(--bg);padding:.55rem 1rem;border-radius:999px">Sign in</button>
   </form>
   <script>

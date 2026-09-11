@@ -189,8 +189,16 @@ export function createStartRoute({ store, config: hostedConfig }) {
        accepted rather than one the round trip carried back. */
     /* `||` rather than `??`: a form that submits `destination=` sends an empty
        string, not an absent field, and an empty string is the visitor asking for
-       the default rather than for a destination this route must refuse. */
-    const destination = validateDestination(field("destination") || HOSTED_LIMITS.AUTHORIZE_PATH);
+       the default rather than for a destination this route must refuse.
+
+       The default is the onboarding page, not the approval page. A sign-in with
+       nothing to approve used to land on `/publish/authorize`, which answers
+       "No pending publication" and is a dead end for somebody who has just
+       discovered Archon. A sign-in that *is* completing an approval is
+       unaffected: the agent flow puts `AUTHORIZE_PATH` in
+       `verificationUriComplete`, so that browser arrives carrying an explicit
+       destination and never falls back to this value. */
+    const destination = validateDestination(field("destination") || HOSTED_LIMITS.WELCOME_PATH);
 
     /* The `state` Auth0 carries and the cookie this browser holds are two
        different secrets. Making them one value looked like a double submit and

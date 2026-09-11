@@ -56,6 +56,39 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
 ]);
 
 /**
+ * The onboarding page's path, and the tree it is served from.
+ *
+ * `netlify/lib/hosted/contracts.mjs` names the same `/welcome` as
+ * `HOSTED_LIMITS.WELCOME_PATH`; it is restated here rather than imported
+ * because that module reaches a blob store and this one runs on Deno at the
+ * edge with Web globals only. A wrong copy fails in the safe direction: the
+ * page is gated rather than exposed.
+ */
+const WELCOME_PATH = "/welcome";
+const WELCOME_PREFIX = "/welcome/";
+
+/**
+ * Whether a path is one of the public landing pages: the splash at the bare
+ * root, and the onboarding page a fresh sign-in lands on.
+ *
+ * Both are public marketing documents holding no session and no user data, and
+ * both take `landingPageHeaders` rather than the stricter first-party page set,
+ * because both pull the same web fonts and run the same inline copy button.
+ *
+ * The root is matched exactly and only, so no other path is made public by it.
+ * The onboarding page is matched exactly *and* as a prefix of its own directory,
+ * so `/welcome`, `/welcome/` and `/welcome/index.html` are one page rather than
+ * three differently-gated spellings — and `/welcomer/` is not any of them.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isLandingPage(pathname) {
+  if (pathname === "/" || pathname === WELCOME_PATH) return true;
+  return pathname.startsWith(WELCOME_PREFIX);
+}
+
+/**
  * A header-safe origin serialization, the same shape `renderer/scripts/build.mjs`
  * requires before it will write an origin into a header line: scheme, host or
  * bracketed IPv6 literal, optional port, and nothing that could forge a header.
@@ -358,14 +391,16 @@ export function withFirstPartyPageHeaders(response) {
 }
 
 /**
- * Header set for the public landing page at the application host's bare root
- * (`site/index.html`). Unlike the sign-in page, the landing page is a marketing
- * document: it pulls Google Fonts and runs small inline scripts (copy button,
- * entrance animation, dismissible banner). It holds no session, no credential
- * form and no user data, so it may take a looser CSP than firstPartyPageHeaders
- * -- the framing and base-uri denials and the same security headers still hold.
- * The extra grants are exactly what this one static page needs: inline script,
- * the two Google Font origins, and same-origin images.
+ * Header set for the public landing pages: the splash at the application host's
+ * bare root (`site/index.html`) and the onboarding page at `/welcome`
+ * (`netlify/public/welcome/index.html`). Unlike the sign-in page, a landing page
+ * is a marketing document: it pulls Google Fonts and runs small inline scripts
+ * (copy button, entrance animation, dismissible banner). It holds no session, no
+ * credential form and no user data, so it may take a looser CSP than
+ * firstPartyPageHeaders -- the framing and base-uri denials and the same
+ * security headers still hold. The extra grants are exactly what these static
+ * pages need: inline script, the two Google Font origins, and same-origin
+ * images.
  *
  * @returns {Array<[string, string]>}
  */
@@ -393,7 +428,7 @@ export function landingPageHeaders() {
 /**
  * Apply the landing header set to a response, only when it carries no CSP of its
  * own. Same in-place contract as its siblings; the caller decides a response is
- * the public root before calling this.
+ * a public landing page before calling this.
  *
  * @param {Response} response
  * @returns {Response}
