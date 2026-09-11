@@ -96,6 +96,27 @@
   .banner-close:hover { color: var(--fg); background: var(--pill-bd); }
   .banner-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  /* Sign in sits in normal flow, right-aligned, directly after the banner. When
+     the banner is shown it lands beneath it rather than over it; when the banner
+     is hidden it rides near the top of the page. Colours are the shared tokens. */
+  .site-signin {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
+    margin: 0;
+  }
+  .site-signin button {
+    cursor: pointer;
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--accent);
+    border: 1px solid var(--pill-bd);
+    background: var(--bg);
+    padding: 0.55rem 1rem;
+    border-radius: 999px;
+  }
+  .site-signin button[disabled] { cursor: default; opacity: 0.6; }
+  .site-signin button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
   .stage {
     position: relative;
     flex: 1;
@@ -281,8 +302,8 @@
 
   /* The invite-request form. Plain, and deliberately below the lockup: it is the
      way in for somebody this deployment does not know yet, not the first thing
-     it says about itself. The top-right Sign in button is for people who already
-     have an account; this is for people who do not. */
+     it says about itself. The Sign in button below the banner is for people who
+     already have an account; this is for people who do not. */
   .invite {
     border-top: 1px solid var(--hairline);
     margin: 3.5rem auto 0;
@@ -338,9 +359,14 @@
 </style>
 </head>
 <body>
-  <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start" style="position:fixed;top:1rem;right:1.25rem;z-index:30;margin:0">
-    <input type="hidden" name="destination" value="/publish/authorize">
-    <button id="siteSigninBtn" type="submit" disabled style="cursor:pointer;font:500 .95rem/1 'Space Grotesk',system-ui,sans-serif;color:var(--accent);border:1px solid var(--pill-bd);background:var(--bg);padding:.55rem 1rem;border-radius:999px">Sign in</button>
+  <aside class="banner" id="aiur-banner" hidden>
+    <span><b>Introducing Aiur:</b> AI Unit Runtime for Executors</span>
+    <a href="https://aiur.team">Learn More</a>
+    <button class="banner-close" id="aiur-banner-close" type="button" aria-label="Dismiss announcement">&#215;</button>
+  </aside>
+  <form class="site-signin" id="siteSignin" method="post" action="/api/hosted/auth/start">
+    <input type="hidden" name="destination" value="/">
+    <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
   </form>
   <script>
   (() => {
@@ -368,11 +394,6 @@
     boot();
   })();
   </script>
-  <aside class="banner" id="aiur-banner" hidden>
-    <span><b>Introducing Aiur:</b> AI Unit Runtime for Executors</span>
-    <a href="https://aiur.team">Learn More</a>
-    <button class="banner-close" id="aiur-banner-close" type="button" aria-label="Dismiss announcement">&#215;</button>
-  </aside>
 
   <main class="stage">
   <canvas id="field" aria-hidden="true"></canvas>

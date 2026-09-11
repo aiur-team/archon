@@ -112,8 +112,11 @@ test("the CSRF token is derived from the session and is not the session", () => 
   assert.throws(() => deriveCsrfToken(""), TypeError);
 });
 
-test("the three internal destination shapes are reachable", () => {
+test("the internal destination shapes are reachable", () => {
   assert.equal(validateDestination("/publish/authorize"), "/publish/authorize");
+  /* The public splash. A plain sign-in with no pending publication lands here
+     rather than on the approval page's "No pending publication" dead end. */
+  assert.equal(validateDestination("/"), "/");
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
   assert.equal(validateDestination(docs), docs);
   /* The one added shape: a single collaboration document slug with a trailing
@@ -141,7 +144,12 @@ test("every redirect-injection spelling is refused", () => {
     `/docs/${"a1b2c3d4".repeat(4)}/`,
     `/docs/${"a1b2c3d4".repeat(4)}?x=1`,
     "/docs/short",
-    "/",
+    /* `/` itself is an accepted destination (the public splash); its near
+       misses are not. A path-relative form, a query and a fragment on it all
+       fail the exact-string check rather than being normalised into it. */
+    "/?x=1",
+    "/#x",
+    "//",
     "",
     /* Collaboration-slug near misses: a reserved first segment, two segments,
        an uppercase letter, an underscore, no trailing slash, an over-long
