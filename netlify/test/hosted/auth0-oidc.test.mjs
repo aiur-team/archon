@@ -36,7 +36,7 @@ import {
   tokenEndpoint,
   verifyIdToken,
 } from "../../lib/hosted/auth0-oidc.mjs";
-import { deriveAccountId } from "../../lib/hosted/contracts.mjs";
+import { deriveAccountId, validatePrincipal } from "../../lib/hosted/contracts.mjs";
 import {
   AUDIENCE,
   CLAIMS_GITHUB_NO_EMAIL,
@@ -246,6 +246,48 @@ test("a Google identity with a verified email becomes a verified principal", () 
     email: "ann@example.com",
     emailVerified: true,
   });
+});
+
+test("a picture claim from an allowed host becomes the principal's avatar", () => {
+  const picture = "https://lh3.googleusercontent.com/a/fixture-avatar=s96-c";
+  const principal = principalFromClaims({ ...CLAIMS_GOOGLE, picture });
+  assert.equal(principal.avatarUrl, picture);
+
+  /* Every other spelling degrades to no avatar rather than to a failed sign-in.
+     A cosmetic claim must never be able to keep somebody out of the product, and
+     an origin outside the allowlist must never reach a stored record - the
+     landing pages' `img-src` would refuse to render it anyway, so accepting one
+     would only produce a broken image and a request to a host nothing here
+     chose. */
+  for (const bad of [
+    undefined,
+    null,
+    "",
+    42,
+    "not-a-url",
+    "/relative/avatar.png",
+    "data:image/png;base64,AAAA",
+    "javascript:alert(1)",
+    "http://avatars.githubusercontent.com/u/1",
+    "https://evil.example/u/1",
+    "https://avatars.githubusercontent.com.evil.example/u/1",
+    "https://user:pass@avatars.githubusercontent.com/u/1",
+    `https://avatars.githubusercontent.com/u/${"9".repeat(600)}`,
+  ]) {
+    const degraded = principalFromClaims({ ...CLAIMS_GOOGLE, picture: bad });
+    assert.equal(degraded.avatarUrl, undefined, `picture refused, sign-in kept: ${bad}`);
+    assert.equal(degraded.login, "ann", "and the rest of the identity is untouched");
+  }
+});
+
+test("an identity with no picture keeps the principal shape it always had", () => {
+  /* The avatar key is absent, not null. A session minted before the field
+     existed must still read back as a valid principal, and the way that stays
+     true is that a principal without a picture is the same six-key record it
+     was. */
+  const principal = principalFromClaims(CLAIMS_GOOGLE);
+  assert.equal(Object.hasOwn(principal, "avatarUrl"), false);
+  assert.equal(validatePrincipal(principal).avatarUrl, undefined);
 });
 
 test("a GitHub identity with no email is a valid session with no email", () => {

@@ -4,7 +4,8 @@
  * C1 freezes the two bodies exactly:
  *
  *   {v: 1, authenticated: false}
- *   {v: 1, authenticated: true, accountId, login, email, emailVerified, csrfToken}
+ *   {v: 1, authenticated: true, accountId, login, email, emailVerified, csrfToken,
+ *    avatarUrl}
  *
  * and this route validates its own response against `validateSessionResponse`
  * before sending it. Checking one's own output looks redundant until you
@@ -86,6 +87,12 @@ export function createSessionRoute({ store }) {
           email: principal.email,
           emailVerified: principal.emailVerified,
           csrfToken: deriveCsrfToken(token),
+          /* Display only, and the one thing the signed-in nav on the splash and
+             the onboarding page cannot draw without: a picture the identity
+             provider already publishes, from one of a fixed set of image
+             origins. `?? null` because the principal omits the key entirely when
+             the identity published none, while the response always carries it. */
+          avatarUrl: principal.avatarUrl ?? null,
         }),
         { cookies },
       );

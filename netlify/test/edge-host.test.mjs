@@ -29,6 +29,7 @@ import {
   classifyHost,
   firstPartyPageHeaders,
   landingPageHeaders,
+  LANDING_AVATAR_IMAGE_ORIGINS,
   withDocumentHeaders,
   APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
@@ -43,6 +44,7 @@ import {
   withApplicationHeaders,
   withFirstPartyPageHeaders,
 } from "../lib/edge-host.mjs";
+import { AVATAR_IMAGE_ORIGINS } from "../lib/hosted/contracts.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(dirname(HERE));
@@ -275,6 +277,51 @@ test("a sign-in page names the configured provider in form-action, because the p
   const fallback = landingPageHeaders(authorizationOrigin({}))
     .find(([name]) => name === "Content-Security-Policy")[1];
   assert.ok(/(^|; )form-action 'self'(;|$)/.test(fallback), "unconfigured stays same-origin-only");
+});
+
+test("the landing img-src names the avatar hosts, exactly and only", () => {
+  /* The signed-in nav draws the visitor's picture, and identity providers serve
+     avatars from their own hosts, so `img-src 'self' data:` blocked every one of
+     them with no visible error. The grant is four named origins - not `https:`,
+     not a wildcard, and not a whole provider domain - because an unbounded
+     `img-src` would let the identity tenant choose which host every signed-in
+     visitor's browser is made to contact. */
+  const csp = landingPageHeaders().find(([name]) => name === "Content-Security-Policy")[1];
+  const sources = /(^|; )img-src ([^;]+)/.exec(csp)[2].split(" ");
+  assert.deepEqual(sources, ["'self'", "data:", ...AVATAR_IMAGE_ORIGINS]);
+  for (const source of sources) {
+    assert.ok(!source.includes("*"), `no wildcard in img-src: ${source}`);
+  }
+
+  /* Held equal to the list the hosted contract validates an `avatarUrl`
+     against. The gate module cannot import that one - these tests copy it alone
+     into a bundle root - so the two are written twice and compared here. An
+     origin allowed in one and not the other is either a broken image or a grant
+     nothing uses. */
+  assert.deepEqual(
+    [...LANDING_AVATAR_IMAGE_ORIGINS].sort(),
+    [...AVATAR_IMAGE_ORIGINS].sort(),
+    "the landing CSP and the avatar contract disagree about which hosts serve avatars",
+  );
+
+  /* The widening is confined to img-src on the landing set. The document and
+     first-party sets are untouched, and no other landing directive gained a
+     source. */
+  assert.ok(
+    documentHeaders().find(([name]) => name === "Content-Security-Policy")[1]
+      .includes("img-src 'self' data:;"),
+    "a built document still loads only its own and inline images",
+  );
+  for (const directive of ["script-src", "style-src", "font-src", "connect-src", "form-action"]) {
+    const clause = csp.split("; ").find((part) => part.startsWith(`${directive} `));
+    for (const origin of AVATAR_IMAGE_ORIGINS) {
+      assert.ok(!clause.includes(origin), `${directive} does not name ${origin}`);
+    }
+  }
+  assert.ok(csp.includes("connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com"));
+  assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"));
+  assert.ok(csp.includes("frame-ancestors 'none'"));
+  assert.ok(csp.includes("base-uri 'none'"));
 });
 
 test("withFirstPartyPageHeaders adds the page set only when no CSP is present", () => {

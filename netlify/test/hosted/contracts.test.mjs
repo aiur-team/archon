@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
 
 import {
+  AVATAR_IMAGE_ORIGINS,
   decodeArtifactBytes,
   deriveAccountId,
   encodeArtifactBytes,
@@ -543,6 +544,65 @@ test("the two session bodies are disjoint, so a signed-out reply carries no acco
   }
   rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { authenticated: "yes" })), {
     field: "session.authenticated",
+  });
+});
+
+test("the session body always reports an avatar, and only from an allowed origin", () => {
+  /* Absent on the way in, present on the way out. The producers in this tree
+     always send the key, but a body that predates it still validates, and the
+     frozen copy always carries it so a page never has to tell "no picture" from
+     "old deployment". */
+  assert.equal(validateSessionResponse(SIGNED_IN_SESSION).avatarUrl, null);
+  assert.equal(
+    Object.hasOwn(validateSessionResponse(SIGNED_IN_SESSION), "avatarUrl"),
+    true,
+    "the signed-in body names the field even when there is no picture",
+  );
+  assert.equal(validateSessionResponse(replacing(SIGNED_IN_SESSION, { avatarUrl: null })).avatarUrl, null);
+
+  for (const avatarUrl of AVATAR_IMAGE_ORIGINS.map((origin) => `${origin}/u/42?size=64`)) {
+    assert.equal(
+      validateSessionResponse(replacing(SIGNED_IN_SESSION, { avatarUrl })).avatarUrl,
+      avatarUrl,
+      `an avatar on ${avatarUrl} is carried through`,
+    );
+  }
+
+  /* The allowlist is the whole check: it makes the scheme https by
+     construction and leaves `data:`, `javascript:`, a relative path and a
+     lookalike host with nothing to be accepted as. */
+  for (const avatarUrl of [
+    "https://evil.example/u/1",
+    "https://avatars.githubusercontent.com.evil.example/u/1",
+    "http://avatars.githubusercontent.com/u/1",
+    "https://user:pass@s.gravatar.com/avatar/1",
+    "data:image/png;base64,AAAA",
+    "javascript:alert(1)",
+    "/u/1",
+    42,
+    `https://s.gravatar.com/avatar/${"a".repeat(600)}`,
+  ]) {
+    rejects(() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { avatarUrl })), {
+      field: "session.avatarUrl",
+    });
+  }
+
+  /* And the signed-out body stays the two keys it has always been: the shapes
+     are disjoint, so an avatar cannot appear on a reply that authenticated
+     nobody. */
+  rejects(() => validateSessionResponse(replacing(SIGNED_OUT_SESSION, { avatarUrl: null })));
+});
+
+test("a principal carries an avatar only when there is one, so old records still read", () => {
+  const avatarUrl = "https://avatars.githubusercontent.com/u/4815162";
+  assert.equal(validatePrincipal(replacing(FIXTURE_PRINCIPAL, { avatarUrl })).avatarUrl, avatarUrl);
+  /* The fixture has no avatar key, which is the shape every principal written
+     before this field existed has. It must validate, and it must round-trip
+     unchanged: `readSession` answers null for a principal it cannot validate,
+     so a required key here would have signed every live session out. */
+  assert.deepEqual({ ...validatePrincipal(FIXTURE_PRINCIPAL) }, { ...FIXTURE_PRINCIPAL });
+  rejects(() => validatePrincipal(replacing(FIXTURE_PRINCIPAL, { avatarUrl: "https://evil.example/u/1" })), {
+    field: "principal.avatarUrl",
   });
 });
 

@@ -5,24 +5,31 @@
   A person who signs in from the splash has no pending publication, and the
   approval page they used to land on answers "No pending publication" - a dead
   end for the one visitor who most needs to be told what happens next. This page
-  is that answer: the four steps of the flow, and the prompt to hand an agent.
+  is that answer: the three steps of the flow, and the prompt to hand an agent.
 
   The prompt line is the splash's, byte for byte, and
   `netlify/test/welcome-page.test.mjs` is what keeps it that way: it reads the
   `#agentPrompt` text out of both files and asserts they are equal, so a change
   to one that is not made to the other fails CI rather than drifting quietly.
 
-  It holds no session and no user data, and it runs no fetch. The gate serves it
-  publicly under `landingPageHeaders` - the same set the splash takes - because
-  it is the same kind of document and wants the same fonts and the same inline
-  copy button. The styles below are the splash's, reduced to what one page uses.
+  The nav is the splash's too, and held to the same standard: the markup, the
+  styles and the script that drives it are byte-identical blocks between the two
+  files, each fenced by a pair of marker comments the same test compares. The page
+  makes one same-origin request, to `/api/hosted/session`, to learn whether to
+  draw a Sign in pill or the visitor's avatar and handle. It still stores
+  nothing, reads no cookie of its own - the session cookie is `HttpOnly` and
+  unreadable here - and shows nothing about an account the server did not just
+  say. The gate serves it publicly under `landingPageHeaders` - the same set the
+  splash takes - because it is the same kind of document and wants the same
+  fonts, the same inline copy button and the same avatar origins. The styles
+  below are the splash's, reduced to what one page uses.
 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Welcome to Archon</title>
-<meta name="description" content="How to turn an artifact into an Archon doc, in four steps.">
+<meta name="description" content="How to turn an artifact into an Archon doc, in three steps.">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
@@ -61,8 +68,124 @@
     -webkit-font-smoothing: antialiased;
     min-height: 100svh;
     display: flex;
-    justify-content: center;
+    /* A column now, because the nav is a full-width row above the steps. `main`
+       keeps its own max-width and stays centred through `align-items`. */
+    flex-direction: column;
+    align-items: center;
   }
+
+  /* The splash's Sign in row, reproduced here so the two landing pages carry the
+     same control in the same place. Right-aligned, in normal flow, above the
+     content. */
+  .site-signin {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
+    margin: 0;
+    position: relative;
+    z-index: 1;
+  }
+  .site-signin button {
+    cursor: pointer;
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--accent);
+    border: 1px solid var(--pill-bd);
+    background: var(--bg);
+    padding: 0.55rem 1rem;
+    border-radius: 999px;
+  }
+  .site-signin button[disabled] { cursor: default; opacity: 0.6; }
+  .site-signin button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* nav:start */
+  /* The signed-in half of the nav: the visitor's picture and handle, and a menu
+     whose only item signs them out. It is written here and on the onboarding
+     page as the same block of characters, and a test compares the two, because
+     two hand-written pages cannot share a stylesheet and "somebody copied it
+     once" is how the two ended up disagreeing about the Sign in control before.
+
+     Every selector is qualified with `.site-signin` so it outranks the
+     `.site-signin button` pill rule above rather than losing to it on
+     specificity - which is what a bare `.account-trigger` would do, silently,
+     leaving the account pill wearing the Sign in button's colours. */
+  .site-signin .site-account { position: relative; display: flex; }
+  .site-signin .site-account[hidden],
+  .site-signin form[hidden] { display: none; }
+  .site-signin .account-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    max-width: min(60vw, 15rem);
+    cursor: pointer;
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--fg);
+    border: 1px solid var(--pill-bd);
+    background: var(--pill-bg);
+    padding: 0.3rem 0.8rem 0.3rem 0.35rem;
+    border-radius: 999px;
+  }
+  .site-signin .account-trigger:hover { border-color: var(--accent); color: var(--accent); }
+  /* The picture and its fallback occupy the same box, so the pill keeps its
+     width whether or not the identity published an avatar. */
+  .site-signin .account-avatar,
+  .site-signin .account-initial {
+    flex: none;
+    width: 1.65rem;
+    height: 1.65rem;
+    border-radius: 999px;
+    border: 1px solid var(--pill-bd);
+    background: var(--bg);
+  }
+  .site-signin .account-avatar { display: block; object-fit: cover; }
+  .site-signin .account-avatar[hidden],
+  .site-signin .account-initial[hidden] { display: none; }
+  .site-signin .account-initial {
+    display: grid;
+    place-items: center;
+    font-size: 0.8rem;
+    line-height: 1;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .site-signin .account-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .site-signin .account-menu {
+    position: absolute;
+    top: calc(100% + 0.4rem);
+    right: 0;
+    z-index: 4;
+    min-width: 9rem;
+    padding: 0.25rem;
+    border: 1px solid var(--pill-bd);
+    border-radius: 11px;
+    background: var(--bg);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    text-align: left;
+  }
+  .site-signin .account-menu[hidden] { display: none; }
+  .site-signin .account-menu button {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    font: 500 0.9rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--fg);
+    border: 0;
+    background: transparent;
+    padding: 0.5rem 0.7rem;
+    border-radius: 8px;
+  }
+  .site-signin .account-menu button:hover { background: var(--pill-bg); color: var(--accent); }
+  /* At phone width the handle gives up room before the page does, so the pill
+     narrows and the name ellipses rather than pushing the row into a wrap. */
+  @media (max-width: 30rem) {
+    .site-signin .account-trigger { max-width: 9.5rem; }
+  }
+  /* nav:end */
 
   main {
     width: 100%;
@@ -202,11 +325,47 @@
 </style>
 </head>
 <body>
+  <div class="site-signin">
+    <form id="siteSignin" method="post" action="/api/hosted/auth/start">
+      <!-- This page is where an ordinary sign-in lands, so the destination is
+           this page: a visitor who arrives here anonymously and signs in comes
+           back to the same steps rather than to a page they did not ask for. -->
+      <input type="hidden" name="destination" id="siteSigninDest" value="/welcome">
+      <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
+    </form>
+    <!-- nav:start -->
+    <!-- The signed-in half of the nav, hidden until the session bootstrap below
+         says somebody is signed in. It starts hidden rather than starting shown
+         and being emptied, so an anonymous visitor and a crawler never see an
+         account pill with nothing in it.
+
+         Log out is a real `<form method="post">`, not a link: the route refuses
+         GET, and the browser has to *navigate* for the identity tenant to end
+         its own session as well as Archon's. It carries the session-bound CSRF
+         token the bootstrap reads out of `/api/hosted/session`, because a form
+         cannot set the header a `fetch` caller would use. -->
+    <div class="site-account" id="siteAccount" hidden>
+      <button class="account-trigger" id="siteAccountBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="siteAccountMenu">
+        <img class="account-avatar" id="siteAccountAvatar" alt="" width="26" height="26" hidden>
+        <span class="account-initial" id="siteAccountInitial" aria-hidden="true"></span>
+        <span class="account-name" id="siteAccountName"></span>
+      </button>
+      <div class="account-menu" id="siteAccountMenu" hidden>
+        <form method="post" action="/api/hosted/auth/logout">
+          <input type="hidden" name="csrfToken" id="siteLogoutCsrf" value="">
+          <button type="submit">Log out</button>
+        </form>
+      </div>
+    </div>
+    <!-- nav:end -->
+  </div>
   <main>
     <!-- Session-neutral on purpose. This is where a completed sign-in lands, but
          the gate serves it to anybody with no session check, so a headline that
          claimed "you're signed in" would be telling an anonymous visitor - or a
-         crawler - something the page never checked and cannot know. -->
+         crawler - something the page never checked and cannot know. The nav
+         above says who the visitor is; the copy below says the same thing to
+         everybody. -->
     <h1>Welcome to Archon.</h1>
     <p class="lede">Archon turns an artifact into a real document with <span class="hl">auth, editing and live collaboration</span>. Here is the whole flow, start to finish.</p>
 
@@ -230,16 +389,16 @@
           </div>
         </div>
       </li>
+      <!-- The redirect and the upload are one step because they are one thing
+           that happens to the visitor: the agent sends them out to authorise and
+           the artifact lands. Splitting them asked a person to track a boundary
+           that exists in the protocol and nowhere in their experience. -->
       <li>
         <span class="step-no" aria-hidden="true">2</span>
-        <p class="step-text">Your agent redirects you to an authorise page to approve the publication.</p>
+        <p class="step-text">Your agent redirects you to authorize and uploads your artifact to Archon.</p>
       </li>
       <li>
         <span class="step-no" aria-hidden="true">3</span>
-        <p class="step-text">Your agent uploads your artifact to Archon.</p>
-      </li>
-      <li>
-        <span class="step-no" aria-hidden="true">4</span>
         <p class="step-text">Share your doc with others and collaborate.</p>
       </li>
     </ol>
@@ -248,6 +407,113 @@
   </main>
 
 <script>
+  /* The signed-in nav. Same component as the splash: the Sign in pill when
+     nobody is signed in, and the visitor's avatar, handle and Log out menu when
+     somebody is. One same-origin request answers who the visitor is; the page
+     still stores nothing and still reads no cookie of its own - the session
+     cookie is HttpOnly and this asks the server rather than the document. */
+  (() => {
+    "use strict";
+    const form = document.getElementById("siteSignin");
+    const btn = document.getElementById("siteSigninBtn");
+
+    /* nav-script:start */
+    const account = document.getElementById("siteAccount");
+    const accountBtn = document.getElementById("siteAccountBtn");
+    const accountMenu = document.getElementById("siteAccountMenu");
+    const accountName = document.getElementById("siteAccountName");
+    const accountAvatar = document.getElementById("siteAccountAvatar");
+    const accountInitial = document.getElementById("siteAccountInitial");
+    const logoutCsrf = document.getElementById("siteLogoutCsrf");
+
+    function closeMenu() {
+      accountMenu.hidden = true;
+      accountBtn.setAttribute("aria-expanded", "false");
+    }
+    function openMenu() {
+      accountMenu.hidden = false;
+      accountBtn.setAttribute("aria-expanded", "true");
+      const first = accountMenu.querySelector("button");
+      if (first !== null) first.focus();
+    }
+    accountBtn.addEventListener("click", () => { if (accountMenu.hidden) openMenu(); else closeMenu(); });
+    /* A menu that only closes by clicking its own trigger is a menu people leave
+       open over the page. Escape returns focus to the trigger; a click anywhere
+       outside dismisses it. */
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !accountMenu.hidden) { closeMenu(); accountBtn.focus(); }
+    });
+    document.addEventListener("click", (event) => {
+      if (!accountMenu.hidden && !account.contains(event.target)) closeMenu();
+    });
+    /* A broken image is worse than no image: an avatar host that is unreachable,
+       or one the page's img-src does not allow, falls back to the initial rather
+       than leaving a torn-page icon in the nav. */
+    accountAvatar.addEventListener("error", () => {
+      accountAvatar.hidden = true;
+      accountAvatar.removeAttribute("src");
+      accountInitial.hidden = false;
+    });
+
+    /* Everything the session says is written with `textContent` and `.value`,
+       never as markup: `login` and `avatarUrl` come from an identity provider,
+       and this is the boundary where they stop being able to become HTML. */
+    function showAccount(session) {
+      const login = typeof session.login === "string" ? session.login : "";
+      accountName.textContent = login;
+      accountInitial.textContent = [...login][0] || "?";
+      accountBtn.setAttribute("aria-label", "Account menu for " + login);
+      logoutCsrf.value = typeof session.csrfToken === "string" ? session.csrfToken : "";
+      if (typeof session.avatarUrl === "string" && session.avatarUrl !== "") {
+        accountAvatar.src = session.avatarUrl;
+        accountAvatar.hidden = false;
+        accountInitial.hidden = true;
+      } else {
+        accountAvatar.hidden = true;
+        accountInitial.hidden = false;
+      }
+      closeMenu();
+      form.hidden = true;
+      account.hidden = false;
+    }
+    function showSignedOut() {
+      closeMenu();
+      logoutCsrf.value = "";
+      account.hidden = true;
+      form.hidden = false;
+    }
+    /* nav-script:end */
+
+    let ready = false;
+    async function boot() {
+      ready = false;
+      btn.disabled = true;
+      let session;
+      try {
+        const r = await fetch("/api/hosted/session", { credentials: "same-origin", headers: { accept: "application/json" } });
+        if (!r.ok) throw new Error("unavailable");
+        session = await r.json();
+      } catch {
+        showSignedOut();
+        btn.textContent = "Sign in — retry";
+        btn.disabled = false;
+        return;
+      }
+      if (session !== null && typeof session === "object" && session.authenticated === true) {
+        showAccount(session);
+      } else {
+        showSignedOut();
+      }
+      ready = true;
+      btn.textContent = "Sign in";
+      btn.disabled = false;
+    }
+    /* The Sign in post consumes a pre-login binding the bootstrap mints, so a
+       submit before the bootstrap finished is retried rather than sent. */
+    form.addEventListener("submit", (e) => { if (!ready) { e.preventDefault(); boot(); } });
+    boot();
+  })();
+
   /* Copy the agent prompt. Lifted from the splash, and the same in one respect
      that matters: the text copied is the exact content of the line on the page,
      so the two cannot disagree. When the clipboard API is refused (no secure

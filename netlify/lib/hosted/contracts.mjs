@@ -176,6 +176,14 @@ export const HOSTED_LIMITS = Object.freeze({
   /** C1 v2: the display-name bound on `login`, which is display text only. */
   LOGIN_MAX_LENGTH: 39,
   /**
+   * The widest avatar URL a principal may carry.
+   *
+   * Generous enough for a Gravatar with its query string and a GitHub avatar
+   * with a size parameter, and bounded so a provider claim cannot become an
+   * unbounded string on every session read and in every session response.
+   */
+  AVATAR_URL_MAX_LENGTH: 512,
+  /**
    * The pairing-code grammar this producer recommends AHU-004 mint: two groups
    * of four from a vowel-free, unambiguous alphabet, so there are no accidental
    * words and no 0/O or 1/I/L to read back incorrectly over a shoulder.
@@ -589,7 +597,71 @@ const PRINCIPAL_KEYS = Object.freeze([
   "login",
   "email",
   "emailVerified",
+  "avatarUrl",
 ]);
+
+/**
+ * `avatarUrl` is absent from records written before it existed, so it is
+ * optional rather than required: a session minted by the previous build still
+ * validates on read instead of signing its holder out at deploy time.
+ */
+const PRINCIPAL_OPTIONAL_KEYS = Object.freeze(["avatarUrl"]);
+
+/**
+ * The image origins an avatar may be served from.
+ *
+ * This is an allowlist rather than "any https URL" for one reason: the value
+ * comes from a provider claim and ends up in an `<img src>` on a page, so an
+ * unbounded set of origins would let the identity tenant choose which host every
+ * signed-in visitor's browser makes a request to - a beacon, keyed to a page
+ * view, that nothing in this repository chose. The four entries are the hosts
+ * the connections in use actually serve avatars from.
+ *
+ * **It is held equal to the `img-src` directive in `netlify/lib/edge-host.mjs`
+ * by `netlify/test/edge-host.test.mjs`.** The gate module is copied alone into a
+ * bundle root by its own tests and by `scripts/test-access-row.mjs`, so it may
+ * not import this one; the two lists are therefore written twice and compared,
+ * rather than shared and quietly allowed to drift. An origin allowed here and
+ * not there renders a broken image; allowed there and not here is a grant the
+ * policy makes and nothing uses.
+ */
+export const AVATAR_IMAGE_ORIGINS = Object.freeze([
+  "https://avatars.githubusercontent.com",
+  "https://cdn.auth0.com",
+  "https://lh3.googleusercontent.com",
+  "https://s.gravatar.com",
+]);
+
+/**
+ * An avatar URL, or null.
+ *
+ * Absent and null are the same answer - "this identity published no picture" -
+ * because a stored record from before the field existed must not read as
+ * invalid. A present value must be an absolute URL whose origin is one of
+ * `AVATAR_IMAGE_ORIGINS`, which makes the scheme `https` by construction and
+ * rules out `data:`, `javascript:` and a credentialed authority in one check
+ * rather than three.
+ */
+function requireNullableAvatarUrl(value, field) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw invalid(field, "must be a string or null");
+  if (value.length > HOSTED_LIMITS.AVATAR_URL_MAX_LENGTH) {
+    throw invalid(field, `must be at most ${HOSTED_LIMITS.AVATAR_URL_MAX_LENGTH} characters`);
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalid(field, "must be an absolute URL");
+  }
+  if (!AVATAR_IMAGE_ORIGINS.includes(url.origin)) {
+    throw invalid(field, "must be served from an allowed avatar origin");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw invalid(field, "must carry no credentials");
+  }
+  return value;
+}
 
 /**
  * Validate a `HostedPrincipal` (v2), returning a frozen copy.
@@ -601,6 +673,12 @@ const PRINCIPAL_KEYS = Object.freeze([
  * claims to encode are two different subjects - which is the whole failure this
  * identity model exists to prevent. A shape check would accept any well-formed
  * `a0_` value, which is to say any caller-chosen owner.
+ *
+ * `avatarUrl` is optional and display-only, like `login`. It is absent rather
+ * than null when the identity published no picture, so a principal written by a
+ * build that predates the field still reads back as valid - which matters more
+ * than tidiness here, because `readSession` answers null for a principal it
+ * cannot validate and that null is a silent sign-out for every live session.
  *
  * `login` is carried for display only. `email` is what later domain decisions
  * read and is never an ownership key. `emailVerified` is a strict boolean: a
@@ -614,7 +692,7 @@ const PRINCIPAL_KEYS = Object.freeze([
  */
 export function validatePrincipal(value, { field = "principal" } = {}) {
   requireRecord(value, field);
-  requireExactKeys(value, PRINCIPAL_KEYS, field);
+  requireExactKeys(value, PRINCIPAL_KEYS, field, { optional: PRINCIPAL_OPTIONAL_KEYS });
 
   if (value.provider !== HOSTED_LIMITS.IDENTITY_PROVIDER) {
     throw invalid(`${field}.provider`, `must be "${HOSTED_LIMITS.IDENTITY_PROVIDER}"`);
@@ -640,6 +718,13 @@ export function validatePrincipal(value, { field = "principal" } = {}) {
     throw invalid(`${field}.email`, "is required while emailVerified is true");
   }
 
+  const avatarUrl = requireNullableAvatarUrl(value.avatarUrl, `${field}.avatarUrl`);
+
+  /* The key is carried only when there is an avatar. A principal with no
+     picture keeps the exact six-key shape it has always had, so the record this
+     module writes for such an identity is byte-identical to the one the previous
+     build wrote - which is what makes the addition invisible to everything that
+     stores, compares or round-trips a principal. */
   return Object.freeze({
     accountId: value.accountId,
     provider: value.provider,
@@ -647,6 +732,7 @@ export function validatePrincipal(value, { field = "principal" } = {}) {
     login: value.login,
     email,
     emailVerified: value.emailVerified,
+    ...(avatarUrl === null ? {} : { avatarUrl }),
   });
 }
 
@@ -656,6 +742,13 @@ export function validatePrincipal(value, { field = "principal" } = {}) {
  * The authenticated body reports `email` and `emailVerified` because every later
  * domain decision reads them, and a page that had to infer a verified address
  * from a display name would infer it wrongly.
+ *
+ * It also reports `avatarUrl`, always, as a string or null: the signed-in nav on
+ * the splash and the onboarding page render a picture beside the handle, and
+ * `login` alone left them with nothing to draw. It carries no new authority -
+ * a URL to a public image the identity provider already published - and the
+ * signed-out body is untouched, so a consumer reading the two shapes apart still
+ * reads them apart.
  *
  * The two shapes are disjoint on purpose: a signed-out body carries no account
  * fields at all, so a consumer cannot read `accountId` off a response that never
@@ -682,8 +775,14 @@ export function validateSessionResponse(value, { field = "session" } = {}) {
 
   requireExactKeys(
     value,
-    ["v", "authenticated", "accountId", "login", "email", "emailVerified", "csrfToken"],
+    ["v", "authenticated", "accountId", "login", "email", "emailVerified", "csrfToken", "avatarUrl"],
     field,
+    /* Optional inbound, always present outbound. A caller that omits it - the
+       logout route's signed-out body aside, every producer in this tree - still
+       validates, and the frozen copy below always carries the key, so a page
+       reads `avatarUrl` as `null` rather than as `undefined` and never has to
+       tell "no picture" from "old deployment". */
+    { optional: ["avatarUrl"] },
   );
   /* Each field is checked against the principal's own rule, and the subject is
      not reconstructed from `accountId`: the v2 derivation is a one-way digest, so
@@ -703,6 +802,7 @@ export function validateSessionResponse(value, { field = "session" } = {}) {
     throw invalid(`${field}.email`, "is required while emailVerified is true");
   }
   requireOpaqueToken(value.csrfToken, `${field}.csrfToken`);
+  const avatarUrl = requireNullableAvatarUrl(value.avatarUrl, `${field}.avatarUrl`);
 
   return Object.freeze({
     v: 1,
@@ -712,6 +812,7 @@ export function validateSessionResponse(value, { field = "session" } = {}) {
     email,
     emailVerified: value.emailVerified,
     csrfToken: value.csrfToken,
+    avatarUrl,
   });
 }
 

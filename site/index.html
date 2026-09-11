@@ -134,6 +134,94 @@
   }
   .site-signin button[disabled] { cursor: default; opacity: 0.6; }
   .site-signin button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* nav:start */
+  /* The signed-in half of the nav: the visitor's picture and handle, and a menu
+     whose only item signs them out. It is written here and on the onboarding
+     page as the same block of characters, and a test compares the two, because
+     two hand-written pages cannot share a stylesheet and "somebody copied it
+     once" is how the two ended up disagreeing about the Sign in control before.
+
+     Every selector is qualified with `.site-signin` so it outranks the
+     `.site-signin button` pill rule above rather than losing to it on
+     specificity - which is what a bare `.account-trigger` would do, silently,
+     leaving the account pill wearing the Sign in button's colours. */
+  .site-signin .site-account { position: relative; display: flex; }
+  .site-signin .site-account[hidden],
+  .site-signin form[hidden] { display: none; }
+  .site-signin .account-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    max-width: min(60vw, 15rem);
+    cursor: pointer;
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--fg);
+    border: 1px solid var(--pill-bd);
+    background: var(--pill-bg);
+    padding: 0.3rem 0.8rem 0.3rem 0.35rem;
+    border-radius: 999px;
+  }
+  .site-signin .account-trigger:hover { border-color: var(--accent); color: var(--accent); }
+  /* The picture and its fallback occupy the same box, so the pill keeps its
+     width whether or not the identity published an avatar. */
+  .site-signin .account-avatar,
+  .site-signin .account-initial {
+    flex: none;
+    width: 1.65rem;
+    height: 1.65rem;
+    border-radius: 999px;
+    border: 1px solid var(--pill-bd);
+    background: var(--bg);
+  }
+  .site-signin .account-avatar { display: block; object-fit: cover; }
+  .site-signin .account-avatar[hidden],
+  .site-signin .account-initial[hidden] { display: none; }
+  .site-signin .account-initial {
+    display: grid;
+    place-items: center;
+    font-size: 0.8rem;
+    line-height: 1;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .site-signin .account-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .site-signin .account-menu {
+    position: absolute;
+    top: calc(100% + 0.4rem);
+    right: 0;
+    z-index: 4;
+    min-width: 9rem;
+    padding: 0.25rem;
+    border: 1px solid var(--pill-bd);
+    border-radius: 11px;
+    background: var(--bg);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    text-align: left;
+  }
+  .site-signin .account-menu[hidden] { display: none; }
+  .site-signin .account-menu button {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    font: 500 0.9rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--fg);
+    border: 0;
+    background: transparent;
+    padding: 0.5rem 0.7rem;
+    border-radius: 8px;
+  }
+  .site-signin .account-menu button:hover { background: var(--pill-bg); color: var(--accent); }
+  /* At phone width the handle gives up room before the page does, so the pill
+     narrows and the name ellipses rather than pushing the row into a wrap. */
+  @media (max-width: 30rem) {
+    .site-signin .account-trigger { max-width: 9.5rem; }
+  }
+  /* nav:end */
 
   .stage {
     position: relative;
@@ -371,6 +459,31 @@
       <input type="hidden" name="destination" id="siteSigninDest" value="/welcome">
       <button id="siteSigninBtn" type="submit" disabled>Sign in</button>
     </form>
+    <!-- nav:start -->
+    <!-- The signed-in half of the nav, hidden until the session bootstrap below
+         says somebody is signed in. It starts hidden rather than starting shown
+         and being emptied, so an anonymous visitor and a crawler never see an
+         account pill with nothing in it.
+
+         Log out is a real `<form method="post">`, not a link: the route refuses
+         GET, and the browser has to *navigate* for the identity tenant to end
+         its own session as well as Archon's. It carries the session-bound CSRF
+         token the bootstrap reads out of `/api/hosted/session`, because a form
+         cannot set the header a `fetch` caller would use. -->
+    <div class="site-account" id="siteAccount" hidden>
+      <button class="account-trigger" id="siteAccountBtn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="siteAccountMenu">
+        <img class="account-avatar" id="siteAccountAvatar" alt="" width="26" height="26" hidden>
+        <span class="account-initial" id="siteAccountInitial" aria-hidden="true"></span>
+        <span class="account-name" id="siteAccountName"></span>
+      </button>
+      <div class="account-menu" id="siteAccountMenu" hidden>
+        <form method="post" action="/api/hosted/auth/logout">
+          <input type="hidden" name="csrfToken" id="siteLogoutCsrf" value="">
+          <button type="submit">Log out</button>
+        </form>
+      </div>
+    </div>
+    <!-- nav:end -->
     <!-- The splash is the single sign-in entry, so a sign-in that failed returns
          here with `?status=<word>` rather than dead-ending on /login. The word is
          from a closed set the server controls; anything else is ignored, so the
@@ -384,6 +497,73 @@
     const btn = document.getElementById("siteSigninBtn");
     const dest = document.getElementById("siteSigninDest");
     const statusEl = document.getElementById("siteSigninStatus");
+
+    /* nav-script:start */
+    const account = document.getElementById("siteAccount");
+    const accountBtn = document.getElementById("siteAccountBtn");
+    const accountMenu = document.getElementById("siteAccountMenu");
+    const accountName = document.getElementById("siteAccountName");
+    const accountAvatar = document.getElementById("siteAccountAvatar");
+    const accountInitial = document.getElementById("siteAccountInitial");
+    const logoutCsrf = document.getElementById("siteLogoutCsrf");
+
+    function closeMenu() {
+      accountMenu.hidden = true;
+      accountBtn.setAttribute("aria-expanded", "false");
+    }
+    function openMenu() {
+      accountMenu.hidden = false;
+      accountBtn.setAttribute("aria-expanded", "true");
+      const first = accountMenu.querySelector("button");
+      if (first !== null) first.focus();
+    }
+    accountBtn.addEventListener("click", () => { if (accountMenu.hidden) openMenu(); else closeMenu(); });
+    /* A menu that only closes by clicking its own trigger is a menu people leave
+       open over the page. Escape returns focus to the trigger; a click anywhere
+       outside dismisses it. */
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !accountMenu.hidden) { closeMenu(); accountBtn.focus(); }
+    });
+    document.addEventListener("click", (event) => {
+      if (!accountMenu.hidden && !account.contains(event.target)) closeMenu();
+    });
+    /* A broken image is worse than no image: an avatar host that is unreachable,
+       or one the page's img-src does not allow, falls back to the initial rather
+       than leaving a torn-page icon in the nav. */
+    accountAvatar.addEventListener("error", () => {
+      accountAvatar.hidden = true;
+      accountAvatar.removeAttribute("src");
+      accountInitial.hidden = false;
+    });
+
+    /* Everything the session says is written with `textContent` and `.value`,
+       never as markup: `login` and `avatarUrl` come from an identity provider,
+       and this is the boundary where they stop being able to become HTML. */
+    function showAccount(session) {
+      const login = typeof session.login === "string" ? session.login : "";
+      accountName.textContent = login;
+      accountInitial.textContent = [...login][0] || "?";
+      accountBtn.setAttribute("aria-label", "Account menu for " + login);
+      logoutCsrf.value = typeof session.csrfToken === "string" ? session.csrfToken : "";
+      if (typeof session.avatarUrl === "string" && session.avatarUrl !== "") {
+        accountAvatar.src = session.avatarUrl;
+        accountAvatar.hidden = false;
+        accountInitial.hidden = true;
+      } else {
+        accountAvatar.hidden = true;
+        accountInitial.hidden = false;
+      }
+      closeMenu();
+      form.hidden = true;
+      account.hidden = false;
+    }
+    function showSignedOut() {
+      closeMenu();
+      logoutCsrf.value = "";
+      account.hidden = true;
+      form.hidden = false;
+    }
+    /* nav-script:end */
 
     /* The closed set of words the start route and callback may land back here
        with, each mapped to a fixed message. A word not in the set shows nothing,
@@ -419,14 +599,25 @@
     async function boot() {
       ready = false;
       btn.disabled = true;
+      let session;
       try {
         const r = await fetch("/api/hosted/session", { credentials: "same-origin", headers: { accept: "application/json" } });
         if (!r.ok) throw new Error("unavailable");
-        await r.json();
+        session = await r.json();
       } catch {
+        showSignedOut();
         btn.textContent = "Sign in — retry";
         btn.disabled = false;
         return;
+      }
+      /* The one fetch answers both questions: whether the sign-in service is
+         reachable, which is what the button was already waiting on, and who the
+         visitor is, which is what the nav draws. A second request for the second
+         answer would be the same request twice. */
+      if (session !== null && typeof session === "object" && session.authenticated === true) {
+        showAccount(session);
+      } else {
+        showSignedOut();
       }
       ready = true;
       btn.textContent = "Sign in";
