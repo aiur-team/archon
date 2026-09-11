@@ -386,9 +386,65 @@ test("the adapter never issues an unconditional write", async () => {
   }
 });
 
+/* --- the census (list) ---------------------------------------------------- */
+
+test("the census enumerates the publications prefix and nothing else", async () => {
+  const { provider, store } = harness();
+  await store.create(RECORDS.pending);
+  await store.create({ ...RECORDS.complete, id: "b".repeat(32) });
+  /* A key in the same site-wide store, under another namespace. The census must
+     not read it as a publication. */
+  provider.put("access/platform-allowlist", JSON.stringify({ v: 1, entries: [] }));
+
+  const { records, unreadable, truncated } = await store.list();
+  assert.deepEqual(
+    records.map((record) => record.id).sort(),
+    [RECORDS.pending.id, "b".repeat(32)].sort(),
+  );
+  assert.deepEqual(unreadable, []);
+  assert.equal(truncated, false);
+});
+
+test("a record the census cannot interpret is named, not omitted", async () => {
+  /* An operator census that silently dropped it would show a shorter list than
+     the truth, and the unreadable record is the one most worth knowing about. */
+  const { provider, store } = harness();
+  await store.create(RECORDS.pending);
+  provider.put(`${PUBLICATION_KEY_PREFIX}${"f".repeat(32)}`, JSON.stringify({ v: 99 }));
+
+  const { records, unreadable } = await store.list();
+  assert.deepEqual(records.map((record) => record.id), [RECORDS.pending.id]);
+  assert.deepEqual(unreadable, ["f".repeat(32)]);
+});
+
+test("a census that cannot enumerate at all is an outage, not an empty list", async () => {
+  /* There is no partial list to report here, so unlike a single unreadable
+     record this is the whole answer failing. */
+  const { provider, store } = harness();
+  provider.failNextList({ throws: true });
+  await rejects(store.list(), "unavailable");
+
+  provider.failNextList({ unusable: true });
+  await rejects(store.list(), "unavailable");
+  provider.assertFaultsConsumed();
+});
+
+test("a census beyond its bound says so rather than returning a silent prefix", async () => {
+  const { store } = harness();
+  for (const nibble of ["1", "2", "3"]) {
+    await store.create({ ...RECORDS.pending, id: nibble.repeat(32) });
+  }
+  const { records, truncated } = await store.list({ limit: 2 });
+  assert.equal(records.length, 2);
+  assert.equal(truncated, true, "a partial list an admin reads as complete is worse than a short one");
+});
+
 test("the adapter exposes no delete", () => {
   const { store } = harness();
-  assert.deepEqual(Object.keys(store).sort(), ["create", "read", "update"]);
+  /* `list` is the admin census and reads only. There is still no delete: the
+     provider offers no conditional one, so a delete here could only be an
+     unconditional write racing a completion. */
+  assert.deepEqual(Object.keys(store).sort(), ["create", "list", "read", "update"]);
   assert.ok(Object.isFrozen(store));
 });
 

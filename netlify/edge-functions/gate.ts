@@ -8,6 +8,7 @@ import {
   applicationOrigin,
   classifyHost,
   isApplicationPassThrough,
+  isApplicationPublic,
   isRenderPrefix,
   notFoundForeignHost,
   notFoundRenderer,
@@ -367,9 +368,10 @@ async function renderHost(
 
 /**
  * The application host serves the collaboration app, the hosted viewer and the
- * APIs. It refuses the renderer shell prefix, passes the API, assets, sign-in,
- * viewer, publish and invitation paths through with no session check, and
- * applies the existing session and access logic to everything else. Every
+ * APIs. It refuses the renderer shell prefix, serves the public splash page to
+ * anybody, passes the API, assets, admin console, sign-in, viewer, publish and
+ * invitation paths through with no session check, and applies the existing
+ * session and access logic to everything else. Every
  * answer gains the application header set unless it already carries a CSP.
  */
 async function applicationHost(
@@ -389,6 +391,12 @@ async function applicationHost(
     );
   }
 
+  /* The landing page's own subresources - its images, its favicons - served to
+     anybody, because #229 made the page public and did not make what the page
+     loads public with it. A deeper path is still gated, so without this the
+     splash renders with broken images and an anonymous visitor's browser
+     follows a sign-in redirect for each one. They are not HTML and take the
+     application header set through the same pass-through as a built asset. */
   /* The paths that used to be `excludedPath` in TOML, decided in code now that
      the gate runs on every path: passed through with no session check. A
      function response keeps its own headers; a static one gains the set. The
@@ -399,7 +407,11 @@ async function applicationHost(
      `netlify/public/index.html` through the same pass-through, so an anonymous
      visitor lands on the splash rather than the sign-in redirect. Only the exact
      root is public; every deeper path stays gated. */
-  if (url.pathname === PUBLIC_ROOT || isApplicationPassThrough(url.pathname)) {
+  if (
+    url.pathname === PUBLIC_ROOT ||
+    isApplicationPublic(url.pathname) ||
+    isApplicationPassThrough(url.pathname)
+  ) {
     let passed: Response;
     try {
       passed = await context.next();

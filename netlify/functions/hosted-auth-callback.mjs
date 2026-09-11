@@ -44,6 +44,7 @@
  * `/publish/authorize`, which is the entire reason it is a separate cookie.
  */
 
+import { resolveAllowlist } from "../lib/hosted/allowlist.mjs";
 import { AuthUnavailableError } from "../lib/hosted/auth-errors.mjs";
 import {
   exchangeCodeForIdToken,
@@ -51,6 +52,7 @@ import {
   verifyIdToken,
 } from "../lib/hosted/auth0-oidc.mjs";
 import { methodNotAllowed, redirectResponse, serve } from "../lib/hosted/http.mjs";
+import { evaluatePlatformAccess } from "../lib/hosted/platform-access.mjs";
 import { constantTimeEqual, hashToken } from "../lib/hosted/secrets.mjs";
 import {
   OAUTH_COOKIE,
@@ -67,8 +69,38 @@ export const config = { path: "/api/hosted/auth/callback" };
 /** Where a failed sign-in lands. A fixed internal path with a closed-set word. */
 const SIGN_IN_PATH = "/login/";
 
-/** The only three status words this route will ever put in that URL. */
-export const CALLBACK_STATUSES = Object.freeze(["denied", "expired", "unavailable"]);
+/**
+ * The only status words this route will ever put in that URL.
+ *
+ * A closed set, and the two the platform allowlist added are closed for the same
+ * reason the first three are: the sign-in page renders a fixed message per word
+ * and ignores anything else, so the query string can never become a way to put
+ * chosen text on a trusted page.
+ *
+ * `not_allowed` and `verify_email` are the two answers an enforced allowlist can
+ * produce, and they are deliberately *different words*. Telling a visitor who
+ * simply has not confirmed their address that they are not allowed to use the
+ * product sends them to ask an operator for access they already have; telling a
+ * visitor who is genuinely not on the list to check their inbox sends them
+ * nowhere at all. Neither word says whether any particular address or domain is
+ * on the list - `evaluatePlatformAccess` checks verification *before* the list
+ * precisely so that this page is not an oracle over it.
+ */
+export const CALLBACK_STATUSES = Object.freeze([
+  "denied",
+  "expired",
+  "unavailable",
+  "not_allowed",
+  "verify_email",
+]);
+
+/** The landing word for each way the platform gate can refuse. */
+const PLATFORM_REFUSAL_STATUS = Object.freeze({
+  not_allowlisted: "not_allowed",
+  email_unverified: "verify_email",
+  allowlist_unavailable: "unavailable",
+  session_required: "expired",
+});
 
 /**
  * The failure landing.
@@ -89,7 +121,7 @@ function failed(status, { clear = true, destination = null } = {}) {
 }
 
 /** The route, over injected dependencies. */
-export function createCallbackRoute({ store, config: hostedConfig, fetchImpl, getKeySet }) {
+export function createCallbackRoute({ store, config: hostedConfig, allowlist, fetchImpl, getKeySet }) {
   return async function callbackRoute(request) {
     if (request.method !== "GET") return methodNotAllowed("GET");
 
@@ -175,6 +207,39 @@ export function createCallbackRoute({ store, config: hostedConfig, fetchImpl, ge
       return failed(error instanceof AuthUnavailableError ? "unavailable" : "expired", {
         destination,
       });
+    }
+
+    /* The platform gate, after the identity is established and before any
+       session exists. This is the only place it runs: a session is capped at 24
+       hours, so a removed entry costs access within a day, and re-deciding it on
+       every request would put a store read in front of every page load to shorten
+       that window - the same trade `domain-access.mjs` documents and settles the
+       same way.
+
+       The store is read only when the gate is actually enforced. An operator who
+       has not turned it on pays nothing, and - more usefully - a deployment that
+       has never configured an allowlist cannot have its sign-in broken by the
+       allowlist store being unreachable. */
+    if (hostedConfig.platformAllowlistEnforced === true) {
+      let entries;
+      try {
+        entries = await resolveAllowlist({ config: hostedConfig, store: allowlist });
+      } catch {
+        /* `null`, not the empty list. An empty list is a policy that admits
+           nobody; a `null` is a fact we do not know, and the evaluator refuses it
+           with its own retryable reason so an outage never lands a visitor on
+           "you are not allowed to use this". */
+        entries = null;
+      }
+      const decision = evaluatePlatformAccess({
+        principal,
+        admins: hostedConfig.admins,
+        allowlist: entries,
+        enforced: true,
+      });
+      if (!decision.allowed) {
+        return failed(PLATFORM_REFUSAL_STATUS[decision.reason] ?? "expired", { destination });
+      }
     }
 
     let session;

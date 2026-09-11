@@ -39,7 +39,10 @@ import {
 import startHandler, { createStartRoute } from "../../functions/hosted-auth-start.mjs";
 import { createCallbackRoute } from "../../functions/hosted-auth-callback.mjs";
 import { createLogoutRoute } from "../../functions/hosted-auth-logout.mjs";
+import { CALLBACK_STATUSES } from "../../functions/hosted-auth-callback.mjs";
 import { createSessionRoute } from "../../functions/hosted-session.mjs";
+import { createAllowlistStore, addAllowlistEntry } from "../../lib/hosted/allowlist.mjs";
+import { createProviderDouble } from "./helpers/publication-store.mjs";
 import { hashToken } from "../../lib/hosted/secrets.mjs";
 import {
   AUDIENCE,
@@ -58,6 +61,9 @@ import {
   signIdToken,
 } from "./fixtures/auth.mjs";
 
+/** The address the allowlist cases use, which `CLAIMS_GOOGLE` asserts. */
+const GOOGLE_EMAIL = CLAIMS_GOOGLE.email;
+
 /** The principal the default happy-path claim set produces. */
 const PRINCIPAL_GOOGLE = principalFromClaims(CLAIMS_GOOGLE);
 /** A second, distinct principal for the rotation and multi-account cases. */
@@ -74,17 +80,24 @@ const AUTHORIZE_ORIGIN = `https://${TENANT_DOMAIN}`;
  * carry. `getKeySet` is the deterministic seam: the callback verifies against
  * the fixture's local JWKS.
  */
-function deployment({ clock = fixedClock() } = {}) {
+function deployment({ clock = fixedClock(), env = {} } = {}) {
   const { store, blobs } = memoryAuthStore(clock);
-  const config = hostedConfig();
+  const config = hostedConfig(env);
   const providerRef = { impl: auth0Provider({ idToken: "unused-until-a-sign-in-sets-it" }) };
   const fetchImpl = (url, request) => providerRef.impl(url, request);
-  const deps = { store, config };
+  /* The platform allowlist store the callback consults when the gate is on. It
+     is the real adapter over the publication suite's provider double, so the
+     gate is exercised against real conditional writes and real read failures. */
+  const provider = createProviderDouble();
+  const allowlist = createAllowlistStore({ getStore: provider.getStore });
+  const deps = { store, config, allowlist };
   return {
     store,
     blobs,
     clock,
     config,
+    provider,
+    allowlist,
     providerRef,
     /** The token endpoint's recorded calls, whichever impl is current. */
     get providerCalls() {
@@ -438,7 +451,11 @@ test("a malformed or fabricated binding cookie is refused without writing anythi
 test("a start accepts the internal destinations, including a collaboration slug", async () => {
   const app = deployment();
   const docs = `/docs/${"a1b2c3d4".repeat(4)}`;
-  for (const destination of ["/publish/authorize", docs, "/how-archon-works/"]) {
+  /* `/admin` joined this list with #227: the admin console is a real page a
+     signed-out visitor is redirected to sign in for, so the sign-in flow has to
+     be able to return them to it. It was previously in the refused list below as
+     an example of a path that was not a destination. */
+  for (const destination of ["/publish/authorize", "/admin", docs, "/how-archon-works/"]) {
     const login = await bootstrap(app);
     const response = await app.start(
       browserRequest("/api/hosted/auth/start", { method: "POST", cookies: { [LOGIN_COOKIE]: login }, form: { destination } }),
@@ -451,7 +468,10 @@ test("a start accepts the internal destinations, including a collaboration slug"
     "/\\evil.example.com",
     "/docs/%2e%2e/x",
     "/publish/authorize?next=x",
-    "/admin",
+    /* One exact string became a destination, and no shape near it did. */
+    "/admin/",
+    "/admin/x",
+    "/adminfoo",
     "%2Fpublish%2Fauthorize",
     "/login/",
     "/api/",
@@ -959,5 +979,92 @@ test("an invalid configuration refuses the route without naming the key", async 
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);
+  }
+});
+
+/* --- the platform allowlist at sign-in (#227) ------------------------------ */
+
+/**
+ * Drive one whole sign-in that is *allowed to be refused*.
+ *
+ * `signIn` above reads the session cookie off the landing, which is the right
+ * shape for a happy path and throws for a refusal. These cases are about the
+ * refusal, so the landing is returned as-is.
+ */
+async function attemptSignIn(app, { claims = CLAIMS_GOOGLE } = {}) {
+  const started = await start(app, {});
+  assert.equal(started.response.status, 303);
+  await armProvider(app, started, { claims });
+  return app.callback(
+    browserRequest(`/api/hosted/auth/callback?state=${started.state}&code=fixture-code`, {
+      cookies: { [OAUTH_COOKIE]: started.binding },
+    }),
+  );
+}
+
+test("with the gate off, a sign-in reads no allowlist at all", async () => {
+  /* An operator who has not turned the gate on pays nothing for it, and - more
+     usefully - cannot have sign-in broken by an allowlist store they have never
+     configured being unreachable. */
+  const app = deployment();
+  const { landed } = await signIn(app);
+  assert.equal(landed.status, 303);
+  assert.notEqual(setCookies(landed).get(SESSION_COOKIE), undefined, "a session was created");
+  assert.deepEqual(app.provider.calls, [], "the allowlist store was never opened");
+});
+
+test("with the gate on, an address that is not on the list gets no session", async () => {
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  const landed = await attemptSignIn(app);
+
+  assert.equal(landed.status, 303);
+  /* The destination is carried through, so a visitor who is later invited
+     lands where they were going instead of silently on the default. */
+  assert.equal(
+    landed.headers.get("location"),
+    "/login/?status=not_allowed&destination=%2Fpublish%2Fauthorize",
+  );
+  assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined, "no session cookie is issued");
+});
+
+test("with the gate on, an allowlisted address signs in", async () => {
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  await addAllowlistEntry(
+    { value: GOOGLE_EMAIL, actor: "ops@example.com", now: () => new Date() },
+    { store: app.allowlist },
+  );
+  const { landed, token } = await signIn(app);
+  assert.equal(landed.status, 303);
+  assert.ok(typeof token === "string" && token !== "", "a session cookie is issued");
+});
+
+test("a seeded admin signs in under an enforced empty list", async () => {
+  /* The recovery path: an operator who enforced an empty list can still get in
+     and fix it, without the allowlist store having to be readable. */
+  const app = deployment({
+    env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true", ARCHON_ADMINS: GOOGLE_EMAIL },
+  });
+  const { landed } = await signIn(app);
+  assert.equal(landed.headers.get("location"), "/publish/authorize");
+});
+
+test("an unreadable allowlist is an outage, never 'you are not allowed'", async () => {
+  /* `null` is not the empty list. A visitor told they are not allowed acts on it
+     by giving up; a visitor told the service is unavailable retries. */
+  const app = deployment({ env: { ARCHON_PLATFORM_ALLOWLIST_ENFORCED: "true" } });
+  app.provider.failNextRead({ throws: true });
+  const landed = await attemptSignIn(app);
+  assert.equal(
+    landed.headers.get("location"),
+    "/login/?status=unavailable&destination=%2Fpublish%2Fauthorize",
+  );
+  assert.equal(setCookies(landed).get(SESSION_COOKIE), undefined);
+});
+
+test("every landing word the callback can use is in the closed set", async () => {
+  /* The sign-in page renders a fixed message per word and ignores anything else,
+     so a word that escaped this set would be a status a visitor never sees. */
+  for (const status of ["not_allowed", "verify_email", "unavailable"]) {
+    assert.ok(CALLBACK_STATUSES.includes(status), `${status} is announced by the sign-in page`);
   }
 });

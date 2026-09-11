@@ -54,6 +54,7 @@ import {
   HOSTED_CONFIG_KEYS,
   readHostedConfig,
 } from "../netlify/lib/hosted/config.mjs";
+import { MAILER_CONFIG_KEYS, readMailerConfig } from "../netlify/lib/hosted/mailer.mjs";
 import { HOSTED_LIMITS, validateWireError } from "../netlify/lib/hosted/contracts.mjs";
 import { completePublication, publicationDependencies } from "../netlify/lib/hosted/publications.mjs";
 import startHandler, {
@@ -450,15 +451,36 @@ section("netlify/.env.example is redacted and defaults to disabled", async () =>
       .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
   );
 
+  /* Two readers, one file. `config.mjs` owns the keys a route validates before
+     it will serve at all; `mailer.mjs` owns the four `ARCHON_EMAIL_*` names,
+     which are deliberately *not* in that set - a deployment that has not
+     configured email must serve every other hosted request normally rather than
+     refuse to start. The example must carry exactly their union, so a key here
+     that nothing reads is still a failure and a key a reader wants that is
+     missing here is still a failure. */
   assert.deepEqual(
     Object.keys(env).sort(),
-    [...HOSTED_CONFIG_KEYS].sort(),
-    "the example must carry exactly the keys the config owner reads",
+    [...HOSTED_CONFIG_KEYS, ...MAILER_CONFIG_KEYS].sort(),
+    "the example must carry exactly the keys the two config owners read",
   );
   assert.equal(
     env.HOSTED_PUBLISH_ENABLED,
     "false",
     "the example must ship with publishing disabled",
+  );
+  assert.equal(
+    env.ARCHON_PLATFORM_ALLOWLIST_ENFORCED,
+    "false",
+    "the example must ship with the platform allowlist unenforced",
+  );
+  /* The same rule as publishing, for the same reason: an operator who copies
+     this file must not thereby configure a mail transport, and an empty set of
+     `ARCHON_EMAIL_*` values must read back as "not configured" rather than as a
+     partial configuration the route would refuse. */
+  assert.equal(
+    readMailerConfig(env),
+    null,
+    "the example must ship with no email transport configured",
   );
 
   /* The placeholders are held to every rule a deploy is held to. An example that

@@ -279,6 +279,47 @@
     outline-offset: 4px;
   }
 
+  /* The invite-request form. Plain, and deliberately below the lockup: it is the
+     way in for somebody this deployment does not know yet, not the first thing
+     it says about itself. The top-right Sign in button is for people who already
+     have an account; this is for people who do not. */
+  .invite {
+    border-top: 1px solid var(--hairline);
+    margin: 3.5rem auto 0;
+    max-width: 34rem;
+    padding-top: 2rem;
+    text-align: left;
+    width: 100%;
+  }
+  .invite h2 { font-size: 1rem; letter-spacing: 0.02em; margin: 0 0 0.35rem; }
+  .invite p.blurb { color: var(--muted); font-size: 0.92rem; margin: 0 0 1rem; }
+  .invite label { display: block; font-size: 0.82rem; margin-bottom: 0.25rem; }
+  .invite input,
+  .invite textarea {
+    background: var(--pill-bg);
+    border: 1px solid var(--pill-bd);
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+    padding: 0.5rem 0.6rem;
+    width: 100%;
+  }
+  .invite textarea { min-height: 5rem; resize: vertical; }
+  .invite .field { margin-bottom: 0.9rem; }
+  .invite button {
+    background: var(--accent);
+    border: 0;
+    border-radius: 6px;
+    color: #fff;
+    cursor: pointer;
+    font: inherit;
+    padding: 0.5rem 1.1rem;
+  }
+  .invite button[disabled] { cursor: default; opacity: 0.6; }
+  .invite .invite-status { font-size: 0.9rem; margin: 0.75rem 0 0; }
+  .invite .invite-status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+  .invite .invite-status[data-tone="ok"] { color: var(--fg); font-weight: 600; }
+
   .aside {
     margin-top: clamp(22px, 4vh, 34px);
     font-family: "JetBrains Mono", ui-monospace, monospace;
@@ -362,6 +403,28 @@
     Read the example document
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"></path></svg>
   </a>
+
+
+  <section class="invite keepout" aria-labelledby="invite-heading">
+    <h2 id="invite-heading">Request an invite</h2>
+    <p class="blurb">
+      Archon is invite-only right now. Leave your address and an administrator
+      will get in touch.
+    </p>
+    <form id="inviteForm" novalidate>
+      <div class="field">
+        <label for="inviteEmail">Your email address</label>
+        <input id="inviteEmail" name="email" type="email" autocomplete="email"
+               spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="inviteMessage">Anything we should know? (optional)</label>
+        <textarea id="inviteMessage" name="message" maxlength="1000"></textarea>
+      </div>
+      <button type="submit" id="inviteSubmit">Request an invite</button>
+      <p class="invite-status" id="inviteStatus" role="status" aria-live="polite"></p>
+    </form>
+  </section>
 
   <p class="aside keepout">built with <a href="https://github.com/aiur-team/archon">aiur-team/archon</a></p>
   </main>
@@ -626,5 +689,66 @@
     if (document.readyState === "complete") start();
   })();
 </script>
+<script>
+  /* The invite-request form.
+   *
+   * It posts JSON rather than submitting as a form, for two reasons that are
+   * the same reason: `application/json` is a media type a cross-origin form
+   * cannot send without a preflight, and a `fetch` carries a real `Origin`
+   * header that the route checks exactly. A plain form submission would arrive
+   * with `Origin: null` under this site's referrer policy, and the route would
+   * have had to accept that.
+   *
+   * The page tells the visitor nothing the server did not say, and the server
+   * answers the same thing for an address it knows and one it does not — so
+   * there is nothing here to read a membership answer out of. */
+  (function () {
+    var form = document.getElementById("inviteForm");
+    var email = document.getElementById("inviteEmail");
+    var message = document.getElementById("inviteMessage");
+    var submit = document.getElementById("inviteSubmit");
+    var status = document.getElementById("inviteStatus");
+    if (!form) return;
+
+    function say(text, tone) {
+      status.textContent = text;
+      status.dataset.tone = tone;
+    }
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var address = email.value.trim();
+      if (address === "") {
+        say("Enter your email address.", "error");
+        email.focus();
+        return;
+      }
+
+      submit.disabled = true;
+      say("Sending\u2026", "pending");
+
+      fetch("/api/hosted/invite-request", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ v: 1, email: address, message: message.value })
+      }).then(function (response) {
+        return response.json().catch(function () { return null; }).then(function (body) {
+          submit.disabled = false;
+          if (response.ok) {
+            form.reset();
+            say("Thanks \u2014 an administrator will be in touch.", "ok");
+            return;
+          }
+          var detail = body && body.error && body.error.message;
+          say(detail || "That request could not be sent. Please try again later.", "error");
+        });
+      }).catch(function () {
+        submit.disabled = false;
+        say("That request could not be sent. Please try again later.", "error");
+      });
+    });
+  })();
+</script>
+
 </body>
 </html>

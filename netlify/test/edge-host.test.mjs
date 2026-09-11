@@ -26,6 +26,7 @@ import {
   applicationOrigin,
   classifyHost,
   firstPartyPageHeaders,
+  isApplicationPublic,
   isApplicationPassThrough,
   isRenderPrefix,
   notFoundForeignHost,
@@ -706,6 +707,60 @@ test("the redirect destination is only ever one ACN-005's grammar accepts", asyn
       `${path} is not expressible as a destination and none is offered`,
     );
   }
+});
+
+test("a landing subresource costs no session lookup and resolves no role", async () => {
+  for (const path of ["/favicon.ico", "/assets/aiur-logo.png"]) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+      next: () => staticPage(),
+    });
+    assert.equal(response.status, 200, `${path} is served with no session`);
+    assert.equal(calls.session.length, 0, `${path} costs no session lookup`);
+    assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
+  }
+});
+
+test("the landing page's own subresources are served to an anonymous visitor", () => {
+  /* #229 made the splash at `/` public; it did not make what the page loads
+     public with it, and every one of those is a deeper path that still reaches
+     the session gate. Without this the page is public and looks broken: each
+     image answers a sign-in redirect. */
+  for (const path of ["/favicon.ico", "/apple-touch-icon.png", "/assets/aiur-logo.png"]) {
+    assert.equal(isApplicationPublic(path), true, `${path} is a public subresource`);
+  }
+  /* And the root is deliberately absent: `PUBLIC_ROOT` in the gate owns the page
+     itself and gives it the landing-page policy. A second opinion here would be
+     two answers to one question. */
+  assert.equal(isApplicationPublic("/"), false, "the root is not this set's business");
+  assert.equal(isApplicationPublic("/some-slug/"), false, "a document slug is still gated");
+  assert.equal(isApplicationPublic("/assets"), false, "the tree is a prefix, not a bare name");
+});
+
+test("a document slug that merely starts with admin is still gated", () => {
+  /* `/admin` is the console's own address and carries no trailing slash, so it
+     cannot go in the prefix list: those are tested with `startsWith`, and a bare
+     "/admin" also matches `/adminfoo/` and `/admin-x/`. Both are legal
+     collaboration slugs -- the grammar is `[a-z0-9-]{1,64}` -- so that spelling
+     would pass somebody else's document straight through the session gate. */
+  assert.equal(isApplicationPassThrough("/admin"), true, "the console itself passes through");
+  assert.equal(isApplicationPassThrough("/admin/admin.js"), true, "and so does its asset tree");
+  for (const slug of ["/adminfoo/", "/admin-x/", "/administrator/", "/admins/"]) {
+    assert.equal(isApplicationPassThrough(slug), false, `${slug} is a document slug and stays gated`);
+  }
+});
+
+test("the admin console passes through to its own authorisation", async () => {
+  // `/admin` decides for itself: a signed-out visitor gets a redirect from the
+  // route and a signed-in non-admin gets a 403 from it. The gate must not turn
+  // the first of those into its own sign-in redirect, because a route that
+  // knows `ARCHON_ADMINS` is the only thing that can tell the two apart.
+  const { response, calls } = await runGate(APP_HOST, "/admin", {
+    session: () => sessionResponse({ v: 1, authenticated: false }),
+    next: () => staticPage(),
+  });
+  assert.equal(response.status, 200, "the route's own answer is returned");
+  assert.equal(calls.session.length, 0, "the gate performs no session lookup of its own");
 });
 
 test("a session-store outage is a 503 and never a sign-in redirect", async () => {
