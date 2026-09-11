@@ -190,6 +190,7 @@ export function clearCookie(name) {
  */
 export const RESERVED_FIRST_SEGMENTS = Object.freeze([
   "admin",
+  "assets",
   "login",
   "invite",
   "publish",

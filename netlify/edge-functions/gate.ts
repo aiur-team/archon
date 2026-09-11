@@ -73,6 +73,8 @@ const SESSION_COOKIE = "__Host-archon_session";
  */
 const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 const RESERVED_FIRST_SEGMENTS = [
+  "admin",
+  "assets",
   "login",
   "invite",
   "publish",

@@ -735,6 +735,11 @@ test("the landing page's own subresources are served to an anonymous visitor", (
   assert.equal(isApplicationPublic("/"), false, "the root is not this set's business");
   assert.equal(isApplicationPublic("/some-slug/"), false, "a document slug is still gated");
   assert.equal(isApplicationPublic("/assets"), false, "the tree is a prefix, not a bare name");
+  /* The trailing-slash case is the dangerous one: `/assets/` is slug-shaped, so
+     it is only safe to answer it publicly because `assets` is a reserved first
+     segment (in this gate and in the builder's RESERVED_ROUTES) and can never be
+     a collaboration document. It is the marketing image tree's root, public. */
+  assert.equal(isApplicationPublic("/assets/"), true, "the image tree root is public, and `assets` is a reserved slug so it is never a gated document");
 });
 
 test("a document slug that merely starts with admin is still gated", () => {
