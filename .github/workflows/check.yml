@@ -299,6 +299,20 @@ jobs:
           # four onboarding steps and the one `/welcome` spelling every layer
           # names.
           node --test netlify/test/welcome-page.test.mjs
+          # `logout-page.test.mjs` holds the properties that keep /logout a
+          # hittable address without making it a CSRF sign-out: the page is a
+          # real form POST carrying the session-bound token, it never offers the
+          # route as a GET, it submits on load, an already-signed-out visitor is
+          # told so and posts nothing, and `logout` is reserved as an exact path
+          # by every layer -- the builder, the gate and the destination grammar.
+          node --test netlify/test/logout-page.test.mjs
+          # `not-found-page.test.mjs` holds the 404 page itself: the logo, the
+          # exact title and italic subtitle, the splash's typefaces and tokens,
+          # no script at all, and the header set that is the reason it can say
+          # so -- one with no `script-src` grant in any form. Which paths reach
+          # the page and which still answer a sign-in redirect is asserted in
+          # `edge-host.test.mjs` against the real gate.
+          node --test netlify/test/not-found-page.test.mjs
           # ACN-008's write-path suite: the owner-only `["doc","allowedDomains"]`
           # body variant that replaced `["doc","orgDefault"]` on
           # `PATCH /api/access`. Its accept and refuse rows are ACN-007's shared

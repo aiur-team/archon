@@ -79,8 +79,30 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
  *
  * So the exact page is matched by equality and its asset tree by the `/admin/`
  * prefix above, and nothing between the two is reachable.
+ *
+ * The sign-out page's three files are here for the same reason, spelled the
+ * same way `LANDING_PAGE_PATHS` spells the onboarding page's two. `/logout` is
+ * the address the operator types and the generated `_redirects` rewrite
+ * resolves; `/logout/` is what Netlify resolves as the directory index; and
+ * `/logout/logout.js` is the one script the page loads, which has to be
+ * reachable with no session or the page cannot read the token it needs. A
+ * `"/logout/"` prefix entry would have covered all three in one line and would
+ * also have made every future file under `netlify/public/logout/` anonymous
+ * with nothing failing -- and a bare `"/logout"` prefix would have passed
+ * `/logout-notes/` and `/logoutx/` straight through the session gate, both of
+ * which are legal collaboration slugs under `[a-z0-9-]{1,64}`. Naming the three
+ * reachable spellings is the narrow grant.
+ *
+ * The page needs no session to be served, and holds none: a signed-out visitor
+ * who asks for it is told they are signed out rather than shown an error, which
+ * is only possible if the path is outside the session gate.
  */
-const APP_PASS_THROUGH_PATHS = Object.freeze(["/admin"]);
+const APP_PASS_THROUGH_PATHS = Object.freeze([
+  "/admin",
+  "/logout",
+  "/logout/",
+  "/logout/logout.js",
+]);
 
 /**
  * The landing page's own subresources, readable with no session at all.
@@ -659,6 +681,71 @@ export function withLandingPageHeaders(response, authOrigin) {
   if (!(headers instanceof Headers)) return response;
   if (headers.has("Content-Security-Policy")) return response;
   for (const [name, value] of landingPageHeaders(authOrigin)) headers.set(name, value);
+  return response;
+}
+
+/**
+ * The header set for the static not-found page (`site/404.html`, published as
+ * `_site/404.html` and served by Netlify for an unmatched path).
+ *
+ * It is its own set rather than one of the three above because the page's needs
+ * are a strict subset of a landing page's and *not* a subset of a first-party
+ * page's. It draws the product logo and links the two Google Font origins, which
+ * `firstPartyPageHeaders` grants no `img-src` or `font-src` for -- both fall
+ * back to `default-src 'none'` there, so the page would arrive with no logo and
+ * in the fallback typeface. And it runs nothing at all, which is why it does not
+ * simply take `landingPageHeaders`: that set carries `script-src 'self'
+ * 'unsafe-inline'` for the splash's inline copy button and entrance animation,
+ * and a page with no script has no use for either.
+ *
+ * So there is no `script-src` here in any form. `default-src 'none'` covers it,
+ * which means no script of any origin runs on this page -- an unusually strong
+ * thing to be able to say about an HTML answer, and worth keeping by writing any
+ * future behaviour this page needs as something other than script.
+ *
+ * `form-action 'none'`: the page posts nothing, and its one control is a link.
+ * The framing and base-uri denials and the other three headers are identical to
+ * every set above, so a not-found answer is no more exposed than an API answer.
+ *
+ * @returns {Array<[string, string]>}
+ */
+export function notFoundPageHeaders() {
+  const csp = [
+    "default-src 'none'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    "img-src 'self'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+  ].join("; ");
+
+  return [
+    ["Content-Security-Policy", csp],
+    ["X-Frame-Options", "DENY"],
+    ["X-Content-Type-Options", "nosniff"],
+    ["Referrer-Policy", "no-referrer"],
+  ];
+}
+
+/**
+ * Apply the not-found page header set to a response, only when it carries no CSP
+ * of its own. Same in-place contract as its siblings; the caller decides a
+ * response is the not-found page before calling this.
+ *
+ * @param {Response} response
+ * @returns {Response}
+ */
+export function withNotFoundPageHeaders(response) {
+  let headers;
+  try {
+    headers = response.headers;
+  } catch {
+    return response;
+  }
+  if (!(headers instanceof Headers)) return response;
+  if (headers.has("Content-Security-Policy")) return response;
+  for (const [name, value] of notFoundPageHeaders()) headers.set(name, value);
   return response;
 }
 

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>404 Page Not Found — Archon</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<!--
+  The not-found page, served from the publish root as Netlify's `404.html`.
+
+  It is the splash's visual language with everything situational taken out: the
+  same tokens, the same two typefaces, the same logo, and no banner, no sign-in
+  control, no flow field and no script at all. That last absence is deliberate
+  and is what lets the page take a header set with no `script-src` grant
+  whatsoever — see `notFoundPageHeaders` in `netlify/lib/edge-host.mjs`.
+
+  It says nothing about what does or does not exist beyond "not this". A page
+  that distinguished "no such document" from "a document you may not read"
+  would be an enumeration oracle, and the edge gate goes to some trouble to
+  make sure the two are one answer: an anonymous visitor asking for a
+  slug-shaped path still gets the sign-in redirect, not this page.
+-->
+<style>
+  /* Light is the bare :root so no colour exists only inside a media block. */
+  :root {
+    --bg: #e7d6b2;
+    --fg: #2a2520;
+    --muted: #5f5645;
+    --accent: #1f57c4;
+    --pill-bd: rgba(42, 37, 26, 0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1b1e;
+      --fg: #edeef0;
+      --muted: #8c8d93;
+      --accent: #2f86ff;
+      --pill-bd: rgba(221, 226, 235, 0.13);
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { min-height: 100%; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(18px, 4vh, 30px);
+    padding: 3rem clamp(1rem, 5vw, 2rem);
+    text-align: center;
+  }
+
+  .logo {
+    height: clamp(64px, 13vw, 130px);
+    width: auto;
+    display: block;
+  }
+
+  h1 {
+    font-family: "Bungee", "Space Grotesk", system-ui, sans-serif;
+    font-size: clamp(26px, 6.5vw, 58px);
+    line-height: 1.05;
+    letter-spacing: 0.01em;
+    color: var(--fg);
+    max-width: 18ch;
+  }
+
+  .subtitle {
+    font-style: italic;
+    font-size: clamp(15px, 2.4vw, 20px);
+    color: var(--muted);
+    max-width: 32ch;
+  }
+
+  .home {
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--accent);
+    border: 1px solid var(--pill-bd);
+    border-radius: 999px;
+    padding: 0.6rem 1.1rem;
+    text-decoration: none;
+  }
+  .home:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .home:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <img class="logo" src="/assets/aiur-logo.png" alt="" width="1215" height="1068">
+  <h1>404 Page Not Found</h1>
+  <p class="subtitle"><em>I sense a soul in search of answers.</em></p>
+  <a class="home" href="/">Back to Archon</a>
+</body>
+</html>
