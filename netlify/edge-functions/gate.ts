@@ -6,6 +6,7 @@ import {
 } from "../lib/access.mjs";
 import {
   applicationOrigin,
+  authorizationOrigin,
   classifyHost,
   isApplicationPassThrough,
   isApplicationPublic,
@@ -27,8 +28,12 @@ type GateContext = {
   rewrite(url: string | URL): Promise<Response>;
 };
 
-/** The two origin keys the gate reads to classify a request host. */
-const HOST_ENV_KEYS = ["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN"] as const;
+/**
+ * The origin keys the gate reads: two to classify a request host, and the
+ * identity provider's domain, which a sign-in page must name in `form-action`
+ * because the submission redirects to the provider.
+ */
+const HOST_ENV_KEYS = ["HOSTED_APP_ORIGIN", "HOSTED_RENDER_ORIGIN", "AUTH0_DOMAIN"] as const;
 
 const PLAIN_TEXT = "text/plain; charset=utf-8";
 const NO_STORE = { "Cache-Control": "private, no-store" };
@@ -171,7 +176,7 @@ function validContentType(value: string | null): boolean {
  * no redirect and no session decision, and a `Content-Type` that cannot be
  * read falls to the strict application set.
  */
-function finalizePassThrough(response: Response): Response {
+function finalizePassThrough(response: Response, authOrigin: string | null): Response {
   let isHtml = false;
   try {
     const headers = response.headers;
@@ -182,7 +187,7 @@ function finalizePassThrough(response: Response): Response {
     isHtml = false;
   }
   return isHtml
-    ? withFirstPartyPageHeaders(response)
+    ? withFirstPartyPageHeaders(response, authOrigin)
     : withApplicationHeaders(response);
 }
 
@@ -453,7 +458,12 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    if (isLandingPage(url.pathname)) return withLandingPageHeaders(passed);
+    /* The sign-in form lives on a landing page and on the sign-in page, and its
+       submission redirects to the identity provider, so both header sets have to
+       name that provider in `form-action` or the browser blocks the post before
+       it leaves. The origin comes from configuration, never from the request. */
+    const authOrigin = authorizationOrigin(env);
+    if (isLandingPage(url.pathname)) return withLandingPageHeaders(passed, authOrigin);
     /* A public reference document is the same bytes under the same header set a
        signed-in reader gets today; only the session check is skipped. It does
        not take `finalizePassThrough`'s first-party page set, because that would
@@ -461,7 +471,7 @@ async function applicationHost(
        point of publishing one is that the answer no longer depends on who
        asked. */
     if (isPublicDocument(url.pathname)) return publicDocumentResponse(passed);
-    return finalizePassThrough(passed);
+    return finalizePassThrough(passed, authOrigin);
   }
 
   return withApplicationHeaders(await sessionGate(req, url, context, env));

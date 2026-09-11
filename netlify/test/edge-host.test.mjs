@@ -25,8 +25,10 @@ import {
   applicationHeaders,
   documentHeaders,
   applicationOrigin,
+  authorizationOrigin,
   classifyHost,
   firstPartyPageHeaders,
+  landingPageHeaders,
   withDocumentHeaders,
   APP_PUBLIC_DOCUMENT_PATHS,
   isApplicationPublic,
@@ -224,6 +226,55 @@ test("firstPartyPageHeaders is a page CSP: self scripts, inline styles, self fet
   assert.equal(headers.find(([name]) => name === "X-Frame-Options")[1], "DENY");
   assert.equal(headers.find(([name]) => name === "X-Content-Type-Options")[1], "nosniff");
   assert.equal(headers.find(([name]) => name === "Referrer-Policy")[1], "no-referrer");
+});
+
+test("a sign-in page names the configured provider in form-action, because the post redirects there", () => {
+  /* `form-action` is enforced across the redirect the start route answers with,
+     so `'self'` alone blocks the submission before the provider is reached --
+     the browser refuses with "violates ... form-action 'self'" and no sign-in
+     can complete. Both page sets must name the provider's origin, and only in
+     this directive. */
+  const origin = authorizationOrigin({ AUTH0_DOMAIN: "tenant.us.auth0.example" });
+  assert.equal(origin, "https://tenant.us.auth0.example");
+
+  for (const [label, set] of [
+    ["landing", landingPageHeaders(origin)],
+    ["first-party", firstPartyPageHeaders(origin)],
+  ]) {
+    const csp = set.find(([name]) => name === "Content-Security-Policy")[1];
+    assert.ok(
+      csp.includes("form-action 'self' https://tenant.us.auth0.example"),
+      `${label}: the submission may reach the provider`,
+    );
+    assert.ok(!csp.includes("form-action 'none'"), `${label}: never the API form-action`);
+    /* The grant is confined to form-action: nothing else names the provider. */
+    for (const directive of ["script-src", "style-src", "connect-src", "img-src", "font-src"]) {
+      const clause = csp.split("; ").find((part) => part.startsWith(`${directive} `));
+      if (clause !== undefined) {
+        assert.ok(
+          !clause.includes("auth0.example"),
+          `${label}: ${directive} does not name the provider`,
+        );
+      }
+    }
+  }
+
+  /* A missing or malformed setting yields no origin, and the policy stays
+     same-origin-only rather than emitting a header a caller could have shaped. */
+  for (const bad of [
+    undefined,
+    {},
+    { AUTH0_DOMAIN: "" },
+    { AUTH0_DOMAIN: "https://tenant.us.auth0.example" },
+    { AUTH0_DOMAIN: "tenant.us.auth0.example/path" },
+    { AUTH0_DOMAIN: "tenant.us.auth0.example evil.example" },
+    { AUTH0_DOMAIN: "nodots" },
+  ]) {
+    assert.equal(authorizationOrigin(bad), null, `refused: ${JSON.stringify(bad)}`);
+  }
+  const fallback = landingPageHeaders(authorizationOrigin({}))
+    .find(([name]) => name === "Content-Security-Policy")[1];
+  assert.ok(/(^|; )form-action 'self'(;|$)/.test(fallback), "unconfigured stays same-origin-only");
 });
 
 test("withFirstPartyPageHeaders adds the page set only when no CSP is present", () => {
