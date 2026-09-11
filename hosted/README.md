@@ -591,6 +591,17 @@ policy is owner-only even for an account the policy itself admits: being on a
 list does not entitle you to enumerate it, and a non-owner gets the same
 `not_found` an unknown id gets.
 
+The owner's surface for this is the **Who can read** panel on `/docs/<id>`,
+built by `public/viewer.js` after the metadata read says the signed-in account
+owns the document. It lists the domains, adds one, removes one, and sends the
+whole list on every change with the session's `x-archon-csrf` token — the same
+mutation shape sign-out uses. A reader who is not the owner gets no panel markup
+at all, and the server refuses their request regardless. Three refusals get
+their own line rather than a generic failure, because an owner acts differently
+on each: a public mailbox provider is a policy to argue with, too many domains
+is a number to cut, and an invalid domain is a typo. `csrf_failed` and
+`not_found` deliberately do not say which they were.
+
 Four rules decide the list, and all four live in `domain-access.mjs`:
 
 - **Matching is exact, case-insensitive, full-domain equality** after

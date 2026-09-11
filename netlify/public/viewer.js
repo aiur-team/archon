@@ -330,6 +330,449 @@
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * ACN-009 - the owner's "Who can read" panel.
+   * ------------------------------------------------------------------ */
+
+  /**
+   * Almost everything this panel says, as literals in this file.
+   *
+   * Same rule as `MESSAGES` above, and for the same reason: a string chosen by
+   * a server is a way to put text on a trusted page. There are exactly two
+   * deliberate exceptions, both required by the C-block for this route and both
+   * narrow. `public_mailbox_domain` and `too_many_domains` render the server's
+   * own `message`, because each carries a value only the server knows -- the
+   * domain the owner typed and the limit they have to cut to -- and a local
+   * copy of either would be a second, drifting statement of a policy that lives
+   * in `domain-access.mjs`. Both are bounded by `safeMessage` before they leave
+   * the server and bounded again here, and both go in through `textContent`.
+   * Every other refusal renders a literal from this table.
+   */
+  const ACCESS = {
+    heading: "Who can read",
+    empty: "Only you and people you invite can read this",
+    label: "Email domain",
+    add: "Add domain",
+    remove: "Remove",
+    loading: "Loading the reading list…",
+    saving: "Saving…",
+    saved: "Saved.",
+    blank: "Type a domain to add.",
+    invalid: "That is not a domain we can use.",
+    failed: "That change could not be saved.",
+    loadFailed: "The reading list could not be loaded.",
+    retry: "Try again",
+  };
+
+  /** The panel's address on the account origin. One route, two verbs. */
+  const accessPath = (documentId) => `/api/hosted/publications/${documentId}/access`;
+
+  /** How much of a server message this page will ever put on the screen. */
+  const ACCESS_MESSAGE_MAX = 200;
+
+  /**
+   * `normalizeDomainList`'s output grammar, restated the way this file restates
+   * the handshake contract: `viewer.js` is a committed static asset with no
+   * build step and no module graph.
+   *
+   * It is a shape check on a response, never an access decision. What it buys
+   * is that the only strings this page ever renders as domains are strings that
+   * look like the ones the server says it stores -- lowercase, dotted, bounded
+   * and at most twenty of them -- so a route that started answering something
+   * else renders nothing rather than rendering it.
+   */
+  const ACCESS_DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+  /**
+   * Anything this page refuses to put in a line of text.
+   *
+   * `UNSAFE_DISPLAY` from `netlify/lib/hosted/contracts.mjs`, restated for
+   * the same reason the handshake contract is: no build step, no module
+   * graph. The server has already applied it, and applying it again here is
+   * what makes "this page renders no control character" a property of this
+   * file rather than a property of a module it cannot import.
+   */
+  const ACCESS_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+  function validAccessBody(body, documentId) {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return false;
+    if (body.v !== 1 || body.publicationId !== documentId) return false;
+    const list = body.allowedDomains;
+    if (!Array.isArray(list) || list.length > 20) return false;
+    return list.every(
+      (entry) => typeof entry === "string" && entry.length <= 253 && ACCESS_DOMAIN.test(entry),
+    );
+  }
+
+  /** A server message, bounded and stripped of anything that is not a line. */
+  function boundedAccessMessage(value) {
+    if (typeof value !== "string") return null;
+    const cleaned = value.replace(ACCESS_UNSAFE, " ").trim();
+    if (cleaned === "") return null;
+    const scalars = [...cleaned];
+    return scalars.length <= ACCESS_MESSAGE_MAX
+      ? cleaned
+      : `${scalars.slice(0, ACCESS_MESSAGE_MAX - 1).join("")}…`;
+  }
+
+  let accessEl = null;
+  let accessListEl = null;
+  let accessEmptyEl = null;
+  let accessStatusEl = null;
+  let accessInput = null;
+  let accessRetryEl = null;
+  let accessDocumentId = null;
+  /**
+   * The stored list, or `null` for "this page has not read it yet".
+   *
+   * `null` rather than `[]`, and the difference is a data-loss bug rather than
+   * a style: the `PUT` replaces the whole list, so a panel whose read failed
+   * and then treated its own ignorance as an empty list would answer the first
+   * "add" by sending a one-entry list and silently dropping every domain the
+   * document actually had. Nothing may be written until something was read.
+   */
+  let accessDomains = null;
+  /** One request at a time. A second would race the first over one list. */
+  let accessBusy = false;
+
+  function sayAccess(message, tone) {
+    accessStatusEl.textContent = message;
+    if (tone === undefined) accessStatusEl.removeAttribute("data-tone");
+    else accessStatusEl.dataset.tone = tone;
+  }
+
+  /**
+   * Disable every control in the panel for the duration of one request.
+   *
+   * Blunt on purpose. The list is replaced wholesale by every write, so a
+   * second control pressed while the first is in flight would send a list built
+   * from a state the server has already moved past -- which is the two-tabs
+   * problem the `PUT` shape exists to avoid, reproduced inside one tab.
+   */
+  function setAccessBusy(busy) {
+    accessBusy = busy;
+    for (const control of accessEl.querySelectorAll("button, input")) control.disabled = busy;
+  }
+
+  function createAccessPanel() {
+    const section = document.createElement("section");
+    section.className = "access";
+    section.setAttribute("data-archon-access", "");
+    section.setAttribute("aria-labelledby", "archon-access-title");
+
+    const title = document.createElement("h2");
+    title.id = "archon-access-title";
+    title.textContent = ACCESS.heading;
+
+    accessEmptyEl = document.createElement("p");
+    accessEmptyEl.className = "access-empty";
+    accessEmptyEl.setAttribute("data-archon-access-empty", "");
+    accessEmptyEl.textContent = ACCESS.empty;
+    /* Hidden until a read says the list really is empty. Shown from the start
+       it would assert the document's policy before this page had been told it. */
+    accessEmptyEl.hidden = true;
+
+    accessListEl = document.createElement("ul");
+    accessListEl.className = "access-list";
+    accessListEl.setAttribute("data-archon-access-list", "");
+
+    const form = document.createElement("form");
+    form.className = "access-add";
+    form.setAttribute("data-archon-access-form", "");
+    /* The browser's own validation would refuse values this server accepts and
+       accept values it refuses, and the answer that matters comes from the
+       server either way. */
+    form.setAttribute("novalidate", "");
+
+    /* A real `<label>`, not an `aria-label`: the accessible name is text in the
+       document rather than a value in an attribute, which is the same rule the
+       collaboration panel's controls follow. */
+    const label = document.createElement("label");
+    label.className = "access-label";
+    label.setAttribute("for", "archon-access-domain");
+    label.textContent = ACCESS.label;
+
+    accessInput = document.createElement("input");
+    accessInput.id = "archon-access-domain";
+    accessInput.setAttribute("data-archon-access-input", "");
+    accessInput.setAttribute("type", "text");
+    accessInput.setAttribute("autocomplete", "off");
+    accessInput.setAttribute("autocapitalize", "none");
+    accessInput.setAttribute("spellcheck", "false");
+    accessInput.setAttribute("maxlength", "253");
+
+    const add = document.createElement("button");
+    add.setAttribute("type", "submit");
+    add.className = "access-add-button";
+    add.setAttribute("data-archon-access-add", "");
+    add.textContent = ACCESS.add;
+    form.append(label, accessInput, add);
+
+    accessStatusEl = document.createElement("p");
+    accessStatusEl.className = "access-status";
+    accessStatusEl.setAttribute("data-archon-access-status", "");
+    /* The error state is announced, not merely coloured: every message this
+       panel produces -- including every refusal -- goes through one live
+       region a screen reader reads without the reader going to look. */
+    accessStatusEl.setAttribute("role", "status");
+    accessStatusEl.setAttribute("aria-live", "polite");
+
+    accessRetryEl = document.createElement("p");
+    accessRetryEl.className = "access-retry";
+    accessRetryEl.hidden = true;
+    const retryControl = document.createElement("button");
+    retryControl.setAttribute("type", "button");
+    retryControl.setAttribute("data-archon-access-retry", "");
+    retryControl.textContent = ACCESS.retry;
+    retryControl.addEventListener("click", loadAccess);
+    accessRetryEl.appendChild(retryControl);
+
+    section.append(title, accessEmptyEl, accessListEl, form, accessStatusEl, accessRetryEl);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      addAccessDomain();
+    });
+    return section;
+  }
+
+  function renderAccessList() {
+    /* "Only you and people you invite can read this" is a claim about the
+       document's policy. Before the read resolves, and after one that failed,
+       this page does not know it -- so it says nothing rather than saying that. */
+    if (accessDomains === null) {
+      accessEmptyEl.hidden = true;
+      accessListEl.replaceChildren();
+      return;
+    }
+    accessEmptyEl.hidden = accessDomains.length !== 0;
+    accessListEl.replaceChildren(
+      ...accessDomains.map((domain) => {
+        const row = document.createElement("li");
+        /* `bdi`, like the collaboration panel's rows: a domain is an isolated
+           value inside a sentence of this page's own text, and the isolation is
+           what stops one entry from reordering the row around it. */
+        const name = document.createElement("bdi");
+        name.className = "access-domain";
+        name.textContent = domain;
+
+        const remove = document.createElement("button");
+        remove.setAttribute("type", "button");
+        remove.className = "access-remove";
+        remove.setAttribute("data-archon-access-remove", "");
+        remove.appendChild(document.createTextNode(ACCESS.remove));
+        /* The domain rides in the button's accessible name as *text*, visually
+           hidden, so every row's control is distinctly named for a reader who
+           hears the controls without the rows -- and so the value still never
+           reaches an attribute, an id or a selector. */
+        const named = document.createElement("span");
+        named.className = "visually-hidden";
+        named.textContent = ` ${domain}`;
+        remove.appendChild(named);
+        remove.addEventListener("click", () => {
+          writeAccess(accessDomains.filter((entry) => entry !== domain), null);
+        });
+
+        row.append(name, remove);
+        return row;
+      }),
+    );
+  }
+
+  /**
+   * The `PUT`, carrying the whole list and the session's own token.
+   *
+   * The same mutation shape sign-out uses: a null token is a refusal here
+   * rather than a request sent without the header, because a request the server
+   * is certain to refuse is a round trip spent to learn what this page already
+   * knows.
+   */
+  async function putAccess(allowedDomains) {
+    if (csrfToken === null) return { outcome: "refused", code: null, message: "" };
+    let response;
+    try {
+      response = await fetch(accessPath(accessDocumentId), {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-archon-csrf": csrfToken,
+          accept: "application/json",
+        },
+        body: JSON.stringify({ v: 1, allowedDomains }),
+      });
+    } catch {
+      return { outcome: "unavailable" };
+    }
+    if (response.ok) {
+      try {
+        return { outcome: "ok", body: await response.json() };
+      } catch {
+        return { outcome: "unavailable" };
+      }
+    }
+    if (response.status === 503) return { outcome: "unavailable" };
+    let code = null;
+    let message = "";
+    try {
+      const body = await response.json();
+      const error = body === null || typeof body !== "object" ? null : body.error;
+      if (error !== null && typeof error === "object" && !Array.isArray(error)) {
+        if (typeof error.code === "string") code = error.code;
+        if (typeof error.message === "string") message = error.message;
+      }
+    } catch {
+      /* An envelope this page cannot read is a refusal with no reason, which is
+         the same thing it renders for the refusals that have one it must not
+         repeat. */
+    }
+    return { outcome: "refused", code, message };
+  }
+
+  /**
+   * What the owner is told about a refused list, per refusal.
+   *
+   * `csrf_failed` and `not_found` deliberately fall through to the generic
+   * line. Naming them would tell whoever is sitting at a forged request which
+   * of the two ways it failed, and neither is something the owner of the
+   * document could act on: an owner whose token was rejected has a page to
+   * reload, not a list to correct.
+   */
+  function accessRefusal(result, entered) {
+    if (result.code === "public_mailbox_domain" || result.code === "too_many_domains") {
+      const message = boundedAccessMessage(result.message);
+      return message === null ? ACCESS.failed : message;
+    }
+    if (result.code === "invalid_domain") {
+      /* Bounded exactly as a server message is. It is the owner's own input, so
+         nobody else chose it -- but it is still an arbitrary string reaching a
+         trusted live region, and a bidi override or a line separator pasted
+         into the box would render there while the same character stripped out
+         of a server's message would not. One rule for the line. */
+      const named = entered === null ? null : boundedAccessMessage(entered);
+      return named === null ? ACCESS.invalid : `${ACCESS.invalid} ${named}`;
+    }
+    return ACCESS.failed;
+  }
+
+  /**
+   * Read the list the document actually has.
+   *
+   * A failure here leaves the panel with its own retry rather than calling
+   * `fail`, for the reason `warn` exists: the document is on the screen, still
+   * authorised and still readable, and a reading list that could not be fetched
+   * is not a reason to take it away.
+   */
+  async function loadAccess() {
+    if (accessBusy) return;
+    setAccessBusy(true);
+    sayAccess(ACCESS.loading);
+    /* `getJson` does not wrap its own `fetch`, and a `fetch` that cannot reach
+       the network rejects rather than resolving. Unhandled, that rejection
+       escapes before the panel is re-enabled and leaves it disabled forever,
+       stuck on "Loading…" with no retry to press. */
+    let result;
+    try {
+      result = await getJson(accessPath(accessDocumentId));
+    } catch {
+      result = { outcome: "unavailable" };
+    }
+    setAccessBusy(false);
+    if (result.outcome !== "ok" || !validAccessBody(result.body, accessDocumentId)) {
+      accessDomains = null;
+      renderAccessList();
+      sayAccess(ACCESS.loadFailed, "error");
+      accessRetryEl.hidden = false;
+      return;
+    }
+    accessRetryEl.hidden = true;
+    accessDomains = [...result.body.allowedDomains];
+    renderAccessList();
+    sayAccess("");
+  }
+
+  /**
+   * Write a list, and render whatever came back.
+   *
+   * `entered` is the value the owner typed, or `null` for a removal. It is this
+   * page's own input rather than anything a server sent, which is what lets the
+   * invalid-domain line name the offending value without taking it from a
+   * response -- and it is what stays in the box on a refusal, so the owner can
+   * correct a domain rather than retype it.
+   */
+  async function writeAccess(next, entered) {
+    if (accessBusy || accessDomains === null) return;
+    setAccessBusy(true);
+    sayAccess(ACCESS.saving);
+    const result = await putAccess(next);
+    setAccessBusy(false);
+
+    if (result.outcome === "ok") {
+      if (!validAccessBody(result.body, accessDocumentId)) {
+        sayAccess(MESSAGES.unavailable, "error");
+        return;
+      }
+      accessDomains = [...result.body.allowedDomains];
+      renderAccessList();
+      if (entered !== null) accessInput.value = "";
+      sayAccess(ACCESS.saved);
+      return;
+    }
+    if (result.outcome === "unavailable") {
+      sayAccess(MESSAGES.unavailable, "error");
+      return;
+    }
+    sayAccess(accessRefusal(result, entered), "error");
+  }
+
+  /**
+   * Add whatever is in the box.
+   *
+   * Trimmed and lowercased, and otherwise sent exactly as typed. This page
+   * holds no copy of the public-mailbox list and does not pre-validate against
+   * one: the denylist and its site-wide override are the server's, and a second
+   * copy here would be a policy that drifts and a refusal the owner could not
+   * argue with. An empty box is the one thing refused locally, because there is
+   * nothing to send.
+   */
+  function addAccessDomain() {
+    if (accessBusy) return;
+    /* Nothing may be added to a list this page never read: the request would
+       replace the stored list with this one entry. */
+    if (accessDomains === null) {
+      sayAccess(ACCESS.loadFailed, "error");
+      return;
+    }
+    const entered = accessInput.value.trim().toLowerCase();
+    if (entered === "") {
+      sayAccess(ACCESS.blank, "error");
+      accessInput.focus();
+      return;
+    }
+    if (accessDomains.includes(entered)) {
+      accessInput.value = "";
+      sayAccess(ACCESS.saved);
+      return;
+    }
+    writeAccess([...accessDomains, entered], entered);
+  }
+
+  /**
+   * Create the panel, once, for an owner.
+   *
+   * It is created rather than unhidden. The shell carries no panel markup at
+   * all, so a reader who is not the owner has nothing to reveal with a
+   * stylesheet, a devtools toggle or a `hidden` attribute removed -- and the
+   * server refuses their request regardless, which is the half that actually
+   * decides.
+   */
+  function mountAccessPanel(documentId) {
+    if (accessEl !== null) return;
+    accessDocumentId = documentId;
+    accessEl = createAccessPanel();
+    statusEl.parentNode.insertBefore(accessEl, statusEl);
+    loadAccess();
+  }
+
   /** One attempt at the whole sequence: session, metadata, bytes, handshake. */
   /** Whether an attempt is in flight. A second one would race the first. */
   let loading = false;
@@ -394,6 +837,13 @@
        to escape from. */
     titleEl.textContent = metadata.body.title;
     document.title = `${metadata.body.title} — Archon`;
+
+    /* ACN-009: the owner's panel, and only the owner's. The signal is the
+       account on the session compared with the account on the document's own
+       metadata -- two values this page has already been given -- rather than
+       the access route's answer, which would make a 200 the gate and a 403 a
+       probe every reader's browser performs on every load. */
+    if (session.body.accountId === metadata.body.ownerAccountId) mountAccessPanel(documentId);
 
     const content = await fetchContent(documentId, metadata.body);
     if (content.outcome === "signIn") {

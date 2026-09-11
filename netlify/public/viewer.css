@@ -69,6 +69,128 @@ body {
   opacity: 0.6;
 }
 
+/* ACN-009's owner panel. It sits in the trusted band's flow, between the
+   chrome and the status line, and above the stage -- so like the header it is a
+   sibling of the frame and nothing inside the frame can lay out over it. It has
+   no rules that hide or reveal it: `viewer.js` builds this markup only for an
+   owner, and a panel that existed in the DOM behind `display: none` would be a
+   reading list a non-owner could uncover with one devtools toggle. */
+.access {
+  border-bottom: 1px solid var(--chrome-border);
+  padding: 0.75rem 1.25rem;
+}
+
+.access h2 {
+  font-size: 0.95rem;
+  margin: 0 0 0.4rem;
+}
+
+.access-empty[hidden] {
+  display: none;
+}
+
+.access-empty {
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+  opacity: 0.75;
+}
+
+.access-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+}
+
+.access-list li {
+  align-items: baseline;
+  border: 1px solid var(--chrome-border);
+  border-radius: 0.25rem;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.2rem 0.5rem;
+}
+
+/* A stored domain may be 253 characters. Clamping it keeps one entry from
+   pushing this panel's own controls off the screen, which is the only way a
+   listed value could affect a trusted region. */
+.access-domain {
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-add {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.access-label {
+  font-size: 0.85rem;
+}
+
+.access-add input {
+  font: inherit;
+  min-width: 14rem;
+  padding: 0.3rem 0.4rem;
+}
+
+.access button {
+  cursor: pointer;
+  font: inherit;
+  padding: 0.25rem 0.6rem;
+}
+
+/* The same treatment sign-out already uses for an in-flight request, so one
+   disabled control on this page does not look different from another. */
+.access button[disabled],
+.access input[disabled] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.access-status {
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+
+.access-status:empty {
+  display: none;
+}
+
+/* Colour is never the only carrier: the message itself is in a `role="status"`
+   region, so a reader who cannot see the weight or the hue is told the same
+   sentence. */
+.access-status[data-tone="error"] {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.access-retry {
+  margin: 0.5rem 0 0;
+}
+
+.access-retry[hidden] {
+  display: none;
+}
+
+/* Off the screen, in the accessibility tree. The remove control's visible text
+   is "Remove" for every row, and this is what makes each one's accessible name
+   name the domain it removes. */
+.visually-hidden {
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 .status {
   margin: 0;
   padding: 0.75rem 1.25rem;

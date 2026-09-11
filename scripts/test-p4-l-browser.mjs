@@ -316,9 +316,13 @@ async function renderMatrix() {
   try {
     /* Geometry: three real widths, laid out, with no horizontal overflow and
        every control still inside the panel box. */
-    for (const width of [320, 390, 1280]) {
+    /* The short viewport is not decoration. A landscape phone is where a panel
+       tall enough to cover its own toggle actually does: 420px of height leaves
+       less room beside the masthead than any desktop window, and a constant
+       `max-height` that clears a 1280x800 window still fails here. */
+    for (const [width, height] of [[320, 800], [390, 800], [1280, 800], [740, 420]]) {
       const { context, page } = await mount(browser, origin, source,
-        { viewport: { width, height: 800 } }, OWNER_SESSION, [{ status: 200, contentType: "application/json", json: ROSTER }]);
+        { viewport: { width, height } }, OWNER_SESSION, [{ status: 200, contentType: "application/json", json: ROSTER }]);
       await openPanel(page);
       await waitControls(page);
       const geometry = await page.evaluate(() => {
@@ -337,14 +341,22 @@ async function renderMatrix() {
           clientWidth: document.documentElement.clientWidth,
           overflowing,
           controls: panel.querySelectorAll(".share-op").length,
+          coversToggle: (() => {
+            const toggle = document.querySelector("#doc-share-button").getBoundingClientRect();
+            return !(box.bottom <= toggle.top || box.top >= toggle.bottom
+              || box.right <= toggle.left || box.left >= toggle.right);
+          })(),
         };
       });
-      assert.equal(geometry.controls, 15, `expected every owner control at ${width}px`);
-      assert.ok(geometry.documentOverflow <= 0, `the document scrolls sideways at ${width}px`);
-      assert.ok(geometry.panelOverflow <= 0, `the panel scrolls sideways at ${width}px`);
+      assert.equal(geometry.controls, 18, `expected every owner control at ${width}x${height}`);
+      /* ACN-009 added a third section, and a panel tall enough to reach its own
+         toggle would cover the one control that closes it. */
+      assert.equal(geometry.coversToggle, false, `the panel covers its toggle at ${width}x${height}`);
+      assert.ok(geometry.documentOverflow <= 0, `the document scrolls sideways at ${width}x${height}`);
+      assert.ok(geometry.panelOverflow <= 0, `the panel scrolls sideways at ${width}x${height}`);
       assert.ok(geometry.left >= -1 && geometry.right <= geometry.clientWidth + 1,
-        `the panel escapes the viewport at ${width}px`);
-      assert.equal(geometry.overflowing, 0, `a control escapes the panel at ${width}px`);
+        `the panel escapes the viewport at ${width}x${height}`);
+      assert.equal(geometry.overflowing, 0, `a control escapes the panel at ${width}x${height}`);
       await context.close();
     }
 
@@ -362,7 +374,8 @@ async function renderMatrix() {
           "#doc-share-panel button, #doc-share-panel input, #doc-share-panel select"));
         return { total: order.length, enabled: order.map((n, i) => (n.disabled ? -1 : i)).filter((i) => i !== -1) };
       });
-      assert.equal(expected.total, 16, "the owner panel has one close button and fifteen controls");
+      assert.equal(expected.total, 19,
+        "the owner panel has one close button and eighteen controls");
       const seen = [];
       for (let step = 0; step < expected.total + 2; step += 1) {
         await page.keyboard.press("Tab");

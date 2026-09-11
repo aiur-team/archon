@@ -76,7 +76,7 @@ const TRANSCRIPT = /^PASS {2}hosted owner viewer matrix \(chromium [\w.]+; (\d+)
  * the only thing CI reads and a worker that returned early after four cases
  * would otherwise print a `PASS` that reads exactly like a full run.
  */
-const EXPECTED_CASES = 74;
+const EXPECTED_CASES = 124;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -641,6 +641,9 @@ async function startApp(handlers) {
       else if (/^\/api\/hosted\/docs\//.test(url.pathname)) handler = handlers.read;
       else if (url.pathname === "/api/hosted/session") handler = handlers.session;
       else if (url.pathname === "/api/hosted/auth/logout") handler = handlers.logout;
+      /* ACN-009's panel reads and writes here. The production route, over the
+         same injected dependency set every other handler here gets. */
+      else if (/^\/api\/hosted\/publications\//.test(url.pathname)) handler = handlers.access;
 
       if (handler === null) return inert(404, "text/plain; charset=utf-8", "not found");
       return writeResponse(await handler(request), nodeResponse, { head });
@@ -876,6 +879,36 @@ const statusOf = (page) => page.locator("[data-archon-status]").innerText();
 const refusalTextOf = (page) => page.locator("body").innerText();
 
 /**
+ * ACN-009's panel, read without assuming it is visible.
+ *
+ * `textContent` through `evaluate` rather than `innerText`: the status line is
+ * `display: none` while it is empty -- that is the stylesheet's own rule -- and
+ * an `innerText` read of a hidden element answers `""` for "empty" and for
+ * "hidden with text in it" alike, which is exactly the distinction these cases
+ * turn on.
+ */
+const textOf = (page, selector) =>
+  page.locator(selector).evaluate((node) => node.textContent);
+
+const accessStatusOf = (page) => textOf(page, "[data-archon-access-status]");
+
+const domainsOf = (page) =>
+  page.locator("[data-archon-access-list] .access-domain")
+    .evaluateAll((nodes) => nodes.map((node) => node.textContent));
+
+/** Wait until the panel exists and its own read has settled. */
+async function waitForPanel(page) {
+  await waitFor(
+    async () => (await page.locator("[data-archon-access]").count()) === 1,
+    "the owner panel never mounted",
+  );
+  await waitFor(
+    async () => (await accessStatusOf(page)) !== "Loading the reading list…",
+    async () => `the panel never finished its read: ${await accessStatusOf(page)}`,
+  );
+}
+
+/**
  * Sign a principal in by asking the application to set the cookie.
  *
  * Deliberately a server round trip rather than `context.addCookies`. The cookie
@@ -910,7 +943,7 @@ async function signIn(context, appOrigin, token) {
  * Every browser case, in order. Each returns nothing and throws on failure; the
  * count of them is what the transcript reports.
  */
-function browserCases({ app, renderer, evil, ids, tokens, records }) {
+function browserCases({ app, renderer, evil, ids, tokens, records, markers }) {
   const page = (path) => `${app.origin}${path}`;
 
   return [
@@ -1480,6 +1513,369 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
       assert.equal(reachedSignOut, true, "sign-out is not reachable from the keyboard");
       await tab.close();
     }],
+
+    /* ------------------------------------------------------------------ *
+     * ACN-009 — the owner's "Who can read" panel.
+     *
+     * These cases share one store and run in order, and two of them depend on
+     * that: the add case leaves a domain on `ids.owned` and the remove case
+     * takes it away again. That is deliberate rather than incidental -- "the
+     * change survives a reload" is a claim about stored state, and a case that
+     * reset the store between the write and the read would not be making it.
+     * Every case asserts the adversary origin recorded nothing, because the
+     * panel is new traffic on a page whose whole design is about which origin
+     * a request reaches.
+     * ------------------------------------------------------------------ */
+
+    ["the owner adds a domain and a reload still lists it", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.owned}`));
+      await waitForPanel(tab);
+
+      /* An empty list says so. An empty box would read as "nobody has decided
+         yet" for a policy that has in fact been decided. */
+      assert.deepEqual(await domainsOf(tab), []);
+      assert.equal(
+        await textOf(tab, "[data-archon-access-empty]"),
+        "Only you and people you invite can read this",
+      );
+      assert.equal(await tab.locator("[data-archon-access-empty]").isVisible(), true);
+
+      await tab.fill("[data-archon-access-input]", "  Partner.Example  ");
+      await tab.click("[data-archon-access-add]");
+      await waitFor(
+        async () => (await domainsOf(tab)).length === 1,
+        async () => `the added domain never appeared: ${await accessStatusOf(tab)}`,
+      );
+      /* Normalised by the server and rendered from its answer, not from what
+         was typed: the box held whitespace and capitals and the list does not. */
+      assert.deepEqual(await domainsOf(tab), ["partner.example"]);
+      assert.equal(await tab.inputValue("[data-archon-access-input]"), "",
+        "an accepted domain must clear the box");
+      assert.equal(await tab.locator("[data-archon-access-empty]").isVisible(), false);
+
+      await tab.reload();
+      await waitForPanel(tab);
+      assert.deepEqual(await domainsOf(tab), ["partner.example"],
+        "the added domain did not survive a reload");
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["the owner removes the only domain and sees the empty-list copy", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.owned}`));
+      await waitForPanel(tab);
+      assert.deepEqual(await domainsOf(tab), ["partner.example"]);
+
+      await tab.click("[data-archon-access-remove]");
+      await waitFor(
+        async () => (await domainsOf(tab)).length === 0,
+        async () => `the domain was never removed: ${await accessStatusOf(tab)}`,
+      );
+      assert.equal(await tab.locator("[data-archon-access-empty]").isVisible(), true,
+        "an emptied list renders an empty box instead of the explicit copy");
+
+      await tab.reload();
+      await waitForPanel(tab);
+      assert.deepEqual(await domainsOf(tab), [], "the removal did not survive a reload");
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["a public-mailbox domain is refused in the server's words", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.owned}`));
+      await waitForPanel(tab);
+
+      /* The page holds no copy of the denylist: `gmail.com` goes to the server
+         exactly like any other value and comes back refused. A local list would
+         be a second policy, and it would be the one that went stale. */
+      await tab.fill("[data-archon-access-input]", "gmail.com");
+      await tab.click("[data-archon-access-add]");
+      await waitFor(
+        async () => (await accessStatusOf(tab)).includes("public mailbox"),
+        async () => `the refusal was never rendered: ${await accessStatusOf(tab)}`,
+      );
+      assert.equal(
+        await accessStatusOf(tab),
+        "gmail.com is a public mailbox provider, so listing it would admit anyone.",
+        "the owner was not told the server's reason",
+      );
+      assert.equal(await tab.inputValue("[data-archon-access-input]"), "gmail.com",
+        "a refused domain must stay in the box so the owner can correct it");
+      assert.deepEqual(await domainsOf(tab), [], "a refused domain was listed anyway");
+
+      /* Announced, not merely coloured. */
+      const announced = await tab.evaluate(() => {
+        const node = document.querySelector("[data-archon-access-status]");
+        return { role: node.getAttribute("role"), live: node.getAttribute("aria-live"), tone: node.dataset.tone };
+      });
+      assert.deepEqual(announced, { role: "status", live: "polite", tone: "error" });
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["a malformed domain gets the invalid-domain copy, not a generic failure", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.owned}`));
+      await waitForPanel(tab);
+
+      await tab.fill("[data-archon-access-input]", "nodots");
+      await tab.click("[data-archon-access-add]");
+      await waitFor(
+        async () => (await accessStatusOf(tab)).startsWith("That is not a domain"),
+        async () => `the invalid-domain copy was never rendered: ${await accessStatusOf(tab)}`,
+      );
+      /* This page's own literal, naming this page's own input. The server's
+         message for the same refusal reads differently, and the value named
+         here comes from the box rather than from the response. */
+      assert.equal(await accessStatusOf(tab), "That is not a domain we can use. nodots");
+      assert.equal(await tab.inputValue("[data-archon-access-input]"), "nodots");
+      assert.deepEqual(await domainsOf(tab), []);
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["a write without the token is refused and the list is unchanged", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.owned}`));
+      await waitForPanel(tab);
+
+      /* The owner's own session, the application's own origin, and no
+         `x-archon-csrf` -- the one thing the panel never omits. */
+      const refused = await tab.evaluate(async (id) => {
+        const response = await fetch(`/api/hosted/publications/${id}/access`, {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ v: 1, allowedDomains: ["forged.example"] }),
+        });
+        return { status: response.status, body: await response.json() };
+      }, ids.owned);
+      assert.equal(refused.status, 403, "a write with no token was not refused");
+      assert.equal(refused.body.error.code, "csrf_failed");
+
+      await tab.reload();
+      await waitForPanel(tab);
+      assert.deepEqual(await domainsOf(tab), [], "a refused write reached the stored list");
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["a reader admitted by domain gets no panel and cannot read or write the list", async (context) => {
+      await signIn(context, app.origin, tokens.stranger);
+      const tab = await context.newPage();
+      const evilBefore = evil.state.requests.length;
+      await tab.goto(page(`/docs/${ids.shared}`));
+      await waitFor(
+        async () => (await tab.getAttribute("html", "data-archon-state")) === "rendered",
+        async () => `a domain reader never reached the document: ${await statusOf(tab)}`,
+      );
+
+      /* No markup, not hidden markup. There is nothing here for a stylesheet
+         or a devtools toggle to reveal. */
+      assert.equal(await tab.locator("[data-archon-access]").count(), 0,
+        "a reader who is not the owner received panel markup");
+      assert.equal((await refusalTextOf(tab)).includes("Who can read"), false);
+
+      /* And the server is the half that decides: this reader's real session,
+         this page's real origin, and the token the session route really issued. */
+      const forged = await tab.evaluate(async (id) => {
+        const session = await (await fetch("/api/hosted/session", {
+          credentials: "same-origin",
+          headers: { accept: "application/json" },
+        })).json();
+        const write = await fetch(`/api/hosted/publications/${id}/access`, {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-archon-csrf": session.csrfToken },
+          body: JSON.stringify({ v: 1, allowedDomains: ["attacker.example"] }),
+        });
+        const read = await fetch(`/api/hosted/publications/${id}/access`, {
+          credentials: "same-origin",
+          headers: { accept: "application/json" },
+        });
+        return { write: write.status, code: (await write.json()).error.code, read: read.status };
+      }, ids.shared);
+      assert.equal(forged.write, 404, "a non-owner's write was not refused");
+      assert.equal(forged.code, "not_found",
+        "a non-owner's refusal named something other than absence");
+      assert.equal(forged.read, 404,
+        "a reader admitted by a domain could enumerate the document's domain list");
+      assert.equal(evil.state.requests.length, evilBefore,
+        "the panel put a request at the adversary origin");
+      await tab.close();
+    }],
+
+    ["an unverified reader at a listed domain is told to verify, and nothing else", async (context) => {
+      await signIn(context, app.origin, tokens.unverified);
+      const tab = await context.newPage();
+      await tab.goto(page(`/docs/${ids.shared}`));
+      const text = await refusalTextOf(tab);
+      assert.match(text, /Verify your email/, "the unverified reader did not get the verify page");
+      assert.match(
+        text,
+        /Verify your email address with your sign-in provider, then open this link again\./,
+      );
+      assert.equal(await tab.locator("[data-archon-access]").count(), 0);
+      /* The page names the reader's next step and nothing about the document:
+         not its title, not its id, not its owner. */
+      assert.equal(text.includes(ids.shared), false, "the verify page names the document id");
+      for (const marker of markers) {
+        assert.equal(text.includes(marker), false, `the verify page carries ${marker.slice(0, 24)}`);
+      }
+      await tab.close();
+    }],
+
+    ["a reader at an unlisted domain gets the non-disclosing page", async (context) => {
+      await signIn(context, app.origin, tokens.stranger);
+      const tab = await context.newPage();
+      await tab.goto(page(`/docs/${ids.owned}`));
+      const text = await refusalTextOf(tab);
+      assert.match(text, /There is no document at this address, or it is not yours to read\./);
+      assert.equal(text.includes("Verify your email"), false,
+        "an unlisted reader was told the document exists");
+      assert.equal(await tab.locator("[data-archon-access]").count(), 0);
+      assert.equal(text.includes(ids.owned), false, "the refusal page names the document id");
+      for (const marker of markers) {
+        assert.equal(text.includes(marker), false, `the refusal page carries ${marker.slice(0, 24)}`);
+      }
+      await tab.close();
+    }],
+
+    ["a panel whose read failed claims nothing and cannot replace the list", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      /* The first read is aborted in the browser, which is what a `fetch` that
+         cannot reach the network does: it rejects rather than answering. Every
+         later request is let through, so the retry is a real one. */
+      let aborted = false;
+      await tab.route("**/api/hosted/publications/*/access", async (route) => {
+        if (!aborted && route.request().method() === "GET") {
+          aborted = true;
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      });
+      await tab.goto(page(`/docs/${ids.shared}`));
+      await waitFor(
+        async () => (await accessStatusOf(tab)) === "The reading list could not be loaded.",
+        async () => `the failed read was never reported: ${await accessStatusOf(tab)}`,
+      );
+
+      /* Not disabled forever, and not claiming a policy it never read. */
+      assert.equal(await tab.locator("[data-archon-access-retry]").isVisible(), true,
+        "a failed read left no way to try again");
+      assert.equal(await tab.locator("[data-archon-access-empty]").isVisible(), false,
+        "a failed read asserted that nobody but the owner can read the document");
+      assert.deepEqual(await domainsOf(tab), []);
+
+      /* And an add cannot go out: the `PUT` replaces the whole list, so writing
+         one entry over a list this page never read would drop the rest. */
+      const writesBefore = app.state.requests.filter((entry) => entry.method === "PUT").length;
+      await tab.fill("[data-archon-access-input]", "partner.example");
+      await tab.click("[data-archon-access-add]");
+      await waitFor(
+        async () => (await accessStatusOf(tab)) === "The reading list could not be loaded.",
+        "the refused add said something else",
+      );
+      assert.equal(
+        app.state.requests.filter((entry) => entry.method === "PUT").length,
+        writesBefore,
+        "an add replaced a list the panel had never read",
+      );
+
+      /* The retry is a real read, and it finds the stored list. */
+      await tab.click("[data-archon-access-retry]");
+      await waitFor(
+        async () => (await domainsOf(tab)).length === 1,
+        async () => `the retry never loaded the list: ${await accessStatusOf(tab)}`,
+      );
+      assert.deepEqual(await domainsOf(tab), ["example.com"]);
+      await tab.close();
+    }],
+
+    ["every panel control is named and reachable from the keyboard", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      await tab.goto(page(`/docs/${ids.shared}`));
+      await waitForPanel(tab);
+      assert.deepEqual(await domainsOf(tab), ["example.com"],
+        "the owner's own view of the shared document lists its domain");
+
+      const named = await tab.evaluate(() => {
+        const section = document.querySelector("[data-archon-access]");
+        const input = document.querySelector("[data-archon-access-input]");
+        const label = document.querySelector('label[for="archon-access-domain"]');
+        const remove = document.querySelector("[data-archon-access-remove]");
+        const add = document.querySelector("[data-archon-access-add]");
+        return {
+          heading: document.getElementById("archon-access-title").textContent,
+          labelledBy: section.getAttribute("aria-labelledby"),
+          labelFor: label === null ? null : label.getAttribute("for"),
+          labelText: label === null ? null : label.textContent,
+          inputId: input.id,
+          ariaLabel: input.getAttribute("aria-label"),
+          removeName: remove.textContent,
+          addName: add.textContent,
+          attributes: [...section.querySelectorAll("*")]
+            .flatMap((node) => [...node.attributes].map((a) => `${a.name}=${a.value}`))
+            .join("\n"),
+        };
+      });
+      assert.equal(named.heading, "Who can read");
+      assert.equal(named.labelledBy, "archon-access-title");
+      assert.equal(named.labelFor, named.inputId, "the input is not labelled by its label");
+      assert.equal(named.labelText, "Email domain");
+      assert.equal(named.ariaLabel, null, "the name is text in the document, not an attribute");
+      assert.equal(named.addName, "Add domain");
+      /* One name per row, and the visible word is the same on every one: the
+         domain is in the accessible name as visually hidden text. */
+      assert.equal(named.removeName, "Remove example.com");
+      assert.equal(named.attributes.includes("example.com"), false,
+        "a listed domain reached an attribute, an id or a selector");
+
+      /* Tab from the top of the document reaches all three. The header's own
+         controls come first, so the budget covers them too. */
+      await tab.evaluate(() => document.body.focus());
+      const reached = new Set();
+      for (let step = 0; step < 12 && reached.size < 3; step += 1) {
+        await tab.keyboard.press("Tab");
+        const mark = await tab.evaluate(() => {
+          const node = document.activeElement;
+          if (node === null) return null;
+          for (const name of [
+            "data-archon-access-remove", "data-archon-access-input", "data-archon-access-add",
+          ]) {
+            if (node.hasAttribute(name)) return name;
+          }
+          return null;
+        });
+        if (mark !== null) reached.add(mark);
+      }
+      assert.deepEqual([...reached].sort(), [
+        "data-archon-access-add", "data-archon-access-input", "data-archon-access-remove",
+      ], "a panel control is not reachable from the keyboard");
+      await tab.close();
+    }],
+
   ];
 }
 
@@ -1502,6 +1898,37 @@ function browserCases({ app, renderer, evil, ids, tokens, records }) {
  * @param {string} name
  * @returns {string}
  */
+/**
+ * Lift one named `const` declaration's source out of `viewer.js`.
+ *
+ * The same reasoning as `liftFunction`, for the values those functions close
+ * over. Lifting the declaration rather than restating the value is the whole
+ * point: a table of copy restated here would agree with itself forever while
+ * the page said something else.
+ *
+ * @param {string} source
+ * @param {string} name
+ * @returns {string}
+ */
+function liftDeclaration(source, name) {
+  const signature = `const ${name} = `;
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `viewer.js no longer declares \`${name}\``);
+  assert.equal(
+    source.indexOf(signature, start + 1),
+    -1,
+    `viewer.js declares \`${name}\` more than once`,
+  );
+  let depth = 0;
+  for (let index = start + signature.length; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "{" || character === "[") depth += 1;
+    else if (character === "}" || character === "]") depth -= 1;
+    else if (character === ";" && depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`viewer.js's \`${name}\` declaration has no readable end`);
+}
+
 function liftFunction(source, name) {
   const signature = `function ${name}(`;
   const start = source.indexOf(signature);
@@ -1697,6 +2124,108 @@ async function assertViewerGuards() {
   );
   cases += 1;
 
+  /* ------------------------------------------------------------------ *
+   * ACN-009 — what the owner's panel will and will not say.
+   *
+   * These are pure-function tables rather than browser cases because the rows
+   * that matter most are the ones a browser cannot easily produce: a `403`
+   * whose body names a token, an envelope carrying a code this page has never
+   * heard of. The panel's rule is that a refusal renders a literal from its own
+   * table *except* for the two codes whose message carries a value only the
+   * server knows, and the only way to state that as a test is to hand the
+   * function every code and read what comes out.
+   * ------------------------------------------------------------------ */
+  const accessBuild = new Function([
+    liftDeclaration(source, "ACCESS"),
+    liftDeclaration(source, "ACCESS_MESSAGE_MAX"),
+    liftDeclaration(source, "ACCESS_DOMAIN"),
+    liftDeclaration(source, "ACCESS_UNSAFE"),
+    liftFunction(source, "boundedAccessMessage"),
+    liftFunction(source, "accessRefusal"),
+    liftFunction(source, "validAccessBody"),
+    "return { ACCESS, accessRefusal, validAccessBody, boundedAccessMessage };",
+  ].join("\n"));
+  const access = accessBuild();
+
+  /* The empty-list copy is a contract string, not a phrasing choice: an empty
+     box would read as a policy nobody has set. */
+  assert.equal(access.ACCESS.empty, "Only you and people you invite can read this");
+  cases += 1;
+
+  const mailbox = "gmail.com is a public mailbox provider, so listing it would admit anyone.";
+  const limit = "allowedDomains may name at most 20 domains";
+  const generic = "That change could not be saved.";
+  for (const [label, result, entered, expected] of [
+    ["a public mailbox domain", { code: "public_mailbox_domain", message: mailbox }, "gmail.com", mailbox],
+    ["too many domains", { code: "too_many_domains", message: limit }, "x.example", limit],
+    ["an invalid domain", { code: "invalid_domain", message: "nodots is not a domain" }, "nodots",
+      "That is not a domain we can use. nodots"],
+    ["an invalid domain with no local value", { code: "invalid_domain", message: "x" }, null,
+      "That is not a domain we can use."],
+    ["a refused token", { code: "csrf_failed", message: "csrf token did not match" }, "x.example", generic],
+    ["an unknown document", { code: "not_found", message: "publication not found" }, "x.example", generic],
+    ["a code this page has never heard of", { code: "something_new", message: "anything at all" }, "x.example", generic],
+    ["no code at all", { code: null, message: "" }, "x.example", generic],
+    ["a mailbox refusal whose message is blank", { code: "public_mailbox_domain", message: "   " }, "x", generic],
+    ["a mailbox refusal whose message is not a string", { code: "too_many_domains", message: 7 }, "x", generic],
+  ]) {
+    assert.equal(
+      access.accessRefusal(result, entered),
+      expected,
+      `the panel says the wrong thing about ${label}`,
+    );
+    cases += 1;
+  }
+
+  /* The three codes whose refusal the panel is allowed to name are codes the
+     server really has. A rename on either side is a message that stops
+     appearing, silently. */
+  for (const code of ["public_mailbox_domain", "too_many_domains", "invalid_domain", "csrf_failed"]) {
+    assert.ok(
+      Object.hasOwn(contracts.ERROR_CODES, code),
+      `viewer.js branches on \`${code}\`, which the C3 table no longer declares`,
+    );
+    cases += 1;
+  }
+
+  /* A long or control-bearing message is bounded before it is rendered, so the
+     two server strings this page does show cannot become a wall of text or a
+     line break on a trusted page. */
+  assert.equal(access.boundedAccessMessage("a".repeat(400)).length, 200);
+  assert.equal(access.boundedAccessMessage("one\ntwo"), "one two");
+  assert.equal(access.boundedAccessMessage(""), null);
+  assert.equal(access.boundedAccessMessage(null), null);
+  cases += 4;
+
+  const answer = (extra = {}) => ({
+    v: 1,
+    publicationId: "9f1c2a4b6d8e0f1234567890abcdef12",
+    allowedDomains: ["example.com"],
+    allowPublicMailboxes: false,
+    ...extra,
+  });
+  for (const [label, body, accepted] of [
+    ["the frozen answer", answer(), true],
+    ["an empty list", answer({ allowedDomains: [] }), true],
+    ["another version", answer({ v: 2 }), false],
+    ["another document", answer({ publicationId: "0".repeat(32) }), false],
+    ["a list that is not a list", answer({ allowedDomains: "example.com" }), false],
+    ["a list over the stored limit", answer({ allowedDomains: Array.from({ length: 21 }, (_, i) => `d${i}.example`) }), false],
+    ["an entry that is not lowercase", answer({ allowedDomains: ["Example.com"] }), false],
+    ["an entry with no dot", answer({ allowedDomains: ["example"] }), false],
+    ["an entry carrying markup", answer({ allowedDomains: ["<img src=x onerror=alert(1)>"] }), false],
+    ["an entry that is not a string", answer({ allowedDomains: [7] }), false],
+    ["an array instead of a record", ["example.com"], false],
+    ["null", null, false],
+  ]) {
+    assert.equal(
+      access.validAccessBody(body, "9f1c2a4b6d8e0f1234567890abcdef12"),
+      accepted,
+      `the panel ${accepted ? "refused" : "accepted"} ${label}`,
+    );
+    cases += 1;
+  }
+
   const documents = await import(pathToFileURL(join(ROOT, "netlify/lib/hosted/documents.mjs")).href);
   assert.match(
     documents.viewerShell(origin),
@@ -1704,6 +2233,32 @@ async function assertViewerGuards() {
     "the viewer shell no longer declares a no-referrer policy",
   );
   cases += 1;
+
+  /* ACN-009's two refusal pages, as copy rather than as a route answer. The
+     route suite proves *which* page each reader gets; what is proved here is
+     that each page still says the sentence the operator signed off, carries
+     `noindex`, and holds no script -- the three properties a rewording would
+     take away without failing a status-code assertion anywhere. */
+  for (const [label, html, needles] of [
+    ["the verify-your-email page", documents.EMAIL_UNVERIFIED_PAGE, [
+      "<title>Email not verified — Archon</title>",
+      "<h1>Verify your email</h1>",
+      "Verify your email address with your sign-in provider, then open this link again.",
+      '<meta name="robots" content="noindex, nofollow" />',
+    ]],
+    ["the non-disclosing refusal page", documents.NOT_FOUND_PAGE, [
+      "<h1>Not found</h1>",
+      "There is no document at this address, or it is not yours to read.",
+      '<meta name="robots" content="noindex, nofollow" />',
+    ]],
+  ]) {
+    for (const needle of needles) {
+      assert.ok(html.includes(needle), `${label} no longer carries: ${needle}`);
+      cases += 1;
+    }
+    assert.equal(/<script/i.test(html), false, `${label} grew a script`);
+    cases += 1;
+  }
 
   process.stdout.write(`INFO  viewer guards: ${cases} assertions with no browser\n`);
   return cases;
@@ -1730,6 +2285,7 @@ async function worker() {
   const { createDocumentReadRoutes } = await load("netlify/functions/hosted-document-read.mjs");
   const { createSessionRoute } = await load("netlify/functions/hosted-session.mjs");
   const { createLogoutRoute } = await load("netlify/functions/hosted-auth-logout.mjs");
+  const { createAccessRoute } = await load("netlify/functions/hosted-publications-access.mjs");
   const { withErrorBoundary } = await load("netlify/lib/hosted/http.mjs");
   const { SESSION_COOKIE_MAX_AGE, serializeCookie } = await load("netlify/lib/hosted/identity.mjs");
   const { readHostedConfig } = await load("netlify/lib/hosted/config.mjs");
@@ -1754,6 +2310,11 @@ async function worker() {
     pending: idFor("pending"),
     approved: idFor("approved"),
     expired: idFor("expired"),
+    /* ACN-009: a complete document the *second* principal reaches as a reader,
+       through the owner's domain list rather than through a grant. Without it
+       "a reader who is not the owner sees no panel" would only ever be tested
+       against a reader who cannot see the page at all. */
+    shared: idFor("shared"),
   };
 
   const html = artifactHtml({ appOrigin: app.origin, evilOrigin: evil.origin });
@@ -1773,6 +2334,14 @@ async function worker() {
         '<script>window.top.__titleRan=true</script><img src=x onerror="window.top.__titleRan=true">',
       ),
       id: ids.hostileTitle,
+    },
+    shared: {
+      ...completeRecordFor(base, html, "Shared by domain"),
+      id: ids.shared,
+      /* `FIXTURE_OTHER_PRINCIPAL` carries a verified address at this domain, so
+         ACN-007's evaluator admits it as a `viewer` and refuses it everything
+         else -- which is the reader this ticket's panel must not appear for. */
+      allowedDomains: ["example.com"],
     },
   };
 
@@ -1814,6 +2383,13 @@ async function worker() {
   handlers.read = withErrorBoundary(createDocumentReadRoutes({ store: auth.store, publications }));
   handlers.session = withErrorBoundary(createSessionRoute(deps));
   handlers.logout = withErrorBoundary(createLogoutRoute(deps));
+  /* ACN-009: the owner's domain-list route, over the same store, configuration
+     and publication dependencies. `allowPublicMailboxes` is left at its default
+     `false`, so the denylist this matrix drives an owner into is the one a
+     deployment gets without an operator override. */
+  handlers.access = withErrorBoundary(
+    createAccessRoute(() => ({ config: hostedConfig, store: auth.store, publications })),
+  );
   handlers.serializeCookie = (token) =>
     serializeCookie("__Host-archon_session", token, { maxAgeSeconds: SESSION_COOKIE_MAX_AGE });
 
@@ -1821,12 +2397,19 @@ async function worker() {
     owner: (await auth.store.createSession(publicationFixtures.FIXTURE_PRINCIPAL)).token,
     stranger: (await auth.store.createSession(publicationFixtures.OTHER_PRINCIPAL)).token,
     signOut: (await auth.store.createSession(publicationFixtures.FIXTURE_PRINCIPAL)).token,
+    /* The same second identity with the address unverified: the one reader who
+       gets a page that says something about the document. */
+    unverified: (await auth.store.createSession({
+      ...publicationFixtures.OTHER_PRINCIPAL,
+      emailVerified: false,
+    })).token,
   };
 
   /* Every string a denial must never carry, drawn from the records themselves so
      a fixture change cannot leave the list stale. */
   const markers = [
     records.owned.descriptor.title,
+    records.shared.descriptor.title,
     records.owned.descriptor.contentSha256,
     records.bom.descriptor.contentSha256,
     base.agentSecretHash,
@@ -1871,7 +2454,7 @@ async function worker() {
     const playwright = loaded.chromium !== undefined ? loaded : loaded.default;
     browser = await playwright[ENGINE].launch();
 
-    for (const [label, run] of browserCases({ app, renderer, evil, ids, tokens, records })) {
+    for (const [label, run] of browserCases({ app, renderer, evil, ids, tokens, records, markers })) {
       const context = await browser.newContext();
       if (process.env.AHU009_TRACE === "1") {
         context.on("page", (p) => {

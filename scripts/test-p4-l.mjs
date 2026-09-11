@@ -445,6 +445,13 @@ function probe(page) {
       rowControls: collect("#doc-share-panel .share-row-controls").length,
       hasInvite: panel !== null && panel.querySelector(".share-invite") !== null,
       hasDefaultControl: panel !== null && panel.querySelector(".share-default-control") !== null,
+      hasDomainSection: panel !== null && panel.querySelector(".share-domains") !== null,
+      domains: collect("#doc-share-panel .share-domains li").map((li) => li.textContent),
+      domainButtons: collect("#doc-share-panel .share-domains button").map((node) => node.textContent),
+      domainEntry: (() => {
+        const node = document.querySelector("#doc-share-panel .share-domain-input");
+        return node === null ? null : node.value;
+      })(),
       confirmations: collect("#doc-share-panel .share-transfer-confirm").length,
       confirmText: (() => {
         const node = document.querySelector("#doc-share-panel .share-transfer-confirm p");
@@ -623,6 +630,12 @@ async function p3iMatrix() {
       assert.equal(rendered.rowControls, 0);
       assert.equal(rendered.hasInvite, false);
       assert.equal(rendered.hasDefaultControl, false);
+      /* No section in the DOM, not a disabled one: an editor has nothing a
+         devtools toggle could re-enable, and the server refuses their write
+         regardless. */
+      assert.equal(rendered.hasDomainSection, false);
+      assert.deepEqual(rendered.domains, []);
+      assert.equal(rendered.domainEntry, null);
 
       await click(page, "#doc-share-button");
       assert.equal((await probe(page)).hidden, true);
@@ -759,15 +772,19 @@ async function p4lMatrix() {
       const state = await probe(page);
       assert.equal(state.hasInvite, true);
       /* ACN-008 removed the organisation-default tier and, with it, the select
-         that wrote it. The domain list that replaced it is reported to the owner
-         in the same read-only line everybody else sees; ACN-009 owns the editor
-         for it. A control posting the retired body would fail on every click. */
+         that wrote it; the control that posted the retired body must not come
+         back. ACN-009's editor writes the domain list instead, and the
+         read-only line everybody who can see the roster gets stays beside it. */
       assert.equal(state.hasDefaultControl, false);
+      assert.equal(state.hasDomainSection, true, "an owner gets ACN-009's domain editor");
+      assert.deepEqual(state.domains, ["listed.exampleRemove listed.example"],
+        "the domain row names its entry and its own remove control");
       assert.equal(state.rowControls, 3, "two grants and one invitation carry controls");
       assert.equal(state.defaultText,
         "Anyone with a verified address at listed.example can read this document.",
         "the owner reads the same domain-policy line as everybody else");
-      assert.equal(state.ops, 15, "invite, two grants and one invitation carry 15 controls");
+      assert.equal(state.ops, 18,
+        "invite, two grants, one invitation and ACN-009's domain field carry 18 controls");
       assert.equal(state.disabled, 3, "every Save button starts disabled");
       const shape = await page.evaluate(([memberRow, invitationRow]) => {
         const owner = document.querySelector("#doc-share-panel .share-members li:nth-of-type(1)");
@@ -995,7 +1012,7 @@ async function p4lMatrix() {
 
     /* A write-time 403 is the same reconciliation, and a fresh owner session
        is the only thing that may restore owner controls. */
-    for (const [refreshed, ops] of [[session("editor"), 0], [session("owner"), 15]]) {
+    for (const [refreshed, ops] of [[session("editor"), 0], [session("owner"), 18]]) {
       await ownerPanel(browser, origin, source, [status(403), json200(refreshed), json200(roster())], async (page) => {
         await click(page, `${MEMBER_ROW} .share-revoke`);
         await waitStatus(page, "Your access changed.");
@@ -1057,7 +1074,7 @@ async function p4lMatrix() {
         const record = await calls(page);
         assert.equal(record.length, 3, `status ${code} must refresh exactly once`);
         assert.equal(record.filter((call) => call.url.includes("/api/session")).length, 0);
-        assert.equal((await probe(page)).ops, 15, "a non-transfer failure keeps owner controls");
+        assert.equal((await probe(page)).ops, 18, "a non-transfer failure keeps owner controls");
       });
     }
 
@@ -1178,10 +1195,198 @@ async function p4lMatrix() {
       assert.equal((await probe(page)).rowControls, 50);
     });
 
+    /* ------------------------------------------------------------------ *
+     * ACN-009 — the domain editor.
+     *
+     * The list is the document's access policy, so every case here is about
+     * one of three things: that the panel sends the whole list rather than an
+     * edit, that it renders only what the following roster read reports, and
+     * that a refusal tells the owner which of ACN-007's three answers they hit
+     * without any string the server chose reaching the screen.
+     * ------------------------------------------------------------------ */
+
+    const refusal = (body) => ({ status: 400, contentType: "application/json", json: body });
+    /* The value goes straight onto the control, like `setInvite`, so the
+       client's own trim and fold are what the request carries rather than
+       whatever a DOM `maxlength` would have allowed. */
+    const setDomain = (page, value) => page.evaluate((text) => {
+      const input = document.querySelector("#doc-share-panel .share-domain-input");
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+
+    /* Adding: one PATCH carrying the whole list, one refresh, and what the
+       panel then shows is the refresh's list rather than the one it sent. The
+       `200` is poisoned, which is how "the success body is never read" is
+       proved rather than asserted -- reading it would throw. */
+    await ownerPanel(browser, origin, source, [
+      { status: 200, poison: true },
+      json200(roster({ allowedDomains: ["listed.example", "partner.example"] })),
+    ], async (page) => {
+      await setDomain(page, "  Partner.Example  ");
+      await click(page, "#doc-share-panel .share-domain-submit");
+      await waitCalls(page, 3);
+      await waitStatus(page, "Access updated.");
+      const record = await calls(page);
+      assert.equal(record.length, 3, "an add sends one write and exactly one refresh");
+      assertWriteTransport(record[1], origin, "PATCH", "/api/access",
+        { doc: DOC, allowedDomains: ["listed.example", "partner.example"] });
+      assertReadTransport(record[2], origin);
+      const state = await probe(page);
+      assert.equal(state.bodyReads, 0, "an accepted domain write reads no response body");
+      assert.deepEqual(state.domains, [
+        "listed.exampleRemove listed.example",
+        "partner.exampleRemove partner.example",
+      ], "the panel lists what the refresh reported");
+      assert.equal(state.domainEntry, "", "an accepted domain clears the box");
+      assert.equal(state.defaultText,
+        "Anyone with a verified address at listed.example, partner.example can read this document.",
+        "the read-only line follows the stored list");
+    });
+
+    /* Removing the only domain leaves the explicit empty-list copy, not an
+       empty box. */
+    await ownerPanel(browser, origin, source, [
+      { status: 200, poison: true },
+      json200(roster({ allowedDomains: [] })),
+    ], async (page) => {
+      await click(page, "#doc-share-panel .share-remove-domain");
+      await waitCalls(page, 3);
+      await waitStatus(page, "Access updated.");
+      const record = await calls(page);
+      assert.equal(record.length, 3, "a removal sends one write and exactly one refresh");
+      assertWriteTransport(record[1], origin, "PATCH", "/api/access",
+        { doc: DOC, allowedDomains: [] });
+      const state = await probe(page);
+      assert.equal(state.bodyReads, 0);
+      assert.deepEqual(state.domains, [], "removing the only domain empties the list");
+      assert.equal(state.defaultText, "Only the people listed below can read this document.");
+      assert.equal(state.hasDomainSection, true, "the section stays, with nothing in its list");
+    });
+
+    /* The three named refusals, one unnamed code and a body with no code at
+       all. In every case the value stays in the box so the owner can correct
+       it rather than retype it, and the list on screen stays the stored one. */
+    for (const [label, body, expected, typed] of [
+      ["public mailbox", { error: "public_mailbox_domain", domain: "gmail.com" },
+        "That domain is a public mailbox provider, so listing it would admit anyone.",
+        "gmail.com"],
+      ["invalid", { error: "invalid_domain", domain: "notadomain" },
+        "That is not a domain we can use.", "notadomain"],
+      ["too many", { error: "too_many_domains" },
+        "That is more domains than a document can list.", "partner.example"],
+      ["unknown code", { error: "some-other-code" },
+        "Access change was not accepted.", "partner.example"],
+      ["no code", { ok: false },
+        "Access change was not accepted.", "partner.example"],
+      ["not JSON", { status: 400, contentType: "text/plain", text: "public_mailbox_domain" },
+        "Access change was not accepted.", "partner.example"],
+    ]) {
+      const response = label === "not JSON" ? body : refusal(body);
+      await ownerPanel(browser, origin, source, [response, json200(roster())], async (page) => {
+        await setDomain(page, typed);
+        await click(page, "#doc-share-panel .share-domain-submit");
+        await waitCalls(page, 3);
+        await waitStatus(page, expected);
+        const state = await probe(page);
+        assert.equal(state.domainEntry, typed, `${label} leaves the value to correct`);
+        assert.deepEqual(state.domains, ["listed.exampleRemove listed.example"],
+          `${label} renders the stored list the refresh reported`);
+        assert.equal(state.defaultText,
+          "Anyone with a verified address at listed.example can read this document.");
+      });
+    }
+
+    /* A refused list is still refused when the panel is told nothing it can
+       use: a `403` is the write-time authority reconciliation every other
+       control gets, and it says so without naming a domain. */
+    await ownerPanel(browser, origin, source,
+      [status(403), json200(session("owner")), json200(roster())], async (page) => {
+        await setDomain(page, "partner.example");
+        await click(page, "#doc-share-panel .share-domain-submit");
+        await waitStatus(page, "Your access changed.");
+        const record = await calls(page);
+        assert.equal(record.length, 4, "a 403 write reconciles the session before it reads");
+        assert.equal(record[2].url, `${origin}/api/session?doc=${DOC}`);
+        assert.equal((await probe(page)).bodyReads, 0, "a 403 body is never read");
+      });
+
+    /* Two things this panel decides locally, because neither needs the server
+       to answer: an empty box, and a domain already on the list. */
+    await ownerPanel(browser, origin, source, [], async (page) => {
+      await click(page, "#doc-share-panel .share-domain-submit");
+      await waitStatus(page, "Enter a domain to add.");
+      assert.equal((await calls(page)).length, 1, "an empty box sends nothing");
+    });
+    await ownerPanel(browser, origin, source, [], async (page) => {
+      await setDomain(page, "LISTED.Example");
+      await click(page, "#doc-share-panel .share-domain-submit");
+      await page.waitForFunction(
+        () => document.querySelector("#doc-share-panel .share-domain-input").value === "",
+        undefined, { timeout: 10_000 },
+      );
+      assert.equal((await calls(page)).length, 1, "a domain already listed sends nothing");
+    });
+
+    /* The panel holds no copy of the public-mailbox list: a mailbox domain
+       reaches the server exactly like any other value, and the refusal is the
+       server's. A local denylist would be a second policy that goes stale. */
+    await ownerPanel(browser, origin, source, [
+      refusal({ error: "public_mailbox_domain", domain: "gmail.com" }),
+      json200(roster()),
+    ], async (page) => {
+      await setDomain(page, "gmail.com");
+      await click(page, "#doc-share-panel .share-domain-submit");
+      await waitCalls(page, 2);
+      const record = await calls(page);
+      assertWriteTransport(record[1], origin, "PATCH", "/api/access",
+        { doc: DOC, allowedDomains: ["listed.example", "gmail.com"] });
+    });
+
+    /* Named, reachable, and announced rather than only coloured. */
+    await ownerPanel(browser, origin, source, [], async (page) => {
+      const named = await page.evaluate(() => {
+        const input = document.querySelector("#doc-share-panel .share-domain-input");
+        const label = input.closest("label");
+        const remove = document.querySelector("#doc-share-panel .share-remove-domain");
+        const section = document.querySelector("#doc-share-panel .share-domains");
+        const live = document.querySelector("#doc-share-panel .share-status");
+        const controls = Array.from(section.querySelectorAll("button, input"));
+        return {
+          labelText: label === null ? null : label.textContent,
+          ariaLabel: input.getAttribute("aria-label"),
+          labelledBy: section.getAttribute("aria-labelledby"),
+          heading: document.getElementById("doc-share-domains-title").textContent,
+          removeName: remove.textContent,
+          removeType: remove.getAttribute("type"),
+          submitType: document.querySelector("#doc-share-panel .share-domain-submit")
+            .getAttribute("type"),
+          reachable: controls.every((node) => node.tabIndex >= 0 && node.disabled === false),
+          liveRole: live.getAttribute("role"),
+          liveMode: live.getAttribute("aria-live"),
+        };
+      });
+      assert.equal(named.labelText, "Domain", "the input is named by label text");
+      assert.equal(named.ariaLabel, null, "the name is text in the document, not an attribute");
+      assert.equal(named.labelledBy, "doc-share-domains-title");
+      assert.equal(named.heading, "Email domains");
+      assert.equal(named.removeName, "Remove listed.example",
+        "each remove control is named for the domain it removes");
+      assert.equal(named.removeType, "button");
+      assert.equal(named.submitType, "submit");
+      assert.equal(named.reachable, true, "every domain control is keyboard reachable");
+      /* The refusal copy lands in the panel's one live region, so a reader who
+         cannot see the colour is told the same sentence. */
+      assert.equal(named.liveRole, "status");
+      assert.equal(named.liveMode, "polite");
+    });
+
     /* The production stylesheet carries the states the controls depend on. */
     for (const needle of [
       ".share-op", ".share-op:focus-visible", ".share-op:disabled", ".share-op-label",
       ".share-invite", ".share-default", ".share-row-controls", ".share-transfer-confirm",
+      ".share-domains", ".share-domain-add", ".share-domain-controls",
+      ".share-visually-hidden",
       '.share-pop[aria-busy="true"]', "@media (forced-colors: active)",
       "@media (prefers-reduced-motion: reduce)", "@media print", "@media (max-width: 24rem)",
     ]) {

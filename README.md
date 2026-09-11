@@ -67,7 +67,13 @@ variable on a deployment now does nothing at all.
 
 ### Sharing a document
 
-An owner shares a document by inviting an email address at a role. That writes an invitation and sends
+An owner shares a document two ways, both from the **Access** panel behind the Share button. The
+**Email domains** section lists the domains that may read the document: add one and anybody signing in with
+a verified address at it can read, remove it and they cannot. It admits readers only, and it stores no
+record of who used it, so there is no person to remove afterwards — the domain is the grant. A public
+mailbox provider is refused with the reason, because listing one would admit anyone.
+
+The second way is per person. An owner shares a document by inviting an email address at a role. That writes an invitation and sends
 nothing: there is no account to provision and no password to set. The invited person signs in with that
 address and the invitation is matched and consumed at that moment — so tell them the document URL. The
 match requires an address the identity provider has **verified**; an unverified one matches nothing, and an
