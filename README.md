@@ -106,7 +106,7 @@ Read `.claude/skills/architecture-doc/SKILL.md` when you are writing a document 
 repository*. `skills/archon-doc/SKILL.md` is the portable one: it teaches the same writing rules
 plus the packaged workflow — `npm install`, the skeleton, `docbuild --hosted`, and publishing
 through `archon-publish` with a human approving in a browser — and it is the file the
-`@aiur-team/archon` tarball carries at `dist/skills/archon-doc/SKILL.md`. Both share one rule,
+`aiur-archon` tarball carries at `dist/skills/archon-doc/SKILL.md`. Both share one rule,
 and it is the one that matters:
 
 > **A document is an argument, not a summary.** If a reader can only take one sentence away, decide now

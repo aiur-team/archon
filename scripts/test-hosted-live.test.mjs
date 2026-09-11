@@ -59,9 +59,9 @@ function completeEnv(overrides = {}) {
     HOSTED_LIVE_ACCOUNTS: "pilot-owner,pilot-other",
     HOSTED_LIVE_DOMAIN_ADMITTED: "pilot.example.com",
     HOSTED_LIVE_DOMAIN_REFUSED: "outside.example.org",
-    HOSTED_LIVE_PACKAGE: "@aiur-team/archon@0.1.0",
+    HOSTED_LIVE_PACKAGE: "aiur-archon@0.1.0",
     HOSTED_LIVE_PACKAGE_INTEGRITY: `sha512-${"A".repeat(86)}==`,
-    HOSTED_LIVE_PACKAGE_SOURCE: "https://registry.npmjs.org/@aiur-team/archon/-/archon-0.1.0.tgz",
+    HOSTED_LIVE_PACKAGE_SOURCE: "https://registry.npmjs.org/aiur-archon/-/archon-0.1.0.tgz",
     HOSTED_LIVE_SOURCE_REVISION: revision,
     HOSTED_LIVE_APP_DEPLOY: "deploy-app-001",
     HOSTED_LIVE_BUDGET_APPROVAL: "pilot envelope accepted 2026-09-10",
@@ -349,8 +349,8 @@ test("a local tarball is not an externally installable release", () => {
 
 test("the release must be an exact version with a tarball integrity", () => {
   for (const overrides of [
-    { HOSTED_LIVE_PACKAGE: "@aiur-team/archon@latest" },
-    { HOSTED_LIVE_PACKAGE: "@aiur-team/archon@^0.1.0" },
+    { HOSTED_LIVE_PACKAGE: "aiur-archon@latest" },
+    { HOSTED_LIVE_PACKAGE: "aiur-archon@^0.1.0" },
     { HOSTED_LIVE_PACKAGE_INTEGRITY: "sha1-abcdef" },
     { HOSTED_LIVE_PACKAGE_INTEGRITY: `sha512-${"A".repeat(40)}` },
   ]) {

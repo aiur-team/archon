@@ -1,6 +1,6 @@
 ---
 name: archon-doc
-description: "Turn material a person hands you into an Archon document, build it into one self-contained HTML file, and — only when they ask — publish it to a hosted Archon service through a browser approval they perform themselves. Use when asked to write, restructure or update an architecture doc, design doc, feature analysis or technical brief with the @aiur-team/archon package, and when asked to share or publish one of those documents to a hosted link."
+description: "Turn material a person hands you into an Archon document, build it into one self-contained HTML file, and — only when they ask — publish it to a hosted Archon service through a browser approval they perform themselves. Use when asked to write, restructure or update an architecture doc, design doc, feature analysis or technical brief with the aiur-archon package, and when asked to share or publish one of those documents to a hosted link."
 ---
 
 # Making and publishing an Archon document
@@ -11,7 +11,7 @@ Archon service, but only after **they** approve it in their own browser. You nev
 never decide on your own that something should be uploaded.
 
 This file is the whole instruction set. It is written for any agent that can run commands and read
-files. Everything below names real commands from the installed `@aiur-team/archon` package; run
+files. Everything below names real commands from the installed `aiur-archon` package; run
 `--help` on either command if you want the synopsis in its own words.
 
 ## What you can and cannot do here
@@ -39,7 +39,7 @@ publication that can never complete.
 ## 1. Install
 
 ```sh
-npm install @aiur-team/archon
+npm install aiur-archon
 ```
 
 Node 18 or later; the package has no runtime dependencies. That installs three commands — `archon`,
@@ -48,9 +48,9 @@ everything else this file refers to:
 
 | What | Installed path |
 | ---- | -------------- |
-| This file | `node_modules/@aiur-team/archon/dist/skills/archon-doc/SKILL.md` |
-| Document skeleton | `node_modules/@aiur-team/archon/dist/skeleton/` |
-| Base assets the builder inlines | `node_modules/@aiur-team/archon/dist/base/` |
+| This file | `node_modules/aiur-archon/dist/skills/archon-doc/SKILL.md` |
+| Document skeleton | `node_modules/aiur-archon/dist/skeleton/` |
+| Base assets the builder inlines | `node_modules/aiur-archon/dist/base/` |
 | Builder | `npx archon` (alias: `npx docbuild`) |
 | Publisher | `npx archon-publish` |
 
@@ -67,7 +67,7 @@ directory there makes this file load automatically:
 test -e .claude/skills/archon-doc \
   && echo ".claude/skills/archon-doc already exists; not overwriting" \
   || { mkdir -p .claude/skills \
-       && cp -R node_modules/@aiur-team/archon/dist/skills/archon-doc .claude/skills/archon-doc; }
+       && cp -R node_modules/aiur-archon/dist/skills/archon-doc .claude/skills/archon-doc; }
 ```
 
 The existence check is not decoration. If that directory is already there it is the person's, and
@@ -84,7 +84,7 @@ Copy the packaged skeleton into a directory named for the document:
 ```sh
 test -e my-doc \
   && echo "my-doc already exists; choose another name" \
-  || cp -R node_modules/@aiur-team/archon/dist/skeleton my-doc
+  || cp -R node_modules/aiur-archon/dist/skeleton my-doc
 ```
 
 The check is not decoration: `cp -R` into a directory that already exists nests the skeleton at

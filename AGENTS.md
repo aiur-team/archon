@@ -16,11 +16,11 @@ The complete instruction set is one file. Read all of it before you build anythi
 The builder is one published package. Run it with `npx`; there is nothing to clone:
 
 ```sh
-npx @aiur-team/archon --help
+npx aiur-archon --help
 ```
 
 That gives you `npx archon` (alias: `npx docbuild`) and `npx archon-publish`. Node 18 or later. No
-other dependency. Add it to a project with `npm install @aiur-team/archon` when you want the
+other dependency. Add it to a project with `npm install aiur-archon` when you want the
 packaged skeleton and skill on disk.
 
 Optional, for Claude Code: copy the packaged skill into the project so it loads automatically.
@@ -29,7 +29,7 @@ Optional, for Claude Code: copy the packaged skill into the project so it loads 
 test -e .claude/skills/archon-doc \
   && echo ".claude/skills/archon-doc already exists; not overwriting" \
   || { mkdir -p .claude/skills \
-       && cp -R node_modules/@aiur-team/archon/dist/skills/archon-doc .claude/skills/archon-doc; }
+       && cp -R node_modules/aiur-archon/dist/skills/archon-doc .claude/skills/archon-doc; }
 ```
 
 ## 3. The prompt you will be given
@@ -43,7 +43,7 @@ Your output is one built HTML file. A hosted link is a separate step and only ha
 
 ## 4. Build
 
-1. `cp -R node_modules/@aiur-team/archon/dist/skeleton my-doc`, then edit `my-doc/doc.json` (fresh six-hex `id`, unique `slug`, `title`).
+1. `cp -R node_modules/aiur-archon/dist/skeleton my-doc`, then edit `my-doc/doc.json` (fresh six-hex `id`, unique `slug`, `title`).
 2. Write `my-doc/sections/*.html` from the material. The skill says how.
 3. `npx archon my-doc` for the normal profile; `npx archon my-doc --hosted` for the profile you publish.
 4. Report the path the command prints. Open it in a browser and check it before you say it is done.
