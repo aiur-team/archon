@@ -23,15 +23,17 @@
   const accountText = document.getElementById("account-text");
   const csrf = document.getElementById("csrf");
 
-  /* The same four shapes the server allows, checked here too so a hostile link
+  /* The same five shapes the server allows, checked here too so a hostile link
      cannot even put a rejected value into the form: `/publish/authorize`, the
-     `/welcome` onboarding page, a `/docs/<32 hex>` document, and a single
-     collaboration slug that is not a reserved route name. The server validates
-     it again and is the authority; this is only about not submitting garbage. */
-  const RESERVED = new Set(["login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
+     `/welcome` onboarding page, `/admin`, a `/docs/<32 hex>` document, and a
+     single collaboration slug that is not a reserved route name. The server
+     validates it again and is the authority; this is only about not submitting
+     garbage. */
+  const RESERVED = new Set(["admin", "login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
   function destinationAllowed(value) {
     if (value === "/publish/authorize") return true;
     if (value === "/welcome") return true;
+    if (value === "/admin") return true;
     if (/^\/docs\/[0-9a-f]{32}$/.test(value)) return true;
     const slug = /^\/([a-z0-9-]{1,64})\/$/.exec(value);
     return slug !== null && !RESERVED.has(slug[1]);
@@ -44,6 +46,10 @@
     denied: "You cancelled the sign-in. You can try again.",
     expired: "That sign-in attempt expired or could not be verified. Please try again.",
     unavailable: "Archon could not reach the sign-in service just now. Please try again in a moment.",
+    not_allowed:
+      "This account is not allowed to use this deployment. Ask an administrator for an invite.",
+    verify_email:
+      "Confirm your email address with your identity provider, then sign in again.",
   };
 
   function say(message, tone) {

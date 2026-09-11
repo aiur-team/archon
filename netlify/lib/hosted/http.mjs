@@ -16,9 +16,12 @@
  * one of the two.
  */
 
+import { getStore } from "@netlify/blobs";
+
 import { HostedContractError } from "./contracts.mjs";
 import { readHostedConfig } from "./config.mjs";
 import { openAuthStore } from "./auth-store.mjs";
+import { createAllowlistStore } from "./allowlist.mjs";
 
 /** Applied to every response this tree emits. */
 export const SECURITY_HEADERS = Object.freeze({
@@ -86,7 +89,7 @@ export function methodNotAllowed(allow) {
 /**
  * Wrap a route in its production dependencies and its error boundary.
  *
- * `build` receives `{config, store}` and returns the actual handler. It is a
+ * `build` receives `{config, store, allowlist}` and returns the actual handler. It is a
  * factory rather than a module-level constant so that nothing is read from the
  * environment and no store is opened while the module is merely being *loaded* -
  * which is what `scripts/check-function-modules.mjs` does to every file in this
@@ -107,7 +110,16 @@ export function serve(build) {
        the provider with a partial credential. The refusal names nothing: the
        fault carries an environment variable name, and an operator's log is not
        an anonymous caller's business. */
-    const deps = { config: readHostedConfig(process.env), store: openAuthStore() };
+    const deps = {
+      config: readHostedConfig(process.env),
+      store: openAuthStore(),
+      /* The platform allowlist, for the one auth route that consults it. It is
+         assembled for every route rather than only the callback because
+         constructing it contacts nothing - the provider handle is opened on
+         first use - so a route that never reads it pays nothing for holding it,
+         and the alternative is a second `serve` with one extra dependency. */
+      allowlist: createAllowlistStore({ getStore }),
+    };
     return build(deps)(request);
   });
 }

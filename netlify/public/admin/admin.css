@@ -1,0 +1,132 @@
+/*
+ * The admin console's styling.
+ *
+ * Its own file rather than a `<style>` block, because the page's policy is
+ * `script-src 'self'; style-src 'self'` with no `'unsafe-inline'` on either -
+ * an inline block would simply not apply. Deliberately plain: this page is read
+ * by one operator and every minute spent on it is a minute not spent on the
+ * guards it renders.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0 auto;
+  max-width: 70rem;
+  padding: 2rem 1rem 4rem;
+}
+
+.chrome {
+  border-bottom: 1px solid currentColor;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+}
+
+.chrome h1 {
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+.chrome .who {
+  margin: 0.25rem 0 0;
+  opacity: 0.7;
+}
+
+.panel {
+  margin-bottom: 3rem;
+}
+
+.panel h2 {
+  font-size: 1.15rem;
+  margin-bottom: 0.25rem;
+}
+
+.hint {
+  margin-top: 0;
+  max-width: 46rem;
+  opacity: 0.75;
+}
+
+.add {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.add label {
+  display: block;
+  font-size: 0.85rem;
+  width: 100%;
+}
+
+.add input {
+  flex: 1 1 22rem;
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+}
+
+.status[data-tone="error"] {
+  color: #b3261e;
+  font-weight: 600;
+}
+
+.status[data-tone="warn"] {
+  font-weight: 600;
+}
+
+.status[data-tone="pending"] {
+  opacity: 0.7;
+}
+
+.entries {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.entries li {
+  align-items: baseline;
+  border-top: 1px solid rgb(127 127 127 / 35%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.entry-value {
+  font-family: ui-monospace, monospace;
+}
+
+.entry-kind,
+.entry-seeded,
+.entry-added {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.documents {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.documents th,
+.documents td {
+  border-bottom: 1px solid rgb(127 127 127 / 35%);
+  padding: 0.5rem 0.75rem 0.5rem 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.documents td[data-tone="error"] {
+  color: #b3261e;
+}

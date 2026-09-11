@@ -40,8 +40,11 @@ export const RENDER_PREFIX = "/_render/";
 
 /**
  * The application-host paths that pass through with no session check: the API,
- * the built assets, the sign-in and invitation pages, the hosted viewer and the
- * publish flow. `excludedPath` used to carve these out of the gate in TOML; the
+ * the built assets, the admin console, the sign-in and invitation pages, the
+ * hosted viewer and the publish flow. Each one is served by a function that
+ * makes its own authorisation decision - `/admin` answers a signed-out visitor
+ * with a redirect to sign in and a signed-in non-admin with a 403, which is a
+ * decision only the route holding `ARCHON_ADMINS` can make. `excludedPath` used to carve these out of the gate in TOML; the
  * gate runs on every path now, so it names them itself. A path here that a
  * function serves keeps the function's own headers; a static one gains the
  * application header set.
@@ -49,6 +52,7 @@ export const RENDER_PREFIX = "/_render/";
 const APP_PASS_THROUGH_PREFIXES = Object.freeze([
   "/api/",
   "/_assets/",
+  "/admin/",
   "/login/",
   "/docs/",
   "/publish/",
@@ -56,37 +60,90 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
 ]);
 
 /**
- * The onboarding page's path, and the tree it is served from.
+ * The pass-through paths that are a whole path rather than a prefix.
  *
- * `netlify/lib/hosted/contracts.mjs` names the same `/welcome` as
- * `HOSTED_LIMITS.WELCOME_PATH`; it is restated here rather than imported
- * because that module reaches a blob store and this one runs on Deno at the
- * edge with Web globals only. A wrong copy fails in the safe direction: the
- * page is gated rather than exposed.
+ * `/admin` is the admin console's own address and has no trailing slash, so it
+ * cannot be spelled in the list above: every entry there is tested with
+ * `startsWith`, and a bare `"/admin"` would also match `/adminfoo/` and
+ * `/admin-x/` - both of which are legal collaboration slugs, since the grammar
+ * is `[a-z0-9-]{1,64}`. That would have passed somebody else's document straight
+ * through the session gate to whoever asked for it.
+ *
+ * So the exact page is matched by equality and its asset tree by the `/admin/`
+ * prefix above, and nothing between the two is reachable.
  */
-const WELCOME_PATH = "/welcome";
-const WELCOME_PREFIX = "/welcome/";
+const APP_PASS_THROUGH_PATHS = Object.freeze(["/admin"]);
 
 /**
- * Whether a path is one of the public landing pages: the splash at the bare
- * root, and the onboarding page a fresh sign-in lands on.
+ * The landing page's own subresources, readable with no session at all.
  *
- * Both are public marketing documents holding no session and no user data, and
- * both take `landingPageHeaders` rather than the stricter first-party page set,
- * because both pull the same web fonts and run the same inline copy button.
+ * #229 made the splash at `/` public; it did not make what the page *loads*
+ * public with it, and every one of those is a deeper path that still reaches the
+ * session gate. The visible symptom is a landing page whose logo and favicons
+ * each answer a sign-in redirect to an anonymous visitor - the page is public and
+ * looks broken.
+ *
+ * So this is deliberately *only* the subresources. `/` is not here and must not
+ * be: `isLandingPage` below owns the landing pages themselves and gives them the
+ * landing-page policy, and a second opinion about the root would be two answers
+ * to one question.
+ *
+ * Exact strings, plus one prefix for the image tree. A prefix of `/` would make
+ * the whole application host anonymous, which is why the root is not expressible
+ * here at all. Nothing that reads a document, a session or a store is reachable
+ * through this set.
+ */
+const APP_PUBLIC_PATHS = Object.freeze([
+  "/favicon.ico",
+  "/favicon-16x16.png",
+  "/favicon-32x32.png",
+  "/apple-touch-icon.png",
+]);
+
+/** The one public tree: the homepage's images, which land at `_site/assets/`. */
+const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
+
+/**
+ * The public landing pages: the splash at the bare root (`site/index.html`) and
+ * the onboarding page at `/welcome` (`netlify/public/welcome/index.html`), which
+ * is where a sign-in with no pending publication lands.
+ *
+ * They are their own set rather than entries in the pass-through lists above
+ * because the two sets answer different questions. A pass-through is served with
+ * no session check and gains whichever header set its content type earns; a
+ * landing page is served with no session check *and* takes
+ * `landingPageHeaders`, which is the only set that admits the inline copy button
+ * and the two Google Font origins both pages need. Under the first-party page
+ * set the onboarding page would render unstyled with a dead copy button.
  *
  * The root is matched exactly and only, so no other path is made public by it.
- * The onboarding page is matched exactly *and* as a prefix of its own directory,
- * so `/welcome`, `/welcome/` and `/welcome/index.html` are one page rather than
- * three differently-gated spellings — and `/welcomer/` is not any of them.
+ * `/welcome` is matched exactly and its own directory by prefix, so `/welcome`,
+ * `/welcome/` and `/welcome/index.html` are one page rather than three
+ * differently-gated spellings. The prefix carries its trailing slash for the
+ * same reason `/admin` above is an exact path: a bare `"/welcome"` prefix would
+ * also match `/welcomer/` and `/welcome-x/`, both legal collaboration slugs,
+ * and would serve somebody else's document to whoever asked for it.
+ *
+ * `netlify/lib/hosted/contracts.mjs` names the same `/welcome` as
+ * `HOSTED_LIMITS.WELCOME_PATH`. It is restated here rather than imported because
+ * that module reaches a blob store and this one runs on Deno at the edge with
+ * Web globals only; `netlify/test/welcome-page.test.mjs` holds the two equal. A
+ * wrong copy fails in the safe direction: the page is gated rather than exposed.
+ */
+const LANDING_PAGE_PATHS = Object.freeze(["/", "/welcome"]);
+const LANDING_PAGE_PREFIXES = Object.freeze(["/welcome/"]);
+
+/**
+ * Whether an application-host path is a public landing page.
  *
  * @param {string} pathname
  * @returns {boolean}
  */
 export function isLandingPage(pathname) {
-  if (pathname === "/" || pathname === WELCOME_PATH) return true;
-  return pathname.startsWith(WELCOME_PREFIX);
+  if (LANDING_PAGE_PATHS.includes(pathname)) return true;
+  return LANDING_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
+
 
 /**
  * A header-safe origin serialization, the same shape `renderer/scripts/build.mjs`
@@ -233,7 +290,19 @@ export function rendererRewriteTarget(pathname, search) {
  * @returns {boolean}
  */
 export function isApplicationPassThrough(pathname) {
+  if (APP_PASS_THROUGH_PATHS.includes(pathname)) return true;
   return APP_PASS_THROUGH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
+/**
+ * Whether an application-host path is public: readable with no session at all.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isApplicationPublic(pathname) {
+  if (APP_PUBLIC_PATHS.includes(pathname)) return true;
+  return APP_PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 /**

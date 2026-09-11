@@ -182,8 +182,16 @@ export function clearCookie(name) {
  * `_assets` and `_render` cannot match the slug shape at all - it forbids `_` -
  * but they are named here so the reserved set is the whole list a reader expects
  * rather than the subset the character class happens to leave reachable.
+ *
+ * `admin` is here for the same "whole list" reason. No document can claim it -
+ * `RESERVED_ROUTES` in `templates/docbuild/src/site.ts` refuses it as a slug at
+ * build time - so this entry is not what stops the collision; it stops a
+ * *destination* `/admin/` from being accepted as a collaboration slug and landing
+ * a signed-in visitor one character away from the console.
  */
 export const RESERVED_FIRST_SEGMENTS = Object.freeze([
+  "admin",
+  "assets",
   "login",
   "invite",
   "publish",
@@ -194,25 +202,36 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze([
   "_render",
 ]);
 
+/**
+ * The admin console's address, as a destination.
+ *
+ * A literal here rather than an import of `admin.mjs`, which would pull the
+ * document-page module and its templates into the identity boundary to obtain
+ * one string. The two are held equal by a test instead, so they cannot drift
+ * without something failing.
+ */
+const ADMIN_DESTINATION = "/admin";
+
 /** A collaboration document slug: one segment of `[a-z0-9-]`, trailing slash. */
 const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 
 /**
  * The internal destinations a callback may return a browser to.
  *
- * An allowlist of four exact shapes, matched against the raw string with no
+ * An allowlist of five exact shapes, matched against the raw string with no
  * decoding, no normalisation and no `new URL` anywhere near it. That is what
  * makes the whole family of redirect-injection spellings uninteresting rather
  * than individually defended: `//evil.example`, `/\evil.example`,
  * `https://evil.example`, `/docs/%2e%2e/admin`, `/publish/authorize?next=...`
- * and a backslash-separated variant all fail to be one of the four.
+ * and a backslash-separated variant all fail to be one of the five.
  *
- * The four shapes are `/publish/authorize`, `/welcome`, `/docs/<32 hex>`, and a
- * single collaboration document slug `^/[a-z0-9-]{1,64}/$` whose one segment is
- * not a reserved route name. `/welcome` is the ordinary sign-in's default and
- * is matched exactly, with no trailing slash, so it cannot be reached through
- * the slug shape either: `welcome` is a reserved first segment, and `/welcome/`
- * is refused rather than quietly treated as a document named "welcome".
+ * The five shapes are `/publish/authorize`, `/welcome`, `/admin`,
+ * `/docs/<32 hex>`, and a single collaboration document slug
+ * `^/[a-z0-9-]{1,64}/$` whose one segment is not a reserved route name.
+ * `/welcome` is the ordinary sign-in's default and, like the other two exact
+ * paths, is matched with no trailing slash, so it cannot be reached through the
+ * slug shape either: `welcome` is a reserved first segment, and `/welcome/` is
+ * refused rather than quietly treated as a document named "welcome".
  *
  * The slug is matched on the raw string too: a `%2e%2e`, a
  * second segment, an absent trailing slash, or an uppercase letter all fail the
@@ -223,7 +242,12 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 export function validateDestination(value) {
   if (typeof value !== "string") throw new AuthRequestError("unknown destination");
   if (value === HOSTED_LIMITS.AUTHORIZE_PATH) return value;
+  /* The onboarding page an ordinary sign-in defaults to. */
   if (value === HOSTED_LIMITS.WELCOME_PATH) return value;
+  /* The admin console. An exact string like the authorize path, and an internal
+     absolute path with nothing caller-controlled in it, so it widens the
+     allowlist by exactly one destination and by no shape. */
+  if (value === ADMIN_DESTINATION) return value;
   if (new RegExp(`^${HOSTED_LIMITS.DOCUMENT_PATH_PREFIX}[0-9a-f]{${HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH}}$`).test(value)) {
     return value;
   }

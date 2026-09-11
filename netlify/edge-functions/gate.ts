@@ -8,6 +8,7 @@ import {
   applicationOrigin,
   classifyHost,
   isApplicationPassThrough,
+  isApplicationPublic,
   isLandingPage,
   isRenderPrefix,
   notFoundForeignHost,
@@ -42,16 +43,6 @@ const IDENTITY_KEYS = ["sub", "email", "emailVerified", "name"];
 const SESSION_ROUTE = "/api/hosted/session";
 
 /**
- * The public landing pages, decided by `isLandingPage` in `edge-host.mjs`: the
- * splash at the application-host root (`site/index.html`) and the onboarding
- * page at `/welcome` (`netlify/public/welcome/index.html`). Both are served with
- * no session check, so an anonymous visitor sees a page rather than a redirect
- * to sign in, and both take the landing header set rather than the stricter
- * first-party page one. The root is matched exactly and only -- never as a
- * prefix -- so no other path is made public by it.
- */
-
-/**
  * The session cookie's name, restated for one question: is there anything to ask
  * about? It is `netlify/lib/hosted/identity.mjs`'s `SESSION_COOKIE`, copied
  * rather than imported because that module reaches a store and this is an edge
@@ -75,6 +66,8 @@ const SESSION_COOKIE = "__Host-archon_session";
  */
 const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 const RESERVED_FIRST_SEGMENTS = [
+  "admin",
+  "assets",
   "login",
   "invite",
   "publish",
@@ -371,9 +364,10 @@ async function renderHost(
 
 /**
  * The application host serves the collaboration app, the hosted viewer and the
- * APIs. It refuses the renderer shell prefix, passes the API, assets, sign-in,
- * viewer, publish and invitation paths through with no session check, and
- * applies the existing session and access logic to everything else. Every
+ * APIs. It refuses the renderer shell prefix, serves the public splash page to
+ * anybody, passes the API, assets, admin console, sign-in, viewer, publish and
+ * invitation paths through with no session check, and applies the existing
+ * session and access logic to everything else. Every
  * answer gains the application header set unless it already carries a CSP.
  */
 async function applicationHost(
@@ -393,6 +387,12 @@ async function applicationHost(
     );
   }
 
+  /* The landing page's own subresources - its images, its favicons - served to
+     anybody, because #229 made the page public and did not make what the page
+     loads public with it. A deeper path is still gated, so without this the
+     splash renders with broken images and an anonymous visitor's browser
+     follows a sign-in redirect for each one. They are not HTML and take the
+     application header set through the same pass-through as a built asset. */
   /* The paths that used to be `excludedPath` in TOML, decided in code now that
      the gate runs on every path: passed through with no session check. A
      function response keeps its own headers; a static one gains the set. The
@@ -402,9 +402,13 @@ async function applicationHost(
      The landing pages are public too: the bare root serves the splash and
      `/welcome` serves the onboarding page, both through the same pass-through,
      so an anonymous visitor lands on a page rather than the sign-in redirect.
-     Only the exact root is public; every deeper path outside `/welcome/` stays
-     gated. */
-  if (isLandingPage(url.pathname) || isApplicationPassThrough(url.pathname)) {
+     Only the exact root and the onboarding page's own directory are public;
+     every other deeper path stays gated. */
+  if (
+    isLandingPage(url.pathname) ||
+    isApplicationPublic(url.pathname) ||
+    isApplicationPassThrough(url.pathname)
+  ) {
     let passed: Response;
     try {
       passed = await context.next();

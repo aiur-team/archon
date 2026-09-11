@@ -281,8 +281,17 @@ const HOSTED_ROUTED_PREFIX = "/api/hosted/";
  * as `/docs/` would let any future `/docs/anything` route appear with no review; a
  * literal means a new page route is a diff in this file, next to this paragraph,
  * which is the only place the reasoning above is written down.
+ *
+ * `/admin` is the second entry and is here on the same ground. It is the admin
+ * console's stable, human-typed address - an operator bookmarks it, and it exists
+ * at the same path on every deployment of this software - so moving it under the
+ * API namespace would make it a URL nobody can remember for the sake of a rule
+ * about JSON routes. The data behind it is *not* here: the census and the
+ * allowlist are `/api/hosted/admin/documents` and `/api/hosted/admin/allowlist`,
+ * which are ordinary API routes under the prefix, and the page itself carries no
+ * document data at all.
  */
-const ALLOWED_PAGE_ROUTES = Object.freeze(["/docs/:documentId"]);
+const ALLOWED_PAGE_ROUTES = Object.freeze(["/docs/:documentId", "/admin"]);
 
 /** The one source extension a deploy directory may carry. */
 const LOADABLE = ".mjs";

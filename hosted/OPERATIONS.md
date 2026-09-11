@@ -125,13 +125,28 @@ and a value in git is a value in git.
 | `AUTH0_CLIENT_SECRET` | **yes** | Production context only. Mark it secret in the Netlify UI. |
 | `HOSTED_PUBLISH_ENABLED` | no | Exactly `true` or `false`. Unset means disabled. |
 | `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` | no | Exactly `true` or `false`. Unset means refused. See §9. |
+| `ARCHON_ADMINS` | no | Comma-separated admin addresses. Unset means no administrators. See §10. |
+| `ARCHON_PLATFORM_ALLOWLIST` | no | Comma-separated seed addresses and domains. A seed only; the live list is in the store. See §10. |
+| `ARCHON_PLATFORM_ALLOWLIST_ENFORCED` | no | Exactly `true` or `false`. Unset means the list is recorded but not enforced. See §10. |
+| `ARCHON_EMAIL_PROVIDER` | no | Exactly `resend`, or unset. Set all four `ARCHON_EMAIL_*` keys or none. See §11. |
+| `ARCHON_EMAIL_API_KEY` | **yes** | The provider API key. Mark it secret in the Netlify UI. |
+| `ARCHON_EMAIL_SENDER` | no | The address invite-request mail is sent from. |
+| `ARCHON_EMAIL_RECIPIENT` | no | The admin address invite requests are delivered to. The only recipient. |
 
 One site means one set of values, read the same way on both hostnames. There is
 no per-hostname environment and nothing to keep in step.
 
-`HOSTED_PUBLISH_ENABLED` and `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` are both spelled
-strictly: `1`, `yes` and `TRUE` are configuration *errors*, not falsy defaults,
-so a typo fails loudly instead of silently changing what the deployment does.
+`HOSTED_PUBLISH_ENABLED`, `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS` and
+`ARCHON_PLATFORM_ALLOWLIST_ENFORCED` are all spelled strictly: `1`, `yes` and
+`TRUE` are configuration *errors*, not falsy defaults, so a typo fails loudly
+instead of silently changing what the deployment does.
+
+The four `ARCHON_EMAIL_*` keys are the one group **not** read by
+`config.mjs`. `netlify/lib/hosted/mailer.mjs` reads them, because a deployment
+that has not configured email must serve every other hosted request normally
+rather than refuse to start; the cost is that a mistake in them is found by the
+invite-request route rather than by every route. Set all four or none — a
+partial set is an error.
 
 **Every value here is site-wide.** Netlify's free plan has no per-scope
 environment variables, so `AUTH0_CLIENT_SECRET` is readable by the build step as
@@ -579,3 +594,151 @@ This is a property of adding the field at all rather than of the version number;
 as needing a data decision, not just a revert, and prefer rolling forward with a
 fix. Nothing here is urgent today — no document has been published on a live
 deployment yet.
+
+
+---
+
+## 10. The admin console and the platform allowlist
+
+### Who is an admin
+
+`ARCHON_ADMINS` is a comma-separated list of email addresses and is the **only**
+source of the capability. There is no promote-others page, no grant record and
+no revocation path, which is deliberate: a grantable admin needs all three plus
+an answer to "the last admin revoked themselves", and a seeded identity's
+recovery story is an environment variable you already control.
+
+An admin is admitted on a **verified** address matching an entry exactly. An
+unverified address is a string the visitor typed into a sign-up form, so it is
+never an admin claim however truthy the provider's assertion looks.
+
+A malformed entry is a configuration error and the deployment refuses to serve,
+rather than coming up with an empty admin list. An admin list is discovered to be
+wrong only when somebody needs it, and the person who needs it is locked out at
+that moment.
+
+### What `/admin` shows, and what it cannot
+
+The console lists **every** document this deployment stores: title, id, owner
+account and address, created date, state and access rules. It does not open
+document content and there is no endpoint behind it that could —
+`/api/hosted/docs/<id>/content` remains the only path to a document's bytes and
+authorises through `readOwnedPublication`, which has no admin branch.
+
+A record this version of the software cannot interpret is listed as unreadable
+with its id, rather than omitted. A census that dropped it would show you a
+shorter list than the truth with no way to notice.
+
+A signed-in non-admin gets **403**, not the 404 the rest of this tree uses to
+hide whether a document exists: `/admin` is one fixed path that exists on every
+deployment of this software, so hiding it would cost a comprehensible answer and
+hide nothing.
+
+### The platform allowlist
+
+An entry is an individual email address **or** a whole domain, and it admits its
+holder to sign in and be a user of this deployment. It shares no document:
+which documents somebody can open is still decided per document, so an
+allowlisted address with no document shared to it signs in and sees nothing. That
+is the correct outcome, not a fault.
+
+It is **not** a document's `allowedDomains` and is not held to the public-mailbox
+refusal in §9. Listing `gmail.com` on a *document* admits everyone on earth to
+that document; listing one named gmail address here admits one mailbox to the
+platform. Leave `ARCHON_ALLOW_PUBLIC_MAIL_DOMAINS=false`.
+
+`ARCHON_PLATFORM_ALLOWLIST` seeds the list; the live list is a record in the same
+site-wide blob store as the publications, at `access/platform-allowlist`, and an
+admin edits it from `/admin` **without a redeploy**. Each stored entry carries
+the admin who added it and when. That audit is not a log: removing an entry
+deletes its provenance with it, so the record answers "who admitted this address"
+and never "who removed one".
+
+A seeded entry cannot be removed from the page, and the page says so rather than
+accepting a removal the next request would undo. To remove one, change
+`ARCHON_PLATFORM_ALLOWLIST` and deploy.
+
+### Turning the gate on
+
+`ARCHON_PLATFORM_ALLOWLIST_ENFORCED=true` is what makes the list actually gate
+sign-in. Until then it is recorded and inert.
+
+Order matters when you first turn it on:
+
+1. Seed or add every address and domain that should keep working, **and** set
+   `ARCHON_ADMINS`.
+2. Read the list back on `/admin` and confirm it is what you meant.
+3. Set the flag and deploy.
+
+The flag exists rather than "a non-empty list is a gate" because the latter
+changes the deployment's admission rule silently in both directions: the deploy
+that seeds one address would lock out every identity that could sign in the day
+before, and an admin removing the last entry would reopen the platform without
+being told that is what the button did.
+
+Three properties are worth knowing before an incident:
+
+- **An admin is admitted before the list is consulted**, and before the store has
+  to have been readable. An operator who enforces an empty list, or whose
+  allowlist store is unreachable, can still reach `/admin` and fix it.
+- **An unreadable list refuses everybody else as an outage**, not as "you are not
+  allowed". The visitor lands on `/login/?status=unavailable`, which they retry,
+  rather than on a message they act on by giving up.
+- **The gate runs once, at sign-in.** A session lasts at most 24 hours, so
+  removing an entry costs access within a day rather than immediately. If you
+  need somebody out *now*, that is a session revocation, not an allowlist edit.
+
+### Turning it back off
+
+Unset the flag — or set it to `false` — and deploy. Nothing about the stored
+list changes, and no session is affected.
+
+---
+
+## 11. Invite requests
+
+The splash page carries a "request an invite" form. A submission emails
+`ARCHON_EMAIL_RECIPIENT` the requester's address and their optional note. With
+none of the four `ARCHON_EMAIL_*` keys set, the route answers "not enabled" and
+nothing else in the deployment is affected.
+
+**No account is registered by any code in this repository.** Sign up with the
+provider yourself, set the four values in the Netlify site environment, mark the
+API key secret, and deploy.
+
+### What bounds it
+
+- **Not an open relay.** `ARCHON_EMAIL_RECIPIENT` is the only recipient and
+  nothing on the wire can change it. The requester's address is *content* of the
+  message — never a `to`, a `from` or a `reply-to` — so the form cannot be used
+  to send mail from your domain to an address a stranger typed.
+- **No membership disclosure.** The route reads neither the allowlist nor the
+  session store nor the publication store, so there is no query whose result or
+  timing could differ between an address that is already a user and one that is
+  not. Every accepted submission gets one fixed body.
+- **Rate limited, failing closed.** Three submissions per source per hour and
+  sixty in total per hour, counted in one record at `access/invite-rate` that
+  resets itself when the hour rolls over. A counter that cannot be read refuses
+  the submission: a rate limiter that fails open is one an attacker only has to
+  break once. The per-source bucket is a digest of the platform's own
+  `x-nf-client-connection-ip`, so the counter is not a log of who visited; a
+  request without that header shares one strict bucket rather than escaping the
+  limit.
+- **A failed send does not refund the budget.** A genuine requester who hits a
+  provider outage loses one of three attempts in an hour, which is cheaper than
+  letting anybody who can make sends fail spend unlimited attempts at the
+  provider.
+
+### The endpoint is not configurable
+
+`ARCHON_EMAIL_PROVIDER` is an exact value and the request URL is a constant in
+`netlify/lib/hosted/mailer.mjs`. A configurable endpoint on a route an anonymous
+visitor can reach would be a server-side request forgery primitive behind a name
+that reads like a setting. Adding a second provider is a change to that file.
+
+### Raising or lowering the limits
+
+They are constants in `netlify/lib/hosted/invite-requests.mjs`
+(`INVITE_LIMITS`), not environment variables, because a limit an operator can
+raise in a hurry during an abuse incident is a limit that gets raised during an
+abuse incident. Changing one is a deploy and a review.
