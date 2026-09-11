@@ -123,8 +123,8 @@ test("isRenderPrefix and isApplicationPassThrough classify application paths", (
 test("isPublicDocument matches the reference documents by exact path only", () => {
   assert.deepEqual(
     [...APP_PUBLIC_DOCUMENT_PATHS].sort(),
-    ["/components/", "/example/", "/how-archon-works/"],
-    "the public document set is the three built reference documents and nothing else",
+    ["/components/", "/d/3c7f1a", "/d/52c164", "/d/a2e912", "/example/", "/how-archon-works/"],
+    "the public set is the three reference documents, each at its slug and its permanent link",
   );
   for (const pub of APP_PUBLIC_DOCUMENT_PATHS) {
     assert.equal(isPublicDocument(pub), true, `${pub} is a public document`);
@@ -147,6 +147,14 @@ test("isPublicDocument matches the reference documents by exact path only", () =
     "/how-archon-works-2/",
     "/",
     "/some-slug/",
+    // The permanent links are exact too: no prefix, no trailing slash, and no
+    // other six-hex id rides in on them.
+    "/d/",
+    "/d/a2e912/",
+    "/d/a2e912x",
+    "/d/a2e91",
+    "/d/000000",
+    "/d",
   ]) {
     assert.equal(isPublicDocument(gated), false, `${gated} is not a public document`);
   }
@@ -402,7 +410,7 @@ async function loadGate() {
 /** The cookie header a request carries unless a test says otherwise. */
 const SESSION_COOKIE_HEADER = "__Host-archon_session=opaque-session-token";
 
-async function runGate(host, path, { next, rewrite, env, session, cookie } = {}) {
+async function runGate(host, path, { next, rewrite, env, session, cookie, method } = {}) {
   const { gate } = await loadGate();
   control.identifyCalls = 0;
   control.resolveCalls = 0;
@@ -446,7 +454,7 @@ async function runGate(host, path, { next, rewrite, env, session, cookie } = {})
     const presented = cookie === undefined ? SESSION_COOKIE_HEADER : cookie;
     const response = await gate(
       new Request(`https://${host}${path}`, {
-        method: "GET",
+        method: method ?? "GET",
         headers: presented === null ? {} : { cookie: presented },
       }),
       context,
@@ -467,6 +475,9 @@ async function runGate(host, path, { next, rewrite, env, session, cookie } = {})
  * so this is 1 when a policy is present and 0 when none is -- which is the
  * "exactly one CSP" invariant the matrix asserts.
  */
+/** The header names `applicationHeaders()` owns, lowercased for comparison. */
+const applicationHeaderNames = new Set(applicationHeaders().map(([name]) => name.toLowerCase()));
+
 function cspCount(response) {
   return [...response.headers].filter(([name]) => name.toLowerCase() === "content-security-policy").length;
 }
@@ -678,10 +689,17 @@ test("the built reference documents are served to an anonymous visitor with no s
     assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
     assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
     assert.equal(cspCount(response), 1, `${path} carries exactly one CSP`);
-    assert.ok(
-      response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"),
-      `${path} keeps the application header set`,
+    /* The exact policy, not merely "some CSP with frame-ancestors". Both the
+       application set and the first-party page set satisfy a looser assertion,
+       so a looser one would stay green if the public branch fell through to
+       `finalizePassThrough` -- which is the single line the comment beside it
+       argues hardest for. */
+    assert.deepEqual(
+      [...response.headers].filter(([name]) => applicationHeaderNames.has(name.toLowerCase())).sort(),
+      applicationHeaders().map(([name, value]) => [name.toLowerCase(), value]).sort(),
+      `${path} gets exactly the application header set, not the first-party page set`,
     );
+    assert.equal(response.headers.get("Set-Cookie"), null, `${path} carries no Set-Cookie`);
   }
 
   /* A public document's `doc-id` is never even read, so its answer cannot
@@ -692,6 +710,65 @@ test("the built reference documents are served to an anonymous visitor with no s
   assert.equal(control.identifyCalls, 0, "whose session is not even resolved");
   assert.equal(control.resolveCalls, 0, "and still no role is resolved");
   t.diagnostic(`public reference routes: ${APP_PUBLIC_DOCUMENT_PATHS.join(" ")}`);
+});
+
+test("a public document's permanent link, HEAD and query spellings are public too", async () => {
+  /* `/d/<id>` is served by a `_redirects` 301 rather than a document body, and
+     the gate answers before `_redirects` does -- so without the route on the
+     list an anonymous visitor following the permanent link the document prints
+     in its own masthead gets a sign-in redirect that has already thrown the
+     destination away. It relays the redirect untouched instead. */
+  const moved = await runGate(APP_HOST, "/d/a2e912", {
+    cookie: null,
+    next: () => new Response(null, { status: 301, headers: { location: "/example/" } }),
+  });
+  assert.equal(moved.response.status, 301, "the permanent link relays its redirect");
+  assert.equal(moved.response.headers.get("Location"), "/example/");
+  assert.equal(control.identifyCalls, 0, "and is never session-checked");
+
+  // A query string is not part of `pathname`, so it neither publishes nor gates.
+  const queried = await runGate(APP_HOST, "/example/?utm_source=x", {
+    cookie: null,
+    next: () => docPage(),
+  });
+  assert.equal(queried.response.status, 200, "a query string does not gate a public document");
+  assert.equal(control.identifyCalls, 0, "and does not provoke a session check");
+
+  /* HEAD goes downstream as HEAD. The gated path has to re-issue it as a GET to
+     read the `doc-id` line and then discard the body; a public document is
+     never read, so the cheaper method survives. */
+  const headed = await runGate(APP_HOST, "/example/", {
+    cookie: null,
+    method: "HEAD",
+    next: (request) => {
+      assert.equal(request, undefined, "HEAD is not rewritten into a GET for a public document");
+      return new Response(null, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+    },
+  });
+  assert.equal(headed.response.status, 200, "HEAD on a public document is answered");
+  assert.equal(control.identifyCalls, 0, "without a session check");
+});
+
+test("a public document never relays a Set-Cookie to the anonymous caller", async () => {
+  /* Nothing that answers these routes has a session to establish today, but this
+     is the one branch whose answer goes back to a caller the gate never
+     identified -- and the site labels responses `Cache-Control: public`. A
+     cookie escaping here would be handed to whoever asked and possibly stored
+     for the next asker, so the branch drops it unconditionally. */
+  const { response } = await runGate(APP_HOST, "/example/", {
+    cookie: null,
+    next: () =>
+      new Response(PAGE, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "set-cookie": "__Host-archon_session=leaked; Path=/; Secure; HttpOnly",
+        },
+      }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Set-Cookie"), null, "the cookie is dropped, not relayed");
+  assert.equal(await response.text(), PAGE, "and the document itself is untouched");
 });
 
 test("a near miss of a public reference route is still gated", async () => {

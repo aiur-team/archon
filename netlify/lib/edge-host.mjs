@@ -132,13 +132,27 @@ const APP_PUBLIC_PREFIXES = Object.freeze(["/assets/"]);
  *     inherit, and a list that is both the input and the check never drifts in
  *     silence.
  *
+ * A document is reachable by more than its slug directory, so the set names
+ * every route the build emits for it: `/<slug>/` and the permanent `/d/<id>`
+ * link, plus both spellings of each prior slug when a document has aliases. The
+ * permanent link is the one `templates/README.md` tells an author to share
+ * because it survives a rename, and a publication whose permanent link answers
+ * with a sign-in redirect is not published. The bare `/<slug>` is deliberately
+ * absent: it is a near miss rather than a route the build emits.
+ *
  * It cannot be derived at runtime instead: the deploy tree the connect tool
  * copies is `netlify/`, `netlify.toml` and the lockfiles, so no `doc.json` is
  * present on the edge. This is the edge's copy of a fact the build owns, and
- * the preflight is what keeps the copy honest.
+ * the preflight is what keeps the copy honest -- it holds this list equal to
+ * the declaring documents *and* exercises `isPublicDocument` against the real
+ * inventory, so loosening the matcher without touching the list fails the build
+ * too.
  */
 export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze([
   "/components/",
+  "/d/3c7f1a",
+  "/d/52c164",
+  "/d/a2e912",
   "/example/",
   "/how-archon-works/",
 ]);

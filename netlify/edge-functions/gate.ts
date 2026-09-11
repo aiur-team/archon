@@ -191,6 +191,33 @@ function finalizePassThrough(response: Response): Response {
     : withApplicationHeaders(response);
 }
 
+/**
+ * Finalize a public reference document.
+ *
+ * It takes the application header set -- the same one a granted reader's copy
+ * gets today -- so publishing a document changes the session check and nothing
+ * else about the answer.
+ *
+ * Any `Set-Cookie` is dropped first. Nothing that answers one of these routes
+ * has a session to establish: they are static files the build composed, and the
+ * route is on a closed list a build preflight holds equal to the documents that
+ * declared themselves public. But this is the one branch whose answer is
+ * returned to a caller the gate never identified, so a cookie set here would be
+ * handed to whoever asked and, under the site's shared-cache headers, possibly
+ * to the next asker too. Dropping it costs nothing today and removes the whole
+ * class.
+ */
+function publicDocumentResponse(response: Response): Response {
+  try {
+    const headers = response.headers;
+    if (headers instanceof Headers) headers.delete("Set-Cookie");
+  } catch {
+    /* A response whose headers cannot be read cannot be carrying a cookie we
+       could drop either; the header applier below fails the same way safely. */
+  }
+  return withApplicationHeaders(response);
+}
+
 function isUnavailableError(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return false;
@@ -437,7 +464,7 @@ async function applicationHost(
        make a document's policy depend on whether it was gated -- and the whole
        point of publishing one is that the answer no longer depends on who
        asked. */
-    if (isPublicDocument(url.pathname)) return withApplicationHeaders(passed);
+    if (isPublicDocument(url.pathname)) return publicDocumentResponse(passed);
     return finalizePassThrough(passed);
   }
 
