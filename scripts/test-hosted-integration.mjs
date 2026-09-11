@@ -192,7 +192,7 @@ function checkoutFallbackAbove(dir) {
     if (existsSync(join(at, "templates", "base", "layout.html"))) {
       return `${at}/templates/base/layout.html`;
     }
-    if (existsSync(join(at, "node_modules", "@aiur-team"))) return `${at}/node_modules/@aiur-team`;
+    if (existsSync(join(at, "node_modules", "aiur-archon"))) return `${at}/node_modules/aiur-archon`;
     if (dirname(at) === at) return null;
   }
 }
@@ -1223,7 +1223,7 @@ const PACKAGE_DIR = join(ROOT, "templates", "docbuild");
 const INSTALLED = Object.freeze({
   docbuild: join("node_modules", ".bin", "docbuild"),
   publish: join("node_modules", ".bin", "archon-publish"),
-  skeleton: join("node_modules", "@aiur-team", "archon", "dist", "skeleton"),
+  skeleton: join("node_modules", "aiur-archon", "dist", "skeleton"),
 });
 const DOCUMENT_SENTINEL = "sentinel-integration-8b41f0";
 

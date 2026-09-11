@@ -4,7 +4,7 @@
  *
  *   node scripts/test-publish-package.mjs
  *
- * One entry point, no arguments. It packs the real `@aiur-team/archon`
+ * One entry point, no arguments. It packs the real `aiur-archon`
  * tarball, installs it into a fresh temporary directory **outside this
  * repository**, and then does everything the packaged agent instructions tell a
  * new user to do — from the installed package only.
@@ -21,7 +21,7 @@
  * What it proves, in order:
  *
  *   1. the tarball installs into a directory with no `templates/base/` above it
- *      and no other `@aiur-team/archon` on its resolution path;
+ *      and no other `aiur-archon` on its resolution path;
  *   2. `archon`, its `docbuild` alias, `archon-publish`, the skeleton, the base assets and
  *      `dist/skills/archon-doc/SKILL.md` are all installed, and the packaged
  *      skill is byte-identical to the canonical source;
@@ -106,10 +106,10 @@ const CANONICAL_SKILL = join(ROOT, "skills", "archon-doc", "SKILL.md");
 
 /** The installed layout the skill, the README and this runner all name. */
 const INSTALLED = {
-  package: "node_modules/@aiur-team/archon",
-  skill: "node_modules/@aiur-team/archon/dist/skills/archon-doc/SKILL.md",
-  skeleton: "node_modules/@aiur-team/archon/dist/skeleton",
-  base: "node_modules/@aiur-team/archon/dist/base/layout.html",
+  package: "node_modules/aiur-archon",
+  skill: "node_modules/aiur-archon/dist/skills/archon-doc/SKILL.md",
+  skeleton: "node_modules/aiur-archon/dist/skeleton",
+  base: "node_modules/aiur-archon/dist/base/layout.html",
   archon: "node_modules/.bin/archon",
   docbuild: "node_modules/.bin/docbuild",
   publish: "node_modules/.bin/archon-publish",
@@ -160,8 +160,8 @@ function checkoutFallbackAbove(dir) {
     if (statSafe(join(at, "templates", "base", "layout.html")) !== null) {
       return `${at}/templates/base/layout.html`;
     }
-    if (statSafe(join(at, "node_modules", "@aiur-team")) !== null) {
-      return `${at}/node_modules/@aiur-team`;
+    if (statSafe(join(at, "node_modules", "aiur-archon")) !== null) {
+      return `${at}/node_modules/aiur-archon`;
     }
     if (dirname(at) === at) return null;
   }
@@ -606,7 +606,7 @@ function assertInstalledLayout(consumer) {
 async function assertSkillMatchesPackage(consumer) {
   const skill = readFileSync(join(consumer, INSTALLED.skill), "utf8");
 
-  const paths = [...new Set([...skill.matchAll(/node_modules\/@aiur-team\/archon[\w./-]*/g)].map((m) => m[0].replace(/[./]+$/, "")))];
+  const paths = [...new Set([...skill.matchAll(/node_modules\/aiur-archon[\w./-]*/g)].map((m) => m[0].replace(/[./]+$/, "")))];
   assert.ok(paths.length >= 3, `the skill names ${paths.length} installed paths; expected the package, the skeleton and itself`);
   for (const named of paths) {
     assert.notEqual(statSafe(join(consumer, named)), null, `the skill names ${named}, which the installed package does not have`);
