@@ -14,6 +14,7 @@ import {
   rendererHeaders,
   rendererRewriteTarget,
   withApplicationHeaders,
+  withFirstPartyPageHeaders,
 } from "../lib/edge-host.mjs";
 
 type GateContext = {
@@ -141,6 +142,40 @@ function validIdentity(
 
 function validContentType(value: string | null): boolean {
   return value !== null && HTML_CONTENT_TYPE.test(value);
+}
+
+/**
+ * Finalize the security headers on a static pass-through response.
+ *
+ * A first-party static HTML page the application host serves directly — the
+ * sign-in page under `/login/`, the approval page under `/publish/`, any
+ * `text/html` file the deploy publishes — is a trusted document, not an API
+ * answer. The application header set's CSP is `default-src 'none'` with no
+ * `script-src`, `style-src`, `connect-src` or `form-action`, which freezes such
+ * a page: its scripts, inline styles, fetches and form posts all fall back to
+ * `'none'`. So a static `text/html` response that carries no CSP of its own
+ * gains the first-party page set instead; everything else — the API's JSON, a
+ * built asset — keeps the application set, and a response that already owns a
+ * CSP keeps it under either applier.
+ *
+ * This is a header choice only. It reads the pass-through response's
+ * `Content-Type` and applies one of two header sets; it changes no routing,
+ * no redirect and no session decision, and a `Content-Type` that cannot be
+ * read falls to the strict application set.
+ */
+function finalizePassThrough(response: Response): Response {
+  let isHtml = false;
+  try {
+    const headers = response.headers;
+    if (headers instanceof Headers && !headers.has("Content-Security-Policy")) {
+      isHtml = validContentType(headers.get("Content-Type"));
+    }
+  } catch {
+    isHtml = false;
+  }
+  return isHtml
+    ? withFirstPartyPageHeaders(response)
+    : withApplicationHeaders(response);
 }
 
 function isUnavailableError(value: unknown): boolean {
@@ -359,7 +394,7 @@ async function applicationHost(
     } catch {
       return plainResponse(503, ACCESS_UNAVAILABLE);
     }
-    return withApplicationHeaders(passed);
+    return finalizePassThrough(passed);
   }
 
   return withApplicationHeaders(await sessionGate(req, url, context, env));
