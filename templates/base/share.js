@@ -212,6 +212,7 @@ function mountSharePanel(event) {
     const values = [
       window.scrollX, window.scrollY, window.innerHeight,
       panel.offsetWidth, panel.offsetHeight,
+      rect.height,
       rect.top, rect.bottom, rect.right,
       document.documentElement.clientWidth,
     ];
@@ -220,10 +221,28 @@ function mountSharePanel(event) {
       return false;
     }
 
+    /* Bound the height to the room beside the toggle before anything is placed.
+       Since ACN-009 the panel can be taller than either gap, and the fallback
+       below -- clamp between `lowerTop` and `upperTop` -- then lands it across
+       the toggle, where it intercepts every click on the one control that
+       closes it. Picking the larger gap and capping the panel to it removes the
+       overlap rather than narrowing it: the panel scrolls, which it is already
+       styled to do. `offsetHeight` is re-read afterwards because the cap may
+       have shrunk it. */
+    const gapBelow = window.innerHeight - rect.bottom - 16;
+    const gapAbove = rect.top - 16;
+    /* Floored, and the floor is the honest edge of this rule: it takes a toggle
+       spanning the whole viewport for both gaps to fall under it, and a panel
+       bounded to nothing at all would hide the close button rather than merely
+       sit under it. Below the floor the behaviour is what it was before. */
+    const room = Math.max(160, Math.round(Math.max(gapBelow, gapAbove)));
+    panel.style.maxHeight = `${room}px`;
+
+    const height = panel.offsetHeight;
     const lowerTop = window.scrollY + 8;
-    const upperTop = window.scrollY + window.innerHeight - panel.offsetHeight - 8;
+    const upperTop = window.scrollY + window.innerHeight - height - 8;
     const below = window.scrollY + rect.bottom + 8;
-    const above = window.scrollY + rect.top - panel.offsetHeight - 8;
+    const above = window.scrollY + rect.top - height - 8;
     let top;
     if (upperTop < lowerTop) top = lowerTop;
     else if (below <= upperTop) top = below;

@@ -422,7 +422,16 @@
   let accessInput = null;
   let accessRetryEl = null;
   let accessDocumentId = null;
-  let accessDomains = [];
+  /**
+   * The stored list, or `null` for "this page has not read it yet".
+   *
+   * `null` rather than `[]`, and the difference is a data-loss bug rather than
+   * a style: the `PUT` replaces the whole list, so a panel whose read failed
+   * and then treated its own ignorance as an empty list would answer the first
+   * "add" by sending a one-entry list and silently dropping every domain the
+   * document actually had. Nothing may be written until something was read.
+   */
+  let accessDomains = null;
   /** One request at a time. A second would race the first over one list. */
   let accessBusy = false;
 
@@ -459,6 +468,9 @@
     accessEmptyEl.className = "access-empty";
     accessEmptyEl.setAttribute("data-archon-access-empty", "");
     accessEmptyEl.textContent = ACCESS.empty;
+    /* Hidden until a read says the list really is empty. Shown from the start
+       it would assert the document's policy before this page had been told it. */
+    accessEmptyEl.hidden = true;
 
     accessListEl = document.createElement("ul");
     accessListEl.className = "access-list";
@@ -524,6 +536,14 @@
   }
 
   function renderAccessList() {
+    /* "Only you and people you invite can read this" is a claim about the
+       document's policy. Before the read resolves, and after one that failed,
+       this page does not know it -- so it says nothing rather than saying that. */
+    if (accessDomains === null) {
+      accessEmptyEl.hidden = true;
+      accessListEl.replaceChildren();
+      return;
+    }
     accessEmptyEl.hidden = accessDomains.length !== 0;
     accessListEl.replaceChildren(
       ...accessDomains.map((domain) => {
@@ -623,7 +643,13 @@
       return message === null ? ACCESS.failed : message;
     }
     if (result.code === "invalid_domain") {
-      return entered === null ? ACCESS.invalid : `${ACCESS.invalid} ${entered}`;
+      /* Bounded exactly as a server message is. It is the owner's own input, so
+         nobody else chose it -- but it is still an arbitrary string reaching a
+         trusted live region, and a bidi override or a line separator pasted
+         into the box would render there while the same character stripped out
+         of a server's message would not. One rule for the line. */
+      const named = entered === null ? null : boundedAccessMessage(entered);
+      return named === null ? ACCESS.invalid : `${ACCESS.invalid} ${named}`;
     }
     return ACCESS.failed;
   }
@@ -640,9 +666,20 @@
     if (accessBusy) return;
     setAccessBusy(true);
     sayAccess(ACCESS.loading);
-    const result = await getJson(accessPath(accessDocumentId));
+    /* `getJson` does not wrap its own `fetch`, and a `fetch` that cannot reach
+       the network rejects rather than resolving. Unhandled, that rejection
+       escapes before the panel is re-enabled and leaves it disabled forever,
+       stuck on "Loading…" with no retry to press. */
+    let result;
+    try {
+      result = await getJson(accessPath(accessDocumentId));
+    } catch {
+      result = { outcome: "unavailable" };
+    }
     setAccessBusy(false);
     if (result.outcome !== "ok" || !validAccessBody(result.body, accessDocumentId)) {
+      accessDomains = null;
+      renderAccessList();
       sayAccess(ACCESS.loadFailed, "error");
       accessRetryEl.hidden = false;
       return;
@@ -663,7 +700,7 @@
    * correct a domain rather than retype it.
    */
   async function writeAccess(next, entered) {
-    if (accessBusy) return;
+    if (accessBusy || accessDomains === null) return;
     setAccessBusy(true);
     sayAccess(ACCESS.saving);
     const result = await putAccess(next);
@@ -699,6 +736,12 @@
    */
   function addAccessDomain() {
     if (accessBusy) return;
+    /* Nothing may be added to a list this page never read: the request would
+       replace the stored list with this one entry. */
+    if (accessDomains === null) {
+      sayAccess(ACCESS.loadFailed, "error");
+      return;
+    }
     const entered = accessInput.value.trim().toLowerCase();
     if (entered === "") {
       sayAccess(ACCESS.blank, "error");

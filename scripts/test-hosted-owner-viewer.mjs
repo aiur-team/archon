@@ -76,7 +76,7 @@ const TRANSCRIPT = /^PASS {2}hosted owner viewer matrix \(chromium [\w.]+; (\d+)
  * the only thing CI reads and a worker that returned early after four cases
  * would otherwise print a `PASS` that reads exactly like a full run.
  */
-const EXPECTED_CASES = 123;
+const EXPECTED_CASES = 124;
 
 function die(message) {
   process.stderr.write(`${message}\n`);
@@ -1756,6 +1756,59 @@ function browserCases({ app, renderer, evil, ids, tokens, records, markers }) {
       for (const marker of markers) {
         assert.equal(text.includes(marker), false, `the refusal page carries ${marker.slice(0, 24)}`);
       }
+      await tab.close();
+    }],
+
+    ["a panel whose read failed claims nothing and cannot replace the list", async (context) => {
+      await signIn(context, app.origin, tokens.owner);
+      const tab = await context.newPage();
+      /* The first read is aborted in the browser, which is what a `fetch` that
+         cannot reach the network does: it rejects rather than answering. Every
+         later request is let through, so the retry is a real one. */
+      let aborted = false;
+      await tab.route("**/api/hosted/publications/*/access", async (route) => {
+        if (!aborted && route.request().method() === "GET") {
+          aborted = true;
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      });
+      await tab.goto(page(`/docs/${ids.shared}`));
+      await waitFor(
+        async () => (await accessStatusOf(tab)) === "The reading list could not be loaded.",
+        async () => `the failed read was never reported: ${await accessStatusOf(tab)}`,
+      );
+
+      /* Not disabled forever, and not claiming a policy it never read. */
+      assert.equal(await tab.locator("[data-archon-access-retry]").isVisible(), true,
+        "a failed read left no way to try again");
+      assert.equal(await tab.locator("[data-archon-access-empty]").isVisible(), false,
+        "a failed read asserted that nobody but the owner can read the document");
+      assert.deepEqual(await domainsOf(tab), []);
+
+      /* And an add cannot go out: the `PUT` replaces the whole list, so writing
+         one entry over a list this page never read would drop the rest. */
+      const writesBefore = app.state.requests.filter((entry) => entry.method === "PUT").length;
+      await tab.fill("[data-archon-access-input]", "partner.example");
+      await tab.click("[data-archon-access-add]");
+      await waitFor(
+        async () => (await accessStatusOf(tab)) === "The reading list could not be loaded.",
+        "the refused add said something else",
+      );
+      assert.equal(
+        app.state.requests.filter((entry) => entry.method === "PUT").length,
+        writesBefore,
+        "an add replaced a list the panel had never read",
+      );
+
+      /* The retry is a real read, and it finds the stored list. */
+      await tab.click("[data-archon-access-retry]");
+      await waitFor(
+        async () => (await domainsOf(tab)).length === 1,
+        async () => `the retry never loaded the list: ${await accessStatusOf(tab)}`,
+      );
+      assert.deepEqual(await domainsOf(tab), ["example.com"]);
       await tab.close();
     }],
 

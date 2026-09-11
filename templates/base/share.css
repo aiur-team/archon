@@ -24,11 +24,14 @@
   z-index: 50;
   width: min(24rem, calc(100vw - 1rem));
   max-width: min(24rem, calc(100vw - 1rem));
-  /* Bounded twice, and the second bound is why. Since ACN-009 the panel holds
-     three sections, and at a full roster it grew tall enough to reach back up
-     over the masthead toggle that opens it -- the panel then intercepted every
-     click on its own close path. The panel scrolls instead. */
-  max-height: min(calc(100vh - 1rem), 34rem);
+  /* The outer bound only. Since ACN-009 the panel holds three sections and at a
+     full roster it can be taller than the room beside its own toggle, so the
+     bound that actually matters is measured: `positionPanel` sets `max-height`
+     from the space it is about to place the panel in. A constant here could not
+     do it -- 34rem clears a desktop masthead and still covers the toggle on a
+     420px-tall landscape phone -- and a panel covering the toggle intercepts
+     every click on its own close path. It scrolls instead. */
+  max-height: calc(100vh - 1rem);
   overflow: auto;
   padding: 1rem;
   color: var(--ink-2, #49525f);
