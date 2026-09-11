@@ -955,12 +955,43 @@ async function assertContractParity(rendererModule) {
     );
   }
 
+  /* The header authority moved to the edge gate when the two deployments became
+     one site on two hostnames. `netlify/lib/edge-host.mjs` therefore carries its
+     own copy of `rendererHeaders`, and it has to: `renderer/` is outside the
+     deploy tree, and every relative import under `netlify/` must resolve under
+     `netlify/` for the bundle Netlify ships to be self-contained, so the gate
+     cannot import the build's function.
+
+     A copy nobody compares is a copy that drifts. The build's set is what the
+     renderer oracle below serves its fixtures under, the gate's set is what the
+     deployed site answers with, and the browser isolation matrix is only
+     evidence about production while the two are the same bytes in the same
+     order. Compared as a whole array rather than field by field, so a header
+     added to one and not the other fails here too. */
+  const edgeHost = await import(pathToFileURL(join(ROOT, "netlify/lib/edge-host.mjs")).href);
+  for (const origin of ["https://app.archon.example.com", "https://archon-example.netlify.app", "http://127.0.0.1:8888"]) {
+    assert.deepEqual(
+      edgeHost.rendererHeaders(origin),
+      build.rendererHeaders(origin),
+      `the gate and the build disagree about the renderer header set for ${origin}`,
+    );
+  }
+
+  /* And they agree about what is not an origin, so the gate cannot be handed a
+     value the build would have refused to write into a header line. */
+  for (const value of ["not-an-origin", "https://app.example.com/path", "https://app.example.com\r\nX: y", ""]) {
+    assert.throws(() => edgeHost.rendererHeaders(value), /header-safe/, `the gate accepted ${JSON.stringify(value)}`);
+    assert.throws(() => build.rendererHeaders(value), /header-safe/, `the build accepted ${JSON.stringify(value)}`);
+  }
+
   /* The one deliberate difference, asserted so it stays deliberate. The
      public-suffix rule belongs to `netlify/lib/hosted/config.mjs`, which owns the list
      through a pinned dependency and refuses to start the application when the
      two configured origins share a registrable site. The renderer build does not
      restate it, and a future edit that quietly added a weaker version of it here
-     would be a second policy for trusted origins. */
+     would be a second policy for trusted origins. This asymmetry is kept, not
+     resolved: adding the rule to the build would be a second policy for trusted
+     origins, which is the defect, not the fix. */
   assert.throws(
     () => hosted.validateOrigin("https://app.internal", { production: true }),
     /public suffix/,

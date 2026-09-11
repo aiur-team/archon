@@ -1180,8 +1180,18 @@ test("loopback origins are recognised as such", () => {
 
 test("registrable sites come from the public-suffix list, not the last two labels", () => {
   assert.equal(registrableSite(FIXTURE_APP_ORIGIN), "example.com");
-  assert.equal(registrableSite(FIXTURE_RENDER_ORIGIN), "example.net");
   assert.equal(registrableSite(FIXTURE_SIBLING_RENDER_ORIGIN), "example.com");
+
+  /* The renderer fixture is the deployed shape: the whole `*.netlify.app`
+     hostname is the registrable site, because `netlify.app` is a private PSL
+     entry. This is the same rule the `pages.dev` pair below proves, applied to
+     the name a real deploy actually answers on -- not a second rule, and not a
+     weaker one. The app fixture's site is unchanged, so the property under test
+     is still "two registrable sites", decided by the list rather than by
+     counting labels. */
+  assert.equal(registrableSite(FIXTURE_RENDER_ORIGIN), "archon-example.netlify.app");
+  assert.notEqual(registrableSite(FIXTURE_RENDER_ORIGIN), registrableSite(FIXTURE_APP_ORIGIN));
+  assert.equal(registrableSite(FIXTURE_SIBLING_RENDER_ORIGIN), registrableSite(FIXTURE_APP_ORIGIN));
 
   /* Two hosts under a private suffix differ only in their first label. Last-
      two-labels arithmetic calls them one site; the PSL correctly calls them
@@ -1529,7 +1539,8 @@ test("a complete production configuration is accepted, with publishing off", () 
   assert.equal(config.appOrigin, FIXTURE_APP_ORIGIN);
   assert.equal(config.renderOrigin, FIXTURE_RENDER_ORIGIN);
   assert.equal(config.appSite, "example.com");
-  assert.equal(config.renderSite, "example.net");
+  assert.equal(config.renderSite, "archon-example.netlify.app");
+  assert.notEqual(config.appSite, config.renderSite);
   assert.equal(config.publishEnabled, false);
   assert.equal(config.auth0.domain, FIXTURE_ENV.AUTH0_DOMAIN);
   assert.equal(config.auth0.clientId, FIXTURE_ENV.AUTH0_CLIENT_ID);
