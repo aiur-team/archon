@@ -63,6 +63,7 @@ import {
   validateStartResponse,
   validateStatusEnvelope,
   validateTimeoutSeconds,
+  WIRE_ERROR_CODES,
   wireErrorFrom,
   type PublishDeps,
   type RequestState,
@@ -684,7 +685,7 @@ test("start refuses input that is missing, oversized or not HTML", async (t: Tes
   assert.equal(service.calls.start, 0, "nothing may reach the network before local validation passes");
 });
 
-test("start accepts the fragment docbuild actually emits", async (t: TestContext) => {
+test("start accepts the fragment archon actually emits", async (t: TestContext) => {
   /* `templates/base/layout.html` opens at `<meta name="doc-id">`: an artifact
      carries no doctype and no `<html>` element, because the hosted renderer
      supplies the document element and places these bytes in a sandboxed
@@ -826,6 +827,147 @@ test("an unreachable service is a retryable failure, not a local one", async (t:
   const observed = await cli(["status", "--request", requestFile, "--json"], space.stateDir);
   assert.equal(observed.code, 23, observed.stderr);
   assert.equal(onlyObject(observed.stdout)["code"], "network_unavailable");
+});
+
+/* ------------------------------------------------------------------ */
+/* terminal service refusals (#250)                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The exact body the live service answers a disabled deployment with.
+ *
+ * Copied from the reported 503 rather than paraphrased. The bug this guards
+ * was reported as "no output, no error and no exit after two minutes" against
+ * a service that was answering in half a second, so the fixture has to be the
+ * answer that was actually given, down to the message.
+ */
+const PUBLISHING_DISABLED = wireError(
+  "publishing_disabled",
+  false,
+  "hosted publishing is disabled on this deployment",
+);
+
+/** The budget "promptly" means here: far under any poll interval or backoff. */
+const PROMPT_MS = 10_000;
+
+test("a non-retryable refusal ends start promptly, with the server's code and message", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, { start: () => ({ status: 503, json: PUBLISHING_DISABLED }) });
+
+  const began = Date.now();
+  const observed = await startVia(space, service.origin);
+  const elapsed = Date.now() - began;
+
+  assert.equal(observed.code, 22, observed.stderr);
+  assert.ok(
+    elapsed < PROMPT_MS,
+    `a terminal refusal must end the command promptly; took ${elapsed}ms`,
+  );
+  /* One request and no more. `retryable: false` is the service saying that
+     coming back changes nothing, so a second call is a wait with nothing at
+     the end of it. */
+  assert.equal(service.calls.start, 1, "a non-retryable refusal must never be retried");
+
+  /* --json still answers in the shape --json promises. Empty stdout and a bare
+     exit code is the failure this test exists to prevent. */
+  const payload = onlyObject(observed.stdout);
+  assert.equal(payload["state"], "error");
+  assert.equal(payload["code"], "publishing_disabled");
+  assert.equal(payload["retryable"], false);
+  assert.equal(payload["exitCode"], 22);
+  assert.match(String(payload["message"]), /hosted publishing is disabled on this deployment/);
+
+  /* And a person reading the terminal gets both facts too, not a bare status. */
+  assert.match(observed.stderr, /publishing_disabled/);
+  assert.match(observed.stderr, /hosted publishing is disabled on this deployment/);
+  assert.match(observed.stderr, /retryable no/);
+});
+
+test("a non-retryable refusal is reported without --json too, and never on stdout", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, { start: () => ({ status: 503, json: PUBLISHING_DISABLED }) });
+
+  const observed = await cli(
+    ["start", "--file", space.file, "--title", "A test document", "--service", service.origin, "--local-test"],
+    space.stateDir,
+  );
+
+  assert.equal(observed.code, 22, observed.stderr);
+  assert.equal(observed.stdout, "", "stdout is a JSON result or nothing at all");
+  assert.match(observed.stderr, /publishing_disabled/);
+  assert.match(observed.stderr, /hosted publishing is disabled on this deployment/);
+});
+
+test("resume stops on a non-retryable refusal instead of polling through its window", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, {
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+    status: () => ({ status: 503, json: PUBLISHING_DISABLED }),
+  });
+  const serviceOrigin = service.origin;
+  const started = await startVia(space, serviceOrigin);
+  const requestFile = onlyObject(started.stdout)["requestFile"] as string;
+
+  const began = Date.now();
+  const observed = await cli(
+    ["resume", "--request", requestFile, "--timeout-seconds", "300", "--json"],
+    space.stateDir,
+  );
+  const elapsed = Date.now() - began;
+
+  assert.equal(observed.code, 22, observed.stderr);
+  assert.ok(elapsed < PROMPT_MS, `resume must not wait out its window; took ${elapsed}ms`);
+  assert.equal(service.calls.status, 1, "a non-retryable refusal must never be polled");
+  const payload = onlyObject(observed.stdout);
+  assert.equal(payload["code"], "publishing_disabled");
+  assert.equal(payload["retryable"], false);
+});
+
+test("every wire error code carries the retryability the poll loop reads", () => {
+  /* `retryable` on the error is what `resumePublication` branches on, so it has
+     to agree with the contract's own table for every code — not only for the
+     one this ticket reported. */
+  for (const [code, retryable] of Object.entries(WIRE_ERROR_CODES)) {
+    const failure = wireErrorFrom(503, wireError(code, retryable));
+    assert.equal(failure.code, code, `wireErrorFrom lost the code for ${code}`);
+    assert.equal(failure.retryable, retryable, `${code} has the wrong retryability`);
+    assert.notEqual(failure.exitCode, 0, `${code} must never imply success`);
+  }
+});
+
+test("a request that runs out of time says what it was waiting on, and for how long", async () => {
+  /* "The operation was aborted due to timeout" names neither the endpoint nor
+     the bound, which leaves a caller unable to tell a deadline from a dead
+     host. A bounded wait that cannot say what it was waiting for is only half
+     a bound. */
+  const state = fakeState();
+  const timeout = Object.assign(new Error("The operation was aborted due to timeout"), {
+    name: "TimeoutError",
+  });
+  const deps: PublishDeps = {
+    fetch: (async () => {
+      throw timeout;
+    }) as unknown as typeof globalThis.fetch,
+    now: () => Date.now(),
+    sleep: async () => undefined,
+    random: () => 0.5,
+  };
+
+  const failure = await observeStatus(state, deps).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof PublishError, "a timeout must arrive as a typed failure");
+  assert.equal(failure.code, "network_unavailable");
+  assert.match(
+    failure.message,
+    new RegExp(`timed out after ${PUBLISH_CONTRACT.REQUEST_TIMEOUT_SECONDS}s`),
+    `the message must name the bound: ${escape(failure.message)}`,
+  );
+  assert.ok(
+    failure.message.includes(state.serviceOrigin),
+    `the message must name the endpoint: ${escape(failure.message)}`,
+  );
 });
 
 /* ------------------------------------------------------------------ */

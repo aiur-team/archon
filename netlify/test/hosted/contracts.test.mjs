@@ -959,7 +959,7 @@ test("stored HTML must be a non-empty document, well-formed and free of NUL", ()
     field: "publication.html",
   });
 
-  /* A fragment is the artifact shape, not a defect. `docbuild` emits no
+  /* A fragment is the artifact shape, not a defect. `archon` emits no
      doctype and no `<html>` element -- `renderer/public/renderer.js` supplies
      the document element and drops the stored bytes into a sandboxed `srcdoc`
      body -- so a rule that required one refused every artifact the builder can

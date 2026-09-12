@@ -238,7 +238,7 @@ exact value derived from `origin`; do not opt in automatically. Without every pr
 the canonical committed `history.json`, or omits history when the file is absent. On Netlify
 (`NETLIFY=true`), builds never refresh history and follow the same committed-file fallback.
 
-`docbuild --site` is the underlying CLI spelling. Writers normally use the repository wrapper
+`archon --site` is the underlying CLI spelling. Writers normally use the repository wrapper
 `templates/build --site`.
 
 ## Build one document for private hosted reading
@@ -268,7 +268,7 @@ renderer's own policy. Do not describe a hosted artifact as having comments or i
 A hosted artifact is built on demand for one private upload and is not committed; `.gitignore` keeps
 `dist/*.hosted.html` out of the tree so a routine `git add cache-notes` cannot carry it along.
 
-`docbuild <instance> --hosted` is the underlying CLI spelling.
+`archon <instance> --hosted` is the underlying CLI spelling.
 
 ## Write prose one sentence per line
 
@@ -308,7 +308,7 @@ does not validate the instance's slug, aliases, or collisions with other documen
 validates the full identity inventory, including global ID, slug, and alias collisions. Artifact-only
 success is therefore insufficient for publication.
 
-`docbuild` also fails on a missing section field, a duplicate section ID, and an unfilled placeholder.
+`archon` also fails on a missing section field, a duplicate section ID, and an unfilled placeholder.
 After writing, it reports anchor alignment, tag balance, theme-state count, and file size. Read every
 report before committing.
 

@@ -74,7 +74,7 @@ const BYTE_ORDER_MARK = "\uFEFF";
  * The sniff that separates an HTML artifact from bytes that are not markup.
  *
  * Markup, not a document element. An artifact is a *fragment*:
- * `docbuild`'s `layout.html` opens at `<meta name="doc-id">` and emits no
+ * `archon`'s `layout.html` opens at `<meta name="doc-id">` and emits no
  * doctype and no `<html>` element, because `renderer/public/renderer.js`
  * supplies the document element itself and places the stored bytes inside a
  * sandboxed `srcdoc` body. Requiring `<html>` here rejected every artifact the

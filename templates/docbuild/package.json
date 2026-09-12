@@ -8,7 +8,6 @@
   "bin": {
     "aiur-archon": "./dist/cli.js",
     "archon": "./dist/cli.js",
-    "docbuild": "./dist/cli.js",
     "archon-publish": "./dist/publish-cli.js"
   },
   "main": "./dist/index.js",

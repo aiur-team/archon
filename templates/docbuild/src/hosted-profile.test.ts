@@ -512,7 +512,7 @@ test("unknown and incompatible flags fail with help and a nonzero exit", (t) => 
     ["a", "b"],
     [],
     // Help is the whole request or it is a mistake. These exited 2 before the
-    // parser was rewritten, and a `docbuild "$doc" $FLAGS && upload ...` script
+    // parser was rewritten, and a `archon "$doc" $FLAGS && upload ...` script
     // depends on that: exiting 0 while writing nothing would upload the
     // previous run's artifact.
     ["sample", "--help"],
@@ -523,7 +523,7 @@ test("unknown and incompatible flags fail with help and a nonzero exit", (t) => 
     const result = cli(dir, args);
     assert.notEqual(result.code, 0, `expected a nonzero exit for: ${args.join(" ")}`);
     assert.match(result.stderr, /^error: /m, `expected an error line for: ${args.join(" ")}`);
-    assert.match(result.stderr, /docbuild <instance> --hosted/, `expected help for: ${args.join(" ")}`);
+    assert.match(result.stderr, /archon <instance> --hosted/, `expected help for: ${args.join(" ")}`);
     assert.equal(result.stdout, "", `help must not go to stdout for: ${args.join(" ")}`);
     assert.ok(
       !existsSync(join(dir, "sample", "dist")),
@@ -536,7 +536,7 @@ test("unknown and incompatible flags fail with help and a nonzero exit", (t) => 
   for (const flag of ["-h", "--help"]) {
     const help = cli(dir, [flag]);
     assert.equal(help.code, 0, help.stderr);
-    assert.match(help.stdout, /docbuild <instance> --hosted/);
-    assert.match(help.stdout, /docbuild --site/);
+    assert.match(help.stdout, /archon <instance> --hosted/);
+    assert.match(help.stdout, /archon --site/);
   }
 });
