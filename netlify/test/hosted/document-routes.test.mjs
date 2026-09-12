@@ -175,6 +175,13 @@ test("an owner gets a shell that carries no document data", async () => {
   assert.match(csp, /frame-ancestors 'none'/);
   assert.match(csp, /base-uri 'none'/);
   assert.doesNotMatch(csp, /unsafe-inline/);
+  /* The shell draws no image of its own, but a browser asks for `/favicon.ico`
+     on every page it renders and `default-src 'none'` refused that request on
+     every load. Same-origin and no wider: the icon is a first-party file. */
+  assert.ok(
+    csp.split(";").map((part) => part.trim()).includes("img-src 'self'"),
+    `the page may not load its own favicon (${csp})`,
+  );
 
   const html = await response.text();
   /* The shell is the same bytes for every document, so nothing about this one

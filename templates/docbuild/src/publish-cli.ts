@@ -299,7 +299,7 @@ function reportEnvelope(
   state: RequestState,
   requestFile: string,
   envelope: StatusEnvelope,
-  extra: { timedOut?: boolean; windowClosed?: boolean } = {},
+  extra: { timedOut?: boolean; windowClosed?: boolean; timeoutSeconds?: number } = {},
 ): number {
   const nextAction = nextActionFor(envelope.state, requestFile, state.verificationUrl);
   const payload: Record<string, unknown> = {
@@ -318,7 +318,11 @@ function reportEnvelope(
   human.push(`next: ${nextAction}`);
 
   if (extra.timedOut === true) {
-    note("still waiting for approval after the requested timeout; nothing was uploaded");
+    /* Name the bound and what it was waiting for. "Timed out" on its own does
+       not tell a caller whether to call again or to go and find the human. */
+    note(
+      `timed out after ${extra.timeoutSeconds ?? PUBLISH_CONTRACT.RESUME_TIMEOUT_DEFAULT_SECONDS}s waiting for a human to approve this publication at ${state.serviceOrigin}; nothing was uploaded`,
+    );
   }
   if (extra.windowClosed === true) {
     note("the server's authorization window has closed; a later status call will say expired");
@@ -413,6 +417,7 @@ async function runResume(options: Options, { state, path }: LoadedRequest): Prom
   return reportEnvelope(options, state, path, outcome.envelope, {
     timedOut: outcome.timedOut,
     windowClosed: outcome.windowClosed,
+    timeoutSeconds,
   });
 }
 
@@ -449,10 +454,17 @@ function reportFailure(options: Options | null, error: unknown, state: RequestSt
 
   const payload: Record<string, unknown> = {
     v: 1,
-    command: options?.command ?? "unknown",
+    command: options?.command ?? invocation.command,
     state: "error",
     code: failure.code,
     message: failure.message,
+    /* The two fields an agent needs to decide what to do next without parsing
+       prose or memorising this command's exit table. `retryable` is the whole
+       question — a service that says no is not a service to come back to — and
+       `exitCode` lets a wrapper check that the status it observed is the one
+       this object describes. */
+    retryable: failure.retryable,
+    exitCode: failure.exitCode,
   };
   if (state !== null) {
     payload["publicationId"] = state.publicationId;
@@ -468,7 +480,16 @@ function reportFailure(options: Options | null, error: unknown, state: RequestSt
   }
 
   note(`error: ${failure.message}`);
-  if (options?.json === true) process.stdout.write(`${JSON.stringify(payload)}\n`);
+  note(`code ${failure.code}; retryable ${failure.retryable ? "yes" : "no"}; exit ${failure.exitCode}`);
+  /* `writeSync`, for the reason `usage` gives: `process.exitCode` is set on the
+     next statement and the process can reach its exit before an asynchronous
+     stdout write to a pipe has drained. A `--json` caller that gets an empty
+     stdout and a bare non-zero status is in exactly the position `--json`
+     exists to prevent, so the one object it was promised is written
+     synchronously or not at all. */
+  if (options?.json === true || (options === null && invocation.json)) {
+    writeSync(1, `${JSON.stringify(payload)}\n`);
+  }
   return failure.exitCode;
 }
 

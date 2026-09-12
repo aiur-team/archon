@@ -205,7 +205,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The sniff that separates an HTML artifact from bytes that are not markup.
  *
- * Markup, not a document element. `docbuild` composes an artifact as a
+ * Markup, not a document element. `archon` composes an artifact as a
  * *fragment* — its own `layout.html` begins at `<meta name="doc-id">` and never
  * emits `<html>`, `<head>` or a doctype — because the hosted renderer supplies
  * the document element itself and drops the artifact into a sandboxed `srcdoc`
@@ -268,6 +268,16 @@ export class PublishError extends Error {
   readonly failure: PublishFailure;
   readonly code: string;
   readonly exitCode: number;
+  /**
+   * Whether waiting could change this answer.
+   *
+   * Derived from `failure` rather than stored separately, so the one question
+   * a caller actually has to answer — "is trying again worth anything?" — has
+   * a single source and cannot drift from the exit class. Only a `retryable`
+   * failure is ever waited on; everything else is terminal the moment it is
+   * constructed.
+   */
+  readonly retryable: boolean;
   /** `Retry-After`, when the service asked for a specific wait. */
   readonly retryAfterSeconds: number | null;
 
@@ -277,6 +287,7 @@ export class PublishError extends Error {
     this.failure = failure;
     this.code = code;
     this.exitCode = FAILURE_EXIT[failure];
+    this.retryable = failure === "retryable";
     this.retryAfterSeconds = retryAfterSeconds;
   }
 }
@@ -1339,13 +1350,36 @@ async function readBounded(response: Response, max: number, origin: string): Pro
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     if (error instanceof PublishError) throw error;
-    throw new PublishError(
-      "retryable",
-      "network_unavailable",
-      `cannot read the response from ${origin}: ${(error as Error).message}`,
-    );
+    throw transportFailure(origin, "reading the response body", error);
   }
   return Buffer.concat(chunks);
+}
+
+/**
+ * Turn a transport failure into one that says what the client was waiting on.
+ *
+ * The distinction this draws is the whole point. `AbortSignal.timeout` reports
+ * itself as "The operation was aborted due to timeout", which names neither
+ * the endpoint, the phase nor the bound — so a command that gave up after
+ * thirty seconds reads exactly like one that could not resolve a hostname, and
+ * a caller deciding whether to wait longer has nothing to decide on. A wait
+ * that ends without saying what it was waiting for is only half-bounded, so
+ * the deadline, the phase and the URL are all named here.
+ */
+function transportFailure(endpoint: string, phase: string, error: unknown): PublishError {
+  const name = (error as { name?: string } | null)?.name;
+  if (name === "TimeoutError" || name === "AbortError") {
+    return new PublishError(
+      "retryable",
+      "network_unavailable",
+      `timed out after ${PUBLISH_CONTRACT.REQUEST_TIMEOUT_SECONDS}s ${phase} from ${endpoint}`,
+    );
+  }
+  return new PublishError(
+    "retryable",
+    "network_unavailable",
+    `cannot reach ${endpoint} (${phase}): ${(error as Error)?.message ?? String(error)}`,
+  );
 }
 
 /** `Retry-After` in its delta-seconds form, ignored when it is not one. */
@@ -1394,11 +1428,7 @@ async function send(deps: PublishDeps, request: WireRequest): Promise<WireRespon
       ...(body === undefined ? {} : { body }),
     });
   } catch (error) {
-    throw new PublishError(
-      "retryable",
-      "network_unavailable",
-      `cannot reach ${request.origin}: ${(error as Error).message}`,
-    );
+    throw transportFailure(`${request.origin}${request.path}`, "waiting for a response", error);
   }
 
   if (response.status >= 300 && response.status < 400) {
@@ -1410,7 +1440,11 @@ async function send(deps: PublishDeps, request: WireRequest): Promise<WireRespon
     );
   }
 
-  const raw = await readBounded(response, PUBLISH_CONTRACT.RESPONSE_BODY_MAX_BYTES, request.origin);
+  const raw = await readBounded(
+    response,
+    PUBLISH_CONTRACT.RESPONSE_BODY_MAX_BYTES,
+    `${request.origin}${request.path}`,
+  );
   let json: unknown;
   try {
     json = JSON.parse(raw.toString("utf8"));
@@ -1723,8 +1757,13 @@ export async function resumePublication(
          refused capability, a protocol violation — is not something waiting
          fixes, so it leaves immediately. Deciding this from `failure` rather
          than from a list of codes keeps the two in step; the earlier code list
-         silently excluded `network_unavailable`, the most common one of all. */
-      if (!(error instanceof PublishError) || error.failure !== "retryable") throw error;
+         silently excluded `network_unavailable`, the most common one of all.
+
+         `publishing_disabled` is the case that makes this non-negotiable: the
+         service answers in half a second and says `retryable: false`, and a
+         loop that polls it anyway converts a prompt refusal into a wait with
+         nothing at the end of it. */
+      if (!(error instanceof PublishError) || !error.retryable) throw error;
       polls += 1;
       const wait = nextPollDelayMs(attempt, error.retryAfterSeconds, deps.random);
       /* The same two limits as the success path: waiting past the caller's

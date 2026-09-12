@@ -22,7 +22,7 @@
  *
  *   1. the tarball installs into a directory with no `templates/base/` above it
  *      and no other `aiur-archon` on its resolution path;
- *   2. `archon`, its `docbuild` alias, `archon-publish`, the skeleton, the base assets and
+ *   2. `archon`, `archon-publish`, the skeleton, the base assets and
  *      `dist/skills/archon-doc/SKILL.md` are all installed, and the packaged
  *      skill is byte-identical to the canonical source;
  *   3. every installed path and every command flag the skill names actually
@@ -111,7 +111,6 @@ const INSTALLED = {
   skeleton: "node_modules/aiur-archon/dist/skeleton",
   base: "node_modules/aiur-archon/dist/base/layout.html",
   archon: "node_modules/.bin/archon",
-  docbuild: "node_modules/.bin/docbuild",
   publish: "node_modules/.bin/archon-publish",
 };
 
@@ -548,9 +547,22 @@ async function installConsumer(consumer, tarball) {
 
 /* ------------------------------------------------------------------ phases */
 
+/**
+ * Bins the package must *not* install.
+ *
+ * `docbuild` was dropped with no compatibility shim. A removal that survives in
+ * the `bin` map is indistinguishable from one that landed, so the absence is
+ * asserted rather than assumed — and `docbuild` on the registry is somebody
+ * else's package, so a stray bin here is also a name collision nobody wants.
+ */
+const REMOVED_BINS = ["node_modules/.bin/docbuild"];
+
 function assertInstalledLayout(consumer) {
   for (const [what, relative] of Object.entries(INSTALLED)) {
     assert.notEqual(statSafe(join(consumer, relative)), null, `the installed package has no ${what} at ${relative}`);
+  }
+  for (const relative of REMOVED_BINS) {
+    assert.equal(statSafe(join(consumer, relative)), null, `the installed package still ships ${relative}, which was removed`);
   }
   assert.notEqual(
     statSafe(join(consumer, INSTALLED.skeleton, "doc.json")),
@@ -613,10 +625,6 @@ async function assertSkillMatchesPackage(consumer) {
   }
 
   const builderHelp = await runExpecting(0, join(consumer, INSTALLED.archon), ["--help"], { cwd: consumer });
-  /* `docbuild` is the compatibility alias for the same builder; the two bins
-     must resolve to the same help or one of them is pointing somewhere else. */
-  const aliasHelp = await runExpecting(0, join(consumer, INSTALLED.docbuild), ["--help"], { cwd: consumer });
-  assert.equal(aliasHelp.stdout + aliasHelp.stderr, builderHelp.stdout + builderHelp.stderr, "the docbuild alias and the archon bin print different help");
   const publishHelp = await runExpecting(0, join(consumer, INSTALLED.publish), ["--help"], { cwd: consumer });
   const help = `${builderHelp.stdout}${builderHelp.stderr}${publishHelp.stdout}${publishHelp.stderr}`;
 
@@ -626,7 +634,17 @@ async function assertSkillMatchesPackage(consumer) {
       `archon-publish --help does not document the ${command} command the skill tells people to run`,
     );
   }
-  const flags = [...new Set([...skill.matchAll(/(?<![\w-])--[a-z][a-z-]+/g)].map((m) => m[0]))];
+  /**
+   * Flags that belong to `npx`, not to either of this package's commands.
+   *
+   * The skill tells people to run the bins through `npx --no`, so its prose
+   * carries npx's own options as well as ours. Holding those against our
+   * `--help` would fail for a flag that is correct and documented by npm.
+   */
+  const NPX_FLAGS = new Set(["--no", "--yes", "--package"]);
+  const flags = [...new Set([...skill.matchAll(/(?<![\w-])--[a-z][a-z-]+/g)].map((m) => m[0]))].filter(
+    (flag) => !NPX_FLAGS.has(flag),
+  );
   for (const flag of flags) {
     /* Word-bounded, not a substring: `help.includes("--time")` is satisfied by
        `--timeout-seconds`, so a flag the skill invented would pass by being a
@@ -636,6 +654,33 @@ async function assertSkillMatchesPackage(consumer) {
       `the skill names ${flag}, which neither installed command's --help documents`,
     );
   }
+  /* Every `npx` line the skill hands a reader must resolve to *this* package.
+     `archon` and `archon-publish` are bin names inside `aiur-archon`, not
+     package names: without `--no`, npx asks the registry, where `archon` is an
+     unrelated third-party package and
+     `archon-publish` does not exist — and for a name it cannot find, npx stops
+     to ask permission to install, which on a non-interactive agent is a
+     command that prints nothing and never exits (#250). `--no` refuses to
+     install, so a missing install fails loudly instead. */
+  const NPX_PREFIXES = new Set(["--no", "--yes", "--package", "aiur-archon", "<bin>"]);
+  /* Only the spellings a reader can copy and run: an inline code span, or a
+     command line inside a fenced block. Prose that merely mentions npx is not
+     an invocation, and matching it would make the paragraph explaining this
+     rule break it — including after an innocent reflow, which is why the
+     fenced blocks are cut out first rather than matched by line position. */
+  const fenced = [...skill.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map((match) => match[1]).join("\n");
+  const invocations = [
+    ...[...skill.matchAll(/`npx +([^`\s]+)/g)].map((match) => match[1]),
+    ...[...fenced.matchAll(/^\s*npx +(\S+)/gm)].map((match) => match[1]),
+  ];
+  assert.ok(invocations.length >= 4, `the skill spells ${invocations.length} npx invocations; expected the builder, its alias and the publisher`);
+  for (const next of invocations) {
+    assert.ok(
+      NPX_PREFIXES.has(next),
+      `the skill spells \`npx ${next}\`, which npx resolves against the registry rather than the installed package; write \`npx --no ${next}\``,
+    );
+  }
+
   for (const code of Object.values(EXIT)) {
     assert.ok(
       new RegExp(`^\\s*\\|?\\s*${code}\\s`, "m").test(skill),
@@ -948,7 +993,7 @@ function assertNoLeaks() {
     }
     assert.ok(!streams.includes(DOCUMENT_SENTINEL), `${entry.argv} printed the document's content`);
     /* Markers the artifact under test actually contains. `<!doctype html` was
-       the obvious spelling and it is exactly the one a docbuild artifact never
+       the obvious spelling and it is exactly the one an archon artifact never
        has -- the guard could not fire for the bytes it was guarding. */
     for (const markup of ["<title>", '<meta name="doc-id"', "<section", "</html>"]) {
       assert.ok(!streams.includes(markup), `${entry.argv} printed artifact markup (${markup})`);

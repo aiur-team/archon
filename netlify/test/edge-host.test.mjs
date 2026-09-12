@@ -48,6 +48,7 @@ import {
   notFoundPageHeaders,
 } from "../lib/edge-host.mjs";
 import { AVATAR_IMAGE_ORIGINS } from "../lib/hosted/contracts.mjs";
+import { VIEWER_ASSET_PATHS, viewerShell } from "../lib/hosted/documents.mjs";
 import { RESERVED_FIRST_SEGMENTS } from "../lib/hosted/identity.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -808,6 +809,109 @@ test("application host passes through API, assets, login, docs, publish and invi
     assert.equal(cspCount(response), 1, `exactly one CSP on ${path}`);
     assert.ok(response.headers.get("Content-Security-Policy").includes("frame-ancestors 'none'"));
   }
+});
+
+/* --- the viewer shell's own chrome ---------------------------------------- */
+
+/**
+ * The content type Netlify serves each viewer subresource as, keyed by
+ * extension. The gate never sets a `Content-Type`; what these stand for is the
+ * static answer the deploy gives, which is the answer a browser under `nosniff`
+ * will accept for a stylesheet and for a module.
+ */
+const VIEWER_ASSET_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+};
+
+/** A served static subresource, as `_site/viewer.css` and `_site/viewer.js` are. */
+function staticAsset(path) {
+  const type = VIEWER_ASSET_TYPES[path.slice(path.lastIndexOf("."))];
+  assert.ok(type !== undefined, `no content type is declared for ${path}`);
+  return new Response("/* the committed viewer asset */\n", {
+    status: 200,
+    headers: { "content-type": type },
+  });
+}
+
+test("every subresource the viewer shell references is reachable with no session at all", async () => {
+  /* Derived from the shell rather than restated. The two lists that have to
+     agree are the markup at `/docs/<id>` and the gate's pass-through set, and a
+     test that names the paths itself would keep passing while the shell moved
+     to a third path nobody had granted. */
+  const shell = viewerShell(RENDER_ORIGIN);
+  const referenced = [...shell.matchAll(/(?:href|src)="(\/[^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(
+    referenced.sort(),
+    [VIEWER_ASSET_PATHS.stylesheet, VIEWER_ASSET_PATHS.module].sort(),
+    "the viewer shell references a same-origin subresource this test does not cover",
+  );
+
+  for (const path of referenced) {
+    /* The committed file is really published at this path: a grant for a path
+       the build does not serve is a 404 the gate has made anonymous. */
+    assert.ok(
+      readFileSync(join(ROOT, "netlify/public", path.slice(1))).byteLength > 0,
+      `${path} is not a committed file under netlify/public`,
+    );
+
+    assert.equal(isApplicationPassThrough(path), true, `${path} passes the gate with no session`);
+
+    /* Anonymous: no cookie at all, which is the state of the visitor the
+       sign-in page is about to send to `/docs/<id>`. Before #255 each of these
+       answered a 303 to `/login/` -- the stylesheet and module of the page the
+       sign-in exists to reach were behind the sign-in itself. */
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      next: () => staticAsset(path),
+    });
+    assert.equal(response.status, 200, `${path} is served to an anonymous visitor`);
+    assert.equal(calls.next, 1, `${path} reaches the published file`);
+    assert.equal(control.identifyCalls, 0, `${path} is not session-checked at the gate`);
+    assert.equal(response.headers.get("Location"), null, `${path} is never a sign-in redirect`);
+
+    /* The second half of the defect, and the one `nosniff` turns into a dead
+       page: a stylesheet and a module have to arrive as a stylesheet and a
+       module. `sessionGate` answers anything that is not `text/html` with a
+       `text/plain` refusal body, so a regression that puts either file back
+       inside the gate fails here on the content type even if it kept a 200. */
+    assert.equal(
+      response.headers.get("Content-Type"),
+      VIEWER_ASSET_TYPES[path.slice(path.lastIndexOf("."))],
+      `${path} keeps the content type the deploy served it with`,
+    );
+    assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff", `${path} is still nosniff`);
+  }
+});
+
+test("the viewer asset grant is two exact paths and reaches nothing else", async () => {
+  /* Every near miss of the two granted spellings. Each one being gated is what
+     keeps this grant from becoming the `/assets/` prefix that once served a
+     slug-shaped path: membership is equality, so no document, no deeper file
+     and no look-alike rides in on it. */
+  for (const gated of [
+    "/viewer.css/",
+    "/viewer.js/",
+    "/viewer.css/x",
+    "/viewer.js/x",
+    "/viewer.csset",
+    "/viewer.json",
+    "/viewer/",
+    "/viewer",
+    "/viewer-notes/",
+    "/VIEWER.JS",
+    "/some-slug/viewer.js",
+  ]) {
+    assert.equal(isApplicationPassThrough(gated), false, `${gated} is not a pass-through`);
+  }
+
+  /* And the documents themselves are untouched by the grant: a collaboration
+     slug is still the session gate's business, and an anonymous caller still
+     gets the sign-in redirect rather than a document. */
+  const { response, calls } = await runGate(APP_HOST, "/some-slug/", { cookie: null });
+  assert.equal(response.status, 303, "a document still demands a session");
+  assert.equal(response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+  assert.equal(calls.next, 0, "no document is read for an anonymous caller");
 });
 
 test("a static HTML page pass-through gets the page CSP; an API/JSON one keeps the strict API CSP", async () => {

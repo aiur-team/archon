@@ -37,7 +37,7 @@
  *     shadowed.
  *   * **The client is the installed package.** `templates/docbuild` is packed
  *     with `npm pack` and installed into a directory outside this repository,
- *     and the document is built and published by the installed `docbuild` and
+ *     and the document is built and published by the installed `archon` and
  *     `archon-publish` binaries -- separate processes, exactly as an agent runs
  *     them.
  *   * **The person is a real browser.** A pinned Chromium drives the real
@@ -1259,7 +1259,7 @@ async function startAdversary() {
 
 const PACKAGE_DIR = join(ROOT, "templates", "docbuild");
 const INSTALLED = Object.freeze({
-  docbuild: join("node_modules", ".bin", "docbuild"),
+  archon: join("node_modules", ".bin", "archon"),
   publish: join("node_modules", ".bin", "archon-publish"),
   skeleton: join("node_modules", "aiur-archon", "dist", "skeleton"),
 });
@@ -1390,7 +1390,7 @@ async function buildDocument(consumer) {
     );
   }
 
-  const built = await runExpecting(0, join(consumer, INSTALLED.docbuild), [instance, "--hosted"], { cwd: consumer });
+  const built = await runExpecting(0, join(consumer, INSTALLED.archon), [instance, "--hosted"], { cwd: consumer });
   const artifact = join(instanceDir, "dist", `${instance}.hosted.html`);
   assert.ok(
     built.stdout.includes(`${instance}/dist/${instance}.hosted.html`),
