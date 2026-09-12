@@ -590,7 +590,7 @@
        ever re-applied to the form when it is a legal one; the server validates it
        again regardless. `/` and an empty value both mean the onboarding default,
        which the field already holds. */
-    const RESERVED = new Set(["admin", "assets", "login", "invite", "publish", "docs", "api", "welcome", "_assets", "_render"]);
+    const RESERVED = new Set(["admin", "assets", "login", "invite", "publish", "docs", "api", "welcome", "logout", "_assets", "_render"]);
     function destinationAllowed(value) {
       if (value === "/publish/authorize" || value === "/welcome" || value === "/admin") return true;
       if (/^\/docs\/[0-9a-f]{32}$/.test(value)) return true;

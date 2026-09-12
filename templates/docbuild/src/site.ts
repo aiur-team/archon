@@ -86,6 +86,7 @@ const RESERVED_ROUTES = new Set([
   "docs",
   "publish",
   "welcome",
+  "logout",
   "_assets",
   "_render",
   "viewer.js",
@@ -803,6 +804,12 @@ ${rows}
  * classify separately. The rewrite keeps the visitor on the path the grammar
  * named and serves the committed `netlify/public/welcome/index.html`.
  *
+ * `/logout` is the third, and the same shape again. It is the address an
+ * operator types to be signed out, so it has to answer on the exact spelling
+ * with no trailing slash and no 301 hop -- the page's own bootstrap and the
+ * edge gate's pass-through list both name that spelling, and a redirect to
+ * `/logout/` would put the visitor on a second path each layer has to classify.
+ *
  * They are emitted only when the hosted tree was actually copied. A repository
  * without one -- an installed consumer building their own documents -- would
  * otherwise get rewrites pointing at files that are not in its publish tree,
@@ -812,6 +819,7 @@ ${rows}
 export const HOSTED_REWRITES = [
   "/publish/authorize /publish/authorize.html 200",
   "/welcome /welcome/index.html 200",
+  "/logout /logout/index.html 200",
 ];
 
 /** Permanent-ID and alias redirects, grouped in ascending slug order. */

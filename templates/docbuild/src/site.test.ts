@@ -97,6 +97,8 @@ const ROOT_LOGIN = "<!doctype html><title>root login</title>\n";
 const HOSTED_LOGIN = "<!doctype html><title>hosted login</title>\n";
 /** The onboarding page a fresh sign-in lands on. */
 const HOSTED_WELCOME = "<!doctype html><title>hosted welcome</title>\n";
+/** The sign-out page an operator reaches by typing /logout. */
+const HOSTED_LOGOUT = "<!doctype html><title>hosted logout</title>\n";
 
 /** Two origins on two registrable sites, which is what the renderer requires. */
 const APP_ORIGIN = "https://app.example.com";
@@ -224,6 +226,9 @@ const root = (
     writeFileSync(join(dir, "netlify", "public", "publish", "authorize.js"), "export const go = 1;\n");
     mkdirSync(join(dir, "netlify", "public", "welcome"), { recursive: true });
     writeFileSync(join(dir, "netlify", "public", "welcome", "index.html"), HOSTED_WELCOME);
+    mkdirSync(join(dir, "netlify", "public", "logout"), { recursive: true });
+    writeFileSync(join(dir, "netlify", "public", "logout", "index.html"), HOSTED_LOGOUT);
+    writeFileSync(join(dir, "netlify", "public", "logout", "logout.js"), "export const out = 1;\n");
   }
 
   // The real renderer tree, not a stand-in: `buildRenderer` resolves its own

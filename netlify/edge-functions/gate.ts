@@ -21,6 +21,7 @@ import {
   withDocumentHeaders,
   withFirstPartyPageHeaders,
   withLandingPageHeaders,
+  withNotFoundPageHeaders,
 } from "../lib/edge-host.mjs";
 
 type GateContext = {
@@ -81,6 +82,9 @@ const RESERVED_FIRST_SEGMENTS = [
   "docs",
   "api",
   "welcome",
+  /* The sign-out page. It is not a destination a sign-in may land on, and a
+     document that could claim the slug would shadow it. */
+  "logout",
   "_assets",
   "_render",
 ];
@@ -189,6 +193,34 @@ function finalizePassThrough(response: Response, authOrigin: string | null): Res
   return isHtml
     ? withFirstPartyPageHeaders(response, authOrigin)
     : withApplicationHeaders(response);
+}
+
+/**
+ * Whether a response is the deploy's static not-found page.
+ *
+ * Netlify answers an unmatched static path with `_site/404.html` under status
+ * 404, and that page is the one HTML answer on this host that runs no script and
+ * draws the product logo and the two Google Font origins. It therefore takes its
+ * own header set rather than either of the two `finalizePassThrough` chooses
+ * between: the first-party page set grants no `img-src` or `font-src` and would
+ * serve it with no logo and in the fallback typeface.
+ *
+ * This is a header choice only, and it is keyed on the answer rather than on the
+ * path -- there is no path that "is" the 404 page, which is exactly why the
+ * status is what identifies it. It changes no routing, no redirect and no
+ * session decision: a path that was refused before is refused now, and a path
+ * that reached a 404 before reaches the same 404 now, in a legible typeface.
+ */
+function isNotFoundPage(response: Response): boolean {
+  try {
+    if (response.status !== 404) return false;
+    const headers = response.headers;
+    if (!(headers instanceof Headers)) return false;
+    if (headers.has("Content-Security-Policy")) return false;
+    return validContentType(headers.get("Content-Type"));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -463,6 +495,12 @@ async function applicationHost(
        name that provider in `form-action` or the browser blocks the post before
        it leaves. The origin comes from configuration, never from the request. */
     const authOrigin = authorizationOrigin(env);
+    /* A miss under one of these prefixes -- `/login/nope`, `/assets/nope`, an
+       API path no function claims -- is the deploy's static 404 rather than the
+       page that was asked for, and it gets the not-found set. Checked before the
+       landing branch so the root's own 404, if the publish tree ever lacked an
+       index, would not be dressed as a landing page. */
+    if (isNotFoundPage(passed)) return withNotFoundPageHeaders(passed);
     if (isLandingPage(url.pathname)) return withLandingPageHeaders(passed, authOrigin);
     /* A public reference document is the same bytes under the same header set a
        signed-in reader gets today; only the session check is skipped. It does
@@ -474,7 +512,16 @@ async function applicationHost(
     return finalizePassThrough(passed, authOrigin);
   }
 
-  return withApplicationHeaders(await sessionGate(req, url, context, env));
+  /* Everything else is session-gated, and the gate's own answers -- the sign-in
+     redirect, the outage 503, the access refusal -- keep the strict application
+     set. The one exception is the deploy's static not-found page, which a
+     *signed-in* visitor reaches by asking for a path this site does not route.
+     An anonymous visitor never reaches it: `sessionGate` answers them with the
+     sign-in redirect before `context.next()` is ever called, which is what keeps
+     "no such document" and "a document you may not read" one answer. */
+  const gated = await sessionGate(req, url, context, env);
+  if (isNotFoundPage(gated)) return withNotFoundPageHeaders(gated);
+  return withApplicationHeaders(gated);
 }
 
 export default async function gate(

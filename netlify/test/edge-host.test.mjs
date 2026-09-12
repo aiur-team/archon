@@ -43,6 +43,7 @@ import {
   rendererRewriteTarget,
   withApplicationHeaders,
   withFirstPartyPageHeaders,
+  notFoundPageHeaders,
 } from "../lib/edge-host.mjs";
 import { AVATAR_IMAGE_ORIGINS } from "../lib/hosted/contracts.mjs";
 
@@ -1297,4 +1298,117 @@ test("the session subrequest is addressed to the configured origin, not the requ
   // connect-vendored consumer serving.
   const unconfigured = await runGate(OTHER_HOST, "/some-slug/", { env: {}, next: () => docPage() });
   assert.equal(unconfigured.calls.session[0].url.origin, `https://${OTHER_HOST}`);
+});
+
+/* --- the sign-out page and the not-found page ----------------------------- */
+
+/** The deploy's static 404, as Netlify answers an unmatched path with it. */
+function notFoundPage() {
+  return new Response('<!doctype html><title>404 Page Not Found</title>', {
+    status: 404,
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
+test("the sign-out page is served with no session check, under the first-party page set", async () => {
+  /* A signed-out visitor who types /logout has to reach the page to be told
+     they are signed out. A session check here would answer them with the
+     sign-in redirect, which is the opposite of what they asked for. */
+  for (const path of ["/logout", "/logout/", "/logout/logout.js"]) {
+    const page = await runGate(APP_HOST, path, { cookie: null, next: () => staticPage() });
+    assert.equal(page.response.status, 200, `${path} is served, not a redirect`);
+    assert.equal(page.response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `and no role is resolved for ${path}`);
+    assert.equal(cspCount(page.response), 1, `${path} gains exactly one CSP`);
+  }
+
+  /* The page carries no inline script, so it is given no inline-script grant.
+     It does read the session route and post to the logout route, both
+     same-origin. The logout route answers a form navigation with a 303 to the
+     identity provider and `form-action` is enforced across that redirect, which
+     is why the set names the configured provider there -- asserted against
+     `firstPartyPageHeaders` above, where the provider origin is an argument
+     rather than a process-wide variable. */
+  const page = await runGate(APP_HOST, "/logout", { cookie: null, next: () => staticPage() });
+  const csp = page.response.headers.get("Content-Security-Policy");
+  assert.ok(/(^|; )script-src 'self'(;|$)/.test(csp), "no inline-script grant");
+  assert.ok(csp.includes("connect-src 'self'"), "it may read /api/hosted/session");
+  assert.ok(csp.includes("form-action 'self'"), "and may post to the logout route");
+  assert.ok(csp.includes("frame-ancestors 'none'"), "the page is frame-denied");
+  assert.equal(page.response.headers.get("X-Frame-Options"), "DENY");
+  assert.ok(
+    firstPartyPageHeaders("https://tenant.eu.auth0.com")[0][1].includes(
+      "form-action 'self' https://tenant.eu.auth0.com",
+    ),
+    "and the 303 the route answers it with reaches the provider",
+  );
+});
+
+test("the sign-out pass-through is three exact paths and no prefix", async () => {
+  /* `/logout-notes/` and `/logoutx/` are legal collaboration slugs. A prefix
+     entry would have passed somebody else's document through the session gate,
+     and a file dropped into `netlify/public/logout/` later would have become
+     anonymous by inheritance. */
+  for (const gated of ["/logoutx/", "/logout-notes/", "/logout/index.html", "/logout/other.js"]) {
+    const { response } = await runGate(APP_HOST, gated, {
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${gated} is not the sign-out page`);
+  }
+});
+
+test("an unrouted path answers with the not-found page, under its own header set", async () => {
+  /* Two surfaces reach it. A miss under a pass-through prefix -- a sign-in
+     asset that is not there, an API path no function claims -- is answered to
+     anybody; and a signed-in visitor asking for a path this site does not route
+     reaches the deploy's 404 through the session gate. */
+  const passThrough = await runGate(APP_HOST, "/login/not-a-file.js", {
+    cookie: null,
+    next: () => notFoundPage(),
+  });
+  assert.equal(passThrough.response.status, 404, "the miss is a 404, not a redirect");
+  assert.equal(control.identifyCalls, 0, "and costs no session lookup");
+
+  const signedIn = await runGate(APP_HOST, "/no-such-path/", { next: () => notFoundPage() });
+  assert.equal(signedIn.response.status, 404, "a signed-in visitor reaches the same 404");
+
+  for (const { response } of [passThrough, signedIn]) {
+    assert.equal(cspCount(response), 1, "exactly one CSP");
+    const csp = response.headers.get("Content-Security-Policy");
+    assert.equal(csp, notFoundPageHeaders()[0][1], "the not-found set, on both surfaces");
+    assert.ok(csp.includes("img-src 'self'"), "so the logo is drawn");
+    assert.ok(csp.includes("font-src https://fonts.gstatic.com"), "and the fonts load");
+    assert.equal(/script-src/.test(csp), false, "with no script grant of any kind");
+    assert.equal(response.headers.get("X-Frame-Options"), "DENY", "and still frame-denied");
+  }
+});
+
+test("a slug-shaped path still refuses an anonymous visitor rather than 404ing", async () => {
+  /* The property the not-found page must not cost: the gate does not reveal
+     whether a private document exists. An anonymous visitor asking for a real
+     slug and an invented one get the same sign-in redirect, and `context.next()`
+     is never reached -- so there is nothing for a 404 to be told apart from. */
+  for (const path of ["/some-slug/", "/an-invented-slug/"]) {
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: SESSION_COOKIE_HEADER,
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${path} is a sign-in redirect, never a 404`);
+    assert.equal(
+      response.headers.get("Location"),
+      `/login/?destination=${encodeURIComponent(path)}`,
+    );
+    assert.equal(calls.next, 0, `${path} is never fetched downstream for an anonymous visitor`);
+  }
+});
+
+test("the renderer host's not-found stays bodyless and tells nothing apart", async () => {
+  /* The renderer answers its own 404 before `context.next()`, so the
+     application's not-found page is not reachable there and the four shell
+     paths stay indistinguishable from every other path from outside. */
+  const { response, calls } = await runGate(RENDER_HOST, "/anything", {});
+  assert.equal(response.status, 404);
+  assert.equal(response.body, null, "no body at all");
+  assert.equal(calls.next, 0, "and nothing downstream is reached");
 });

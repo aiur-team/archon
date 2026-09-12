@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Log out — Archon</title>
+    <!--
+      A hittable address for signing out: https://archon.aiur.team/logout.
+
+      What this page is *not* is the thing worth stating first. It is not a GET
+      that ends a session. `POST /api/hosted/auth/logout` refuses GET
+      deliberately, because a logout on GET is one `<img src>` away from being
+      triggered by any page on the internet — and forcing a victim back through
+      a sign-in flow at a moment of the attacker's choosing is a useful thing to
+      chain. Nothing this page loads changes that: the route still only answers
+      a POST carrying the session-derived CSRF token.
+
+      So this page is a first-party form that a visitor's own browser submits.
+      `logout.js` reads the token out of `GET /api/hosted/session` — the same
+      request the splash nav makes, and the only way a static page can obtain a
+      value derived from an `HttpOnly` cookie — writes it into the hidden field,
+      and submits the form. The submit is the whole point of visiting the URL,
+      so it happens on load rather than waiting for a click; the button stays in
+      the markup as the fallback for no JavaScript and for a bootstrap that
+      failed, and it is a real submit control either way.
+
+      A visitor who is already signed out is told so plainly and offered the way
+      home, rather than being sent to post a request the route would refuse.
+
+      The page's policy is the first-party page set the edge gate applies to a
+      static HTML pass-through: `script-src 'self'; style-src 'self'
+      'unsafe-inline'; connect-src 'self'; form-action 'self' <provider>`. That
+      is exactly what this page needs and no more — the one script is external
+      and same-origin, the styles are inline, the session read is same-origin,
+      and `form-action` covers both the same-origin POST and the 303 the route
+      answers it with, which carries the browser out to the identity provider to
+      end its session too. The page carries no inline script, so it needs none
+      of the landing-page set's `'unsafe-inline'`.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 26rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.35rem; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      button {
+        cursor: pointer;
+        font: inherit;
+        margin-top: 1rem;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      .status { margin-top: 1rem; }
+      .status:empty { display: none; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      .home { margin-top: 1.5rem; }
+      noscript p { font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Log out of Archon</h1>
+
+    <noscript>
+      <p>
+        JavaScript is off, so this page cannot sign you out on its own: the
+        sign-out needs a one-time security token it reads from Archon when it
+        loads. Use the account menu on the <a href="/">home page</a> instead.
+      </p>
+    </noscript>
+
+    <!-- Hidden until the token is in hand. A form posted without one is refused,
+         and a button that is only ever refused is worse than no button. -->
+    <form id="logout" method="post" action="/api/hosted/auth/logout" hidden>
+      <input type="hidden" name="csrfToken" id="csrf" value="" />
+      <p class="lede">Signing you out…</p>
+      <button type="submit" id="submit">Log out</button>
+    </form>
+
+    <!-- The already-signed-out answer. Nothing to post, so nothing is posted. -->
+    <div id="signed-out" hidden>
+      <p class="lede">You are already signed out of Archon.</p>
+      <p class="home"><a href="/">Back to the home page</a></p>
+    </div>
+
+    <p class="status" id="status" role="status" aria-live="polite">Checking your session…</p>
+
+    <script src="./logout.js"></script>
+  </body>
+</html>
