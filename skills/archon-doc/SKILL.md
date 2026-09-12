@@ -52,23 +52,21 @@ on that deployment — rather than beginning a publication that cannot complete.
 npm install aiur-archon
 ```
 
-Node 18 or later; the package has no runtime dependencies. That installs three commands — `archon`,
-`archon-publish`, and `docbuild`, a compatibility alias for the same builder as `archon` — and
-everything else this file refers to:
+Node 18 or later; the package has no runtime dependencies. That installs the builder `archon`, the
+publisher `archon-publish`, and everything else this file refers to:
 
 | What | Installed path |
 | ---- | -------------- |
 | This file | `node_modules/aiur-archon/dist/skills/archon-doc/SKILL.md` |
 | Document skeleton | `node_modules/aiur-archon/dist/skeleton/` |
 | Base assets the builder inlines | `node_modules/aiur-archon/dist/base/` |
-| Builder | `npx --no archon` (alias: `npx --no docbuild`) |
+| Builder | `npx --no archon` |
 | Publisher | `npx --no archon-publish` |
 
-**Always write `npx --no <bin>`, never a bare `npx <bin>`.** `archon`, `docbuild` and
-`archon-publish` are *command* names inside the `aiur-archon` package, not package names of their
-own. Without `--no`, npx looks the bin name up on the registry instead of running the installed
-package — and on the registry `archon` and `docbuild` are unrelated third-party packages while
-`archon-publish` does not exist at all. For a name it cannot find, npx stops to ask permission to
+**Always write `npx --no <bin>`, never a bare `npx <bin>`.** `archon` and `archon-publish` are
+*command* names inside the `aiur-archon` package, not package names of their own. Without `--no`, npx
+looks the bin name up on the registry instead of running the installed package — and on the registry
+`archon` is an unrelated third-party package while `archon-publish` does not exist at all. For a name it cannot find, npx stops to ask permission to
 install, and on a non-interactive agent that is a command which prints nothing and never exits.
 `--no` refuses to install anything, so a missing install fails immediately and names the command it
 could not find.

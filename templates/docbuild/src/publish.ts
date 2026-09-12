@@ -205,7 +205,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The sniff that separates an HTML artifact from bytes that are not markup.
  *
- * Markup, not a document element. `docbuild` composes an artifact as a
+ * Markup, not a document element. `archon` composes an artifact as a
  * *fragment* — its own `layout.html` begins at `<meta name="doc-id">` and never
  * emits `<html>`, `<head>` or a doctype — because the hosted renderer supplies
  * the document element itself and drops the artifact into a sandboxed `srcdoc`

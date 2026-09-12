@@ -36,8 +36,7 @@ are often the same name, and only the directory decides the filename. The CLI
 prints the path it wrote — read that line rather than guessing.
 
 Run `npx --no archon --help` for the full synopsis, including `--site`, which
-composes every document under the current directory into a static site. The
-package also installs `docbuild`, a compatibility alias for the same builder.
+composes every document under the current directory into a static site.
 
 ## Build it for private hosted reading
 

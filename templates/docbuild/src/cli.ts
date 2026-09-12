@@ -10,10 +10,10 @@ const args = process.argv.slice(2);
 // dispatch and its help integration. The one synopsis lists <instance> first
 // so the single-document command stays the headline, then the hosted profile,
 // then the --site form.
-const INSTANCE_SYNOPSIS = "    docbuild <instance>\n    docbuild <instance> --hosted\n";
-const SITE_SYNOPSIS = `${INSTANCE_SYNOPSIS}    docbuild --site\n`;
+const INSTANCE_SYNOPSIS = "    archon <instance>\n    archon <instance> --hosted\n";
+const SITE_SYNOPSIS = `${INSTANCE_SYNOPSIS}    archon --site\n`;
 const HELP = `${USAGE.replace(INSTANCE_SYNOPSIS, SITE_SYNOPSIS)}
-In site mode (docbuild --site), docbuild discovers every publishable document
+In site mode (archon --site), archon discovers every publishable document
 in this repository, composes each one through the shared builder, and writes a
 clean-URL Netlify site into _site/: hosted copies, a deterministic root index,
 permanent /d/<id> and alias redirects, and a preview-only noindex header when
@@ -30,9 +30,9 @@ const usage = (message?: string): never => {
   process.exit(message === undefined ? 0 : 2);
 };
 
-// Help is the whole request or it is a mistake. `docbuild <instance> --help`
+// Help is the whole request or it is a mistake. `archon <instance> --help`
 // exited 2 before this parser existed, and a build script of the shape
-// `docbuild "$doc" $FLAGS && upload "$doc/dist/..."` depends on that: succeeding
+// `archon "$doc" $FLAGS && upload "$doc/dist/..."` depends on that: succeeding
 // with exit 0 while writing nothing would send the previous run's artifact.
 const helpAt = args.findIndex((arg) => arg === "-h" || arg === "--help");
 if (helpAt !== -1) {

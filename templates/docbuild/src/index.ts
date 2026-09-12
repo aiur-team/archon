@@ -21,10 +21,10 @@ const CHEVRON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
   'stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
 
-export const USAGE = `docbuild — compose an architecture doc into one self-contained HTML file
+export const USAGE = `archon — compose an architecture doc into one self-contained HTML file
 
-    docbuild <instance>
-    docbuild <instance> --hosted
+    archon <instance>
+    archon <instance> --hosted
 
 --hosted builds the same document for private hosted reading instead: the same
 inline theme, navigation and section content, but no Google-font request and
@@ -281,7 +281,7 @@ export function repoRoot(from: string = process.cwd()): string {
  * This is an option, never an inference. The builder must not read the
  * environment, the document URL, or where the package happens to be installed
  * to decide which artifact a caller asked for: the CLI flag and the library
- * option are the same switch, so `docbuild <instance> --hosted` and
+ * option are the same switch, so `archon <instance> --hosted` and
  * `build(root, instance, { hosted: true })` produce the same file.
  */
 export interface BuildOptions {

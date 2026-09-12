@@ -20,13 +20,13 @@ npm install aiur-archon
 npx --no archon --help
 ```
 
-That gives you `npx --no archon` (alias: `npx --no docbuild`) and `npx --no archon-publish`, plus
-the packaged skeleton and skill on disk. Node 18 or later. No other dependency.
+That gives you `npx --no archon` and `npx --no archon-publish`, plus the packaged skeleton and
+skill on disk. Node 18 or later. No other dependency.
 
-**Write `npx --no <bin>`, never a bare `npx <bin>`.** `archon`, `docbuild` and `archon-publish` are
-command names inside `aiur-archon`, not package names. Without `--no`, npx looks the bin name up on
-the registry instead of running the installed package — and on the registry `archon` and `docbuild`
-are unrelated third-party packages while `archon-publish` does not exist. For a name it cannot find,
+**Write `npx --no <bin>`, never a bare `npx <bin>`.** `archon` and `archon-publish` are command
+names inside `aiur-archon`, not package names. Without `--no`, npx looks the bin name up on the
+registry instead of running the installed package — and on the registry `archon` is an unrelated
+third-party package while `archon-publish` does not exist. For a name it cannot find,
 npx stops to ask permission to install, and on a non-interactive agent that is a command which
 prints nothing and never exits. `--no` refuses to install anything, so a missing install fails
 immediately and names the command it could not find.

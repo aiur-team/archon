@@ -685,7 +685,7 @@ test("start refuses input that is missing, oversized or not HTML", async (t: Tes
   assert.equal(service.calls.start, 0, "nothing may reach the network before local validation passes");
 });
 
-test("start accepts the fragment docbuild actually emits", async (t: TestContext) => {
+test("start accepts the fragment archon actually emits", async (t: TestContext) => {
   /* `templates/base/layout.html` opens at `<meta name="doc-id">`: an artifact
      carries no doctype and no `<html>` element, because the hosted renderer
      supplies the document element and places these bytes in a sandboxed
