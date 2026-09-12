@@ -626,7 +626,17 @@ async function assertSkillMatchesPackage(consumer) {
       `archon-publish --help does not document the ${command} command the skill tells people to run`,
     );
   }
-  const flags = [...new Set([...skill.matchAll(/(?<![\w-])--[a-z][a-z-]+/g)].map((m) => m[0]))];
+  /**
+   * Flags that belong to `npx`, not to either of this package's commands.
+   *
+   * The skill tells people to run the bins through `npx --no`, so its prose
+   * carries npx's own options as well as ours. Holding those against our
+   * `--help` would fail for a flag that is correct and documented by npm.
+   */
+  const NPX_FLAGS = new Set(["--no", "--yes", "--package"]);
+  const flags = [...new Set([...skill.matchAll(/(?<![\w-])--[a-z][a-z-]+/g)].map((m) => m[0]))].filter(
+    (flag) => !NPX_FLAGS.has(flag),
+  );
   for (const flag of flags) {
     /* Word-bounded, not a substring: `help.includes("--time")` is satisfied by
        `--timeout-seconds`, so a flag the skill invented would pass by being a
@@ -636,6 +646,30 @@ async function assertSkillMatchesPackage(consumer) {
       `the skill names ${flag}, which neither installed command's --help documents`,
     );
   }
+  /* Every `npx` line the skill hands a reader must resolve to *this* package.
+     `archon`, `docbuild` and `archon-publish` are bin names inside
+     `aiur-archon`, not package names: bare `npx archon` asks the registry,
+     where `archon` and `docbuild` are unrelated third-party packages and
+     `archon-publish` does not exist — and for a name it cannot find, npx stops
+     to ask permission to install, which on a non-interactive agent is a
+     command that prints nothing and never exits (#250). `--no` refuses to
+     install, so a missing install fails loudly instead. */
+  const NPX_PREFIXES = new Set(["--no", "--yes", "--package", "aiur-archon", "<bin>"]);
+  /* Only the spellings a reader can copy and run: an inline code span, or a
+     line in a shell block. Prose that merely mentions npx is not a command,
+     and matching it would make the paragraph explaining this rule break it. */
+  const invocations = [
+    ...[...skill.matchAll(/`npx +([^`\s]+)/g)].map((match) => match[1]),
+    ...[...skill.matchAll(/^npx +(\S+)/gm)].map((match) => match[1]),
+  ];
+  assert.ok(invocations.length >= 4, `the skill spells ${invocations.length} npx invocations; expected the builder, its alias and the publisher`);
+  for (const next of invocations) {
+    assert.ok(
+      NPX_PREFIXES.has(next),
+      `the skill spells \`npx ${next}\`, which npx resolves against the registry rather than the installed package; write \`npx --no ${next}\``,
+    );
+  }
+
   for (const code of Object.values(EXIT)) {
     assert.ok(
       new RegExp(`^\\s*\\|?\\s*${code}\\s`, "m").test(skill),

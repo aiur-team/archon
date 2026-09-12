@@ -13,15 +13,23 @@ The complete instruction set is one file. Read all of it before you build anythi
 
 ## 2. Install the builder
 
-The builder is one published package. Run it with `npx`; there is nothing to clone:
+The builder is one published package. Install it; there is nothing to clone:
 
 ```sh
-npx aiur-archon --help
+npm install aiur-archon
+npx --no archon --help
 ```
 
-That gives you `npx archon` (alias: `npx docbuild`) and `npx archon-publish`. Node 18 or later. No
-other dependency. Add it to a project with `npm install aiur-archon` when you want the
-packaged skeleton and skill on disk.
+That gives you `npx --no archon` (alias: `npx --no docbuild`) and `npx --no archon-publish`, plus
+the packaged skeleton and skill on disk. Node 18 or later. No other dependency.
+
+**Write `npx --no <bin>`, never a bare `npx <bin>`.** `archon`, `docbuild` and `archon-publish` are
+command names inside `aiur-archon`, not package names. Without `--no`, npx looks the bin name up on
+the registry instead of running the installed package — and on the registry `archon` and `docbuild`
+are unrelated third-party packages while `archon-publish` does not exist. For a name it cannot find,
+npx stops to ask permission to install, and on a non-interactive agent that is a command which
+prints nothing and never exits. `--no` refuses to install anything, so a missing install fails
+immediately and names the command it could not find.
 
 Optional, for Claude Code: copy the packaged skill into the project so it loads automatically.
 
@@ -45,15 +53,15 @@ Your output is one built HTML file. A hosted link is a separate step and only ha
 
 1. `cp -R node_modules/aiur-archon/dist/skeleton my-doc`, then edit `my-doc/doc.json` (fresh six-hex `id`, unique `slug`, `title`).
 2. Write `my-doc/sections/*.html` from the material. The skill says how.
-3. `npx archon my-doc` for the normal profile; `npx archon my-doc --hosted` for the profile you publish.
+3. `npx --no archon my-doc` for the normal profile; `npx --no archon my-doc --hosted` for the profile you publish.
 4. Report the path the command prints. Open it in a browser and check it before you say it is done.
 
 ## 5. Publish (only when asked, and only with a service origin the person gives you)
 
-1. `npx archon-publish start --file my-doc/dist/my-doc.hosted.html --title "..." --service <origin> --json`
+1. `npx --no archon-publish start --file my-doc/dist/my-doc.hosted.html --title "..." --service <origin> --json`
    Exit 10 returns `verificationUrl`, `userCode` and `requestFile`.
 2. Hand `verificationUrl` and `userCode` to the person, and to nobody else. They open it, sign in, and approve.
-3. `npx archon-publish resume --request <requestFile> --json`
+3. `npx --no archon-publish resume --request <requestFile> --json`
    Exit 0 returns the receipt; report `result.url` and `serviceOrigin` exactly as returned.
 
 ## Do not

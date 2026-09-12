@@ -27,7 +27,7 @@ cp -R node_modules/aiur-archon/dist/skeleton my-doc
 ## Build it
 
 ```sh
-npx archon my-doc
+npx --no archon my-doc
 ```
 
 The result is `my-doc/dist/my-doc.html`, a single self-contained file. Output is
@@ -35,14 +35,14 @@ named after the instance **directory**, not the `slug` in `doc.json`; the two
 are often the same name, and only the directory decides the filename. The CLI
 prints the path it wrote — read that line rather than guessing.
 
-Run `npx archon --help` for the full synopsis, including `--site`, which
+Run `npx --no archon --help` for the full synopsis, including `--site`, which
 composes every document under the current directory into a static site. The
 package also installs `docbuild`, a compatibility alias for the same builder.
 
 ## Build it for private hosted reading
 
 ```sh
-npx archon my-doc --hosted
+npx --no archon my-doc --hosted
 ```
 
 `--hosted` is an explicit profile, never inferred from the environment, the
@@ -96,7 +96,7 @@ pairing code; `resume` picks the same publication up later, in a different
 process, and uploads once approval has happened.
 
 ```sh
-npx archon-publish start \
+npx --no archon-publish start \
   --file my-doc/dist/my-doc.hosted.html \
   --title "My document" \
   --service https://docs.example.com \
@@ -106,7 +106,7 @@ npx archon-publish start \
 
 # The human opens the URL, checks the pairing code matches, signs in, reads the
 # title and byte count, and approves. Then:
-npx archon-publish resume --request <requestFile> --json
+npx --no archon-publish resume --request <requestFile> --json
 # → exit 0 and the server's receipt, including the document URL.
 ```
 

@@ -51,8 +51,17 @@ everything else this file refers to:
 | This file | `node_modules/aiur-archon/dist/skills/archon-doc/SKILL.md` |
 | Document skeleton | `node_modules/aiur-archon/dist/skeleton/` |
 | Base assets the builder inlines | `node_modules/aiur-archon/dist/base/` |
-| Builder | `npx archon` (alias: `npx docbuild`) |
-| Publisher | `npx archon-publish` |
+| Builder | `npx --no archon` (alias: `npx --no docbuild`) |
+| Publisher | `npx --no archon-publish` |
+
+**Always write `npx --no <bin>`, never a bare `npx <bin>`.** `archon`, `docbuild` and
+`archon-publish` are *command* names inside the `aiur-archon` package, not package names of their
+own. Without `--no`, npx looks the bin name up on the registry instead of running the installed
+package — and on the registry `archon` and `docbuild` are unrelated third-party packages while
+`archon-publish` does not exist at all. For a name it cannot find, npx stops to ask permission to
+install, and on a non-interactive agent that is a command which prints nothing and never exits.
+`--no` refuses to install anything, so a missing install fails immediately and names the command it
+could not find.
 
 If `npm install` is not available to the person — no Node, no registry access, a locked-down
 machine — stop and say which of those it is. There is no second install path, and pretending there
@@ -142,14 +151,14 @@ verify where it appears, not only in a footnote. Never present a summary as a me
 ## 3. Build it
 
 ```sh
-npx archon my-doc            # the normal profile
-npx archon my-doc --hosted   # the profile you publish
+npx --no archon my-doc            # the normal profile
+npx --no archon my-doc --hosted   # the profile you publish
 ```
 
 The output is named after the **instance directory**, not the `slug` in `doc.json`:
 
-- `npx archon my-doc` writes `my-doc/dist/my-doc.html`
-- `npx archon my-doc --hosted` writes `my-doc/dist/my-doc.hosted.html`
+- `npx --no archon my-doc` writes `my-doc/dist/my-doc.html`
+- `npx --no archon my-doc --hosted` writes `my-doc/dist/my-doc.hosted.html`
 
 The two coexist; a hosted build never overwrites the normal one. **The command prints the path it
 wrote — read that line rather than reconstructing it.** If the directory is `notes-2024` and the
@@ -242,7 +251,7 @@ Because a human has to approve it, publishing is split across separate invocatio
 immediately; `resume` picks the same publication up later, possibly in a different process.
 
 ```sh
-npx archon-publish start \
+npx --no archon-publish start \
   --file my-doc/dist/my-doc.hosted.html \
   --title "My document" \
   --service https://docs.example.com \
@@ -276,7 +285,7 @@ They open the link, check the code matches, sign in, read the title and byte cou
 Then:
 
 ```sh
-npx archon-publish resume --request <requestFile> --json
+npx --no archon-publish resume --request <requestFile> --json
 ```
 
 `resume` polls within a bounded window (default 60 seconds, maximum 300 via `--timeout-seconds`) and
