@@ -102,12 +102,47 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
  * The page needs no session to be served, and holds none: a signed-out visitor
  * who asks for it is told they are signed out rather than shown an error, which
  * is only possible if the path is outside the session gate.
+ *
+ * The viewer shell's own two subresources are here on the same terms, and they
+ * are the reason `VIEWER_ASSET_PATHS` in `netlify/lib/hosted/documents.mjs` is a
+ * declared constant rather than two string literals in the markup. Without them
+ * the page at `/docs/<id>` could not work for anybody, signed in or not:
+ *
+ *   * Anonymously the session gate answered each one a 303 to `/login/` -- the
+ *     stylesheet and the module of the page the sign-in exists to reach were
+ *     behind that sign-in, which is the defect class of #249.
+ *   * Signed in they fared no better. `sessionGate` is the *document* path: it
+ *     demands `text/html` and a `<meta name="doc-id">` first line, and a
+ *     stylesheet is neither, so each one fell to that branch's
+ *     `plainResponse(500, ...)` refusal -- a `text/plain` body under
+ *     `nosniff`, which is exactly the MIME-type block the browser reported.
+ *     Neither file was ever "served as text/plain"; the gate was answering
+ *     instead of the file.
+ *
+ * Two exact paths rather than a prefix, and no new directory to hold them. A
+ * `/viewer/` prefix would be a legal collaboration slug (`[a-z0-9-]{1,64}`
+ * admits `viewer`) and would have passed somebody's document straight through
+ * the session gate; these two spellings cannot be reached by a slug at all,
+ * because the slug grammar admits no dot. The grant is the viewer's own chrome
+ * and nothing else: the documents it renders are fetched from `/api/hosted/...`
+ * and stay gated, and `/docs/<id>` still answers the sign-in redirect to an
+ * anonymous caller and a refusal to a reader with no entitlement.
+ *
+ * They also keep the root `Cache-Control` rule this way -- `public, max-age=0,
+ * must-revalidate`, the same as every other first-party asset here. The
+ * `/_assets/` tree would have been the other home for them, and it is the wrong
+ * one: that prefix carries the year-long `immutable` rule, which is only
+ * truthful for the content-hashed names the build generates there. An
+ * `immutable` `viewer.js` under a stable name is a viewer that can never be
+ * fixed again for a reader who has already loaded one.
  */
 const APP_PASS_THROUGH_PATHS = Object.freeze([
   "/admin",
   "/logout",
   "/logout/",
   "/logout/logout.js",
+  "/viewer.css",
+  "/viewer.js",
 ]);
 
 /**

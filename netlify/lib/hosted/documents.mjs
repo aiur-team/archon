@@ -127,6 +127,25 @@ const INERT_PAGE_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /**
+ * The two subresources the viewer shell loads, as the one place they are named.
+ *
+ * They are a declared constant because two things have to agree about them and
+ * neither can see the other's string: the markup below, which references them,
+ * and `APP_PASS_THROUGH_PATHS` in `netlify/lib/edge-host.mjs`, which is what
+ * keeps the session gate from answering for them. A page whose own stylesheet
+ * and module sit behind the sign-in the page exists to complete cannot work for
+ * anybody, so the gate test asserts that every path named here is a
+ * pass-through rather than trusting the two lists to stay in step.
+ *
+ * Root paths with a dot in them, deliberately: the collaboration slug grammar
+ * admits no dot, so neither spelling can be claimed by a document.
+ */
+export const VIEWER_ASSET_PATHS = Object.freeze({
+  stylesheet: "/viewer.css",
+  module: "/viewer.js",
+});
+
+/**
  * The policy the viewer shell runs under.
  *
  * `frame-src` names the configured renderer origin exactly and nothing else, so
@@ -136,12 +155,22 @@ const INERT_PAGE_CSP =
  * is honest rather than defensive: this page submits no form, and sign-out is a
  * scripted POST carrying the session-bound CSRF header, which a form could not
  * send.
+ *
+ * `img-src 'self'` is the one grant that is not about the frame. The shell
+ * references no image, but a browser asks for `/favicon.ico` on its own for
+ * every page it renders, and under `default-src 'none'` that request was
+ * refused and reported as a policy violation on every load. The site's favicon
+ * is same-origin and already public, so the honest spelling of "this page may
+ * have the icon it is being asked for" is `'self'` -- not a wider `img-src`,
+ * and not a page that keeps generating a violation it cannot act on. The
+ * document itself renders in the cross-origin frame and draws no image here.
  */
 export function viewerCsp(renderOrigin) {
   return [
     "default-src 'none'",
     "script-src 'self'",
     "style-src 'self'",
+    "img-src 'self'",
     "connect-src 'self'",
     `frame-src ${renderOrigin}`,
     "form-action 'none'",
@@ -381,8 +410,8 @@ export function viewerShell(renderOrigin) {
     <meta name="referrer" content="no-referrer" />
     <meta name="robots" content="noindex, nofollow" />
     <title>Document — Archon</title>
-    <link rel="stylesheet" href="/viewer.css" />
-    <script type="module" src="/viewer.js"></script>
+    <link rel="stylesheet" href="${VIEWER_ASSET_PATHS.stylesheet}" />
+    <script type="module" src="${VIEWER_ASSET_PATHS.module}"></script>
   </head>
   <body data-archon-render-origin="${frameOrigin}" data-archon-render-src="${frameSrc}">
     <header class="chrome">
