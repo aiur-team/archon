@@ -155,3 +155,18 @@ test("a document with no history available emits no history block and no version
   // bare string.
   assert.doesNotMatch(html, /<[^>]*\sdata-head=/);
 });
+
+test("the section toggle names the next click's effect, not the current state", (t) => {
+  isolate(t);
+  const html = built(root(t));
+
+  // Rendered closed (no `open` attribute), so the label at parse time reads
+  // what a click will do from here: expand it.
+  assert.match(html, /<span class="sec-toggle"><span>Expand<\/span>/);
+
+  // The inlined toggle script flips the label to name the opposite action
+  // once the section opens, and keeps aria-expanded in sync — it must not
+  // hardcode "Expand" for both states.
+  assert.match(html, /d\.open \? 'Collapse' : 'Expand'/);
+  assert.match(html, /aria-expanded/);
+});

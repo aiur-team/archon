@@ -244,7 +244,7 @@
       show({});
       return;
     }
-    say(REFUSED[code] ?? "This publication cannot be authorised.", "error", {
+    say(REFUSED[code] ?? "This publication cannot be authorized.", "error", {
       retryable: code === "csrf_failed",
     });
     show({});
@@ -274,6 +274,24 @@
     return null;
   }
 
+  /**
+   * Tell the server this account is working on this pending publication.
+   *
+   * Deliberately not awaited and deliberately silent. The claim is what puts
+   * the operation on this person's `/publish/pending` list later; it is not a
+   * precondition of approving now, and a page that blocked its decision buttons
+   * on it would have made a recovery feature into a new way for the flow to
+   * fail. The server keeps the binding this browser is already holding rather
+   * than re-issuing it, so this call cannot disturb the approval in flight.
+   */
+  function claim(publicationId, csrfToken) {
+    void call("/api/hosted/publications/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-archon-csrf": csrfToken },
+      body: JSON.stringify({ publicationId }),
+    });
+  }
+
   /** Render one review projection, in whatever state it is in. */
   function renderReview(projection, session, notice = null) {
     if (projection.state !== "pending") {
@@ -283,6 +301,14 @@
     }
 
     displayed = { accountId: session.accountId, csrfToken: session.csrfToken };
+    /* Now that there is a session behind the link, record that this account is
+       the one working on this publication. That is what makes it findable on
+       `/publish/pending` afterwards - from another device, or from this one once
+       the fifteen-minute binding has gone - and it is the whole safety net under
+       an agent's message that was missed. It changes nothing about this page:
+       the answer is not awaited, nothing is rendered from it, and a refusal
+       leaves the approval in front of the visitor exactly as it is. */
+    claim(projection.publicationId, session.csrfToken);
     titleCell.textContent = projection.descriptor.title;
     sizeCell.textContent = bytes(projection.descriptor.contentBytes);
     userCodeCell.textContent = projection.userCode;
@@ -293,7 +319,7 @@
     /* A caller with something more urgent to say keeps the floor. The account
        having changed under an open tab is exactly that: the default invitation
        to approve would paper straight over it. */
-    if (notice === null) say("Approve only if you recognise this document and this pairing code.", "ok");
+    if (notice === null) say("Approve only if you recognize this document and this pairing code.", "ok");
     else say(notice, "error");
     show({ card: true, switchAccount: true });
   }
@@ -341,7 +367,8 @@
     const publicationId = remembered();
     if (publicationId === null) {
       say(
-        "No pending publication. Open the link your agent printed, on this device.",
+        "No pending publication on this device. Open the link your agent printed, " +
+          "or use one of the two links below.",
         "error",
       );
       show({});

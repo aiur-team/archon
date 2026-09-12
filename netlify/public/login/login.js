@@ -94,7 +94,7 @@
       accountText.textContent = `You are signed in to Archon as @${session.login}.`;
       csrf.value = session.csrfToken;
       account.hidden = false;
-      say("Continue to authorise, or choose a different account.", "ok");
+      say("Continue to authorize, or choose a different account.", "ok");
       return;
     }
     account.hidden = true;

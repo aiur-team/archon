@@ -224,6 +224,13 @@ const root = (
     writeFileSync(join(dir, "netlify", "public", "login", "login.js"), "export const login = 1;\n");
     writeFileSync(join(dir, "netlify", "public", "publish", "authorize.html"), "<!doctype html>\n");
     writeFileSync(join(dir, "netlify", "public", "publish", "authorize.js"), "export const go = 1;\n");
+    // The two self-serve pages the rewrites also name. A fixture that omitted
+    // them would let `HOSTED_REWRITES` point at files no build copies, which is
+    // the exact defect the no-hosted-tree test below exists to catch.
+    writeFileSync(join(dir, "netlify", "public", "publish", "pending.html"), "<!doctype html>\n");
+    writeFileSync(join(dir, "netlify", "public", "publish", "pending.js"), "export const list = 1;\n");
+    writeFileSync(join(dir, "netlify", "public", "publish", "approve.html"), "<!doctype html>\n");
+    writeFileSync(join(dir, "netlify", "public", "publish", "approve.js"), "export const code = 1;\n");
     mkdirSync(join(dir, "netlify", "public", "welcome"), { recursive: true });
     writeFileSync(join(dir, "netlify", "public", "welcome", "index.html"), HOSTED_WELCOME);
     mkdirSync(join(dir, "netlify", "public", "logout"), { recursive: true });
@@ -326,6 +333,19 @@ test("a document that claims the skills route fails as a reserved route", async 
   );
 });
 
+/**
+ * The index of the first generated document rule in a `_redirects` body.
+ *
+ * Every hosted rewrite has to sit ahead of these, because an alias line that
+ * matched first would claim the path. Asserted against this rather than against
+ * a literal line number, so adding a hosted rewrite does not silently move what
+ * the next assertion is really testing.
+ */
+function firstDocumentRule(redirects: string): number {
+  const index = redirects.split("\n").findIndex((line) => line.startsWith("/d/"));
+  return index === -1 ? redirects.split("\n").length : index;
+}
+
 // -------------------------------------------------- the merged hosted surfaces
 
 test("the hosted static tree is published at the root of the site", async (t) => {
@@ -372,9 +392,37 @@ test("the /publish/authorize rewrite is generated into _redirects", async (t) =>
   // A rewrite, not a redirect: the visitor stays on the path C3 freezes.
   assert.match(redirects, /^\/publish\/authorize \/publish\/authorize\.html 200$/m);
   // Ahead of every document rule, so no alias line can claim it first.
-  assert.equal(redirects.split("\n")[0], "/publish/authorize /publish/authorize.html 200");
+  assert.ok(
+    redirects.split("\n").indexOf("/publish/authorize /publish/authorize.html 200") <
+      firstDocumentRule(redirects),
+  );
   // And the page that rule points at is really in the publish tree.
   assert.ok(existsSync(join(outDir, "publish", "authorize.html")));
+});
+
+test("the two self-serve publish pages are rewritten and published", async (t) => {
+  isolate(t);
+  origins(t);
+  const dir = root(t, { served: true, hosted: true });
+
+  const { outDir } = await buildSite(dir);
+
+  const redirects = readFileSync(join(outDir, "_redirects"), "utf8");
+  // Rewrites rather than redirects, for the same reason the authorize rule is
+  // one: these are the two paths a person types from memory, and a 301 to a
+  // trailing-slash spelling is a second path every layer has to classify.
+  assert.match(redirects, /^\/publish\/pending \/publish\/pending\.html 200$/m);
+  assert.match(redirects, /^\/publish\/approve \/publish\/approve\.html 200$/m);
+  // Both rules ahead of every document rule, so no alias can claim them first.
+  const lines = redirects.split("\n");
+  const documents = firstDocumentRule(redirects);
+  assert.ok(lines.indexOf("/publish/pending /publish/pending.html 200") < documents);
+  assert.ok(lines.indexOf("/publish/approve /publish/approve.html 200") < documents);
+  // And both pages, with their scripts, are really in the published tree.
+  assert.ok(existsSync(join(outDir, "publish", "pending.html")));
+  assert.ok(existsSync(join(outDir, "publish", "pending.js")));
+  assert.ok(existsSync(join(outDir, "publish", "approve.html")));
+  assert.ok(existsSync(join(outDir, "publish", "approve.js")));
 });
 
 test("the /welcome rewrite is generated into _redirects", async (t) => {
@@ -391,7 +439,7 @@ test("the /welcome rewrite is generated into _redirects", async (t) => {
   assert.match(redirects, /^\/welcome \/welcome\/index\.html 200$/m);
   // Ahead of every document rule, so no alias line can claim it first.
   assert.ok(
-    redirects.split("\n").indexOf("/welcome /welcome/index.html 200") < 2,
+    redirects.split("\n").indexOf("/welcome /welcome/index.html 200") < firstDocumentRule(redirects),
     `the onboarding rewrite must precede the document rules: ${redirects}`,
   );
   // And the page that rule points at is really in the publish tree.

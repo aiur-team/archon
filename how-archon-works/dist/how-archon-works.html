@@ -2232,6 +2232,21 @@ by how hard they are.</p>
       if (d) d.open = true;
     });
   });
+
+  /* The toggle label names the next activation's effect, not the current
+     state: "Expand" while closed, "Collapse" while open. `toggle` fires on
+     every open/close, including ones driven by openFromHash and the nav
+     jump above, so the label stays correct no matter what opened it. */
+  document.querySelectorAll('details.sec').forEach(function (d) {
+    var label = d.querySelector('.sec-toggle span');
+    var summary = d.querySelector('summary');
+    function sync() {
+      if (label) label.textContent = d.open ? 'Collapse' : 'Expand';
+      if (summary) summary.setAttribute('aria-expanded', d.open ? 'true' : 'false');
+    }
+    d.addEventListener('toggle', sync);
+    sync();
+  });
 })();
 
 </script>

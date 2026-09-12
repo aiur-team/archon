@@ -19,7 +19,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HostedContractError, validatePublication } from "../../lib/hosted/contracts.mjs";
+import {
+  HostedContractError,
+  PUBLICATION_RECORD_VERSION,
+  validatePublication,
+} from "../../lib/hosted/contracts.mjs";
 import {
   createPublicationStore,
   MAX_WRITE_ATTEMPTS,
@@ -112,23 +116,26 @@ test("an unknown state name is unavailable, never coerced to pending", async () 
 
 test("an unknown schema version is unavailable, never read as a known one", async () => {
   const { provider, store } = harness();
-  provider.put(FIXTURE_KEY, JSON.stringify({ ...RECORDS.complete, v: 3 }));
+  provider.put(FIXTURE_KEY, JSON.stringify({ ...RECORDS.complete, v: 4 }));
   await rejects(store.read(FIXTURE_PUBLICATION_ID), "unavailable");
 });
 
-test("a v1 record with no domain list is read, with an empty list", async () => {
+test("a v1 record with no domain list and no claimant is read, upgraded", async () => {
   /* The other half of the version rule, and the half that would take every
      already-stored document offline if it were wrong: ACN-007 added
      `allowedDomains`, and a record written before it existed has to keep
      reading. It comes back upgraded rather than as-is, so nothing downstream
      ever sees a record with the field missing. */
   const { provider, store } = harness();
-  const { allowedDomains, ...withoutList } = RECORDS.complete;
+  const { allowedDomains, claimantAccountId, ...withoutList } = RECORDS.complete;
   provider.put(FIXTURE_KEY, JSON.stringify({ ...withoutList, v: 1 }));
 
   const found = await store.read(FIXTURE_PUBLICATION_ID);
   assert.deepEqual(found.record.allowedDomains, []);
-  assert.equal(found.record.v, 2);
+  /* #254 added `claimantAccountId` the same way: a record written before it
+     existed is a record nobody has claimed, not one this version cannot read. */
+  assert.equal(found.record.claimantAccountId, null);
+  assert.equal(found.record.v, PUBLICATION_RECORD_VERSION);
 });
 
 test("a hit with no ETag is unavailable, because no conditional write could follow", async () => {

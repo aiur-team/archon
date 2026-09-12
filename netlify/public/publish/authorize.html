@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Authorise a publication — Archon</title>
+    <title>Authorize a publication — Archon</title>
     <!--
       The trusted approval page.
 
@@ -77,11 +77,12 @@
       .decide { display: grid; gap: 0.5rem; margin-top: 1.25rem; }
       .secondary { margin-top: 0.5rem; }
       .account { margin-top: 1.5rem; }
+      .elsewhere { margin-top: 2rem; }
       noscript p { color: #b3261e; font-weight: 600; }
     </style>
   </head>
   <body>
-    <h1>Authorise a publication</h1>
+    <h1>Authorize a publication</h1>
     <p class="lede">
       An agent asked to publish one document to Archon under your account. Nothing
       is published until you approve it here.
@@ -115,7 +116,9 @@
       </dl>
       <p class="lede" id="pairing-note">
         Check that the pairing code above is the one your agent printed. Archon
-        cannot tell you which program asked; the code is how you tell.
+        cannot tell you which program asked; the code is how you tell. It is also
+        the code you can type on <a href="/publish/approve">the approve page</a>
+        if you ever reach Archon without this link.
       </p>
 
       <div class="decide">
@@ -150,6 +153,19 @@
       <p class="lede">
         This signs you out of Archon and asks Auth0 which account to use. It does
         not sign you out of Google or GitHub, and it keeps this pending publication.
+      </p>
+    </div>
+
+    <!-- The two addresses a person can reach without the agent's link. They are
+         always on the page rather than revealed on failure, because the visitor
+         who needs them most is the one who is looking at a message they cannot
+         find and has not yet opened anything. -->
+    <div class="elsewhere">
+      <p class="lede">
+        Not what you were expecting? Everything waiting for you is on
+        <a href="/publish/pending">your pending publications</a>, and you can
+        <a href="/publish/approve">type the pairing code</a> instead of using a
+        link.
       </p>
     </div>
 

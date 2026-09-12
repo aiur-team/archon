@@ -105,6 +105,7 @@ jobs:
           netlify/test/hosted/publications-agent.test.mjs
           netlify/test/hosted/publication-browser-binding.test.mjs
           netlify/test/hosted/publications-browser.test.mjs
+          netlify/test/hosted/publications-self-serve.test.mjs
           netlify/test/hosted/document-routes.test.mjs
           netlify/test/hosted/publications-artifact.test.mjs
           netlify/test/hosted/domain-access.test.mjs
