@@ -54,6 +54,12 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
   "/_assets/",
   "/admin/",
   "/login/",
+  /* The hosted viewer's namespace. `netlify/functions/hosted-document-viewer.mjs`
+     is configured at `/docs/:documentId` and makes its own authorisation
+     decision, which is why the prefix is here rather than a gate decision. The
+     bare `/docs/` is not a route: it matches no function, so it answers the
+     deploy's 404 -- a correct not-found for a path that names no document, not
+     a gate defect (#249). The prefix stays for the viewer it exists for. */
   "/docs/",
   "/publish/",
   "/invite/",
@@ -96,12 +102,47 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
  * The page needs no session to be served, and holds none: a signed-out visitor
  * who asks for it is told they are signed out rather than shown an error, which
  * is only possible if the path is outside the session gate.
+ *
+ * The viewer shell's own two subresources are here on the same terms, and they
+ * are the reason `VIEWER_ASSET_PATHS` in `netlify/lib/hosted/documents.mjs` is a
+ * declared constant rather than two string literals in the markup. Without them
+ * the page at `/docs/<id>` could not work for anybody, signed in or not:
+ *
+ *   * Anonymously the session gate answered each one a 303 to `/login/` -- the
+ *     stylesheet and the module of the page the sign-in exists to reach were
+ *     behind that sign-in, which is the defect class of #249.
+ *   * Signed in they fared no better. `sessionGate` is the *document* path: it
+ *     demands `text/html` and a `<meta name="doc-id">` first line, and a
+ *     stylesheet is neither, so each one fell to that branch's
+ *     `plainResponse(500, ...)` refusal -- a `text/plain` body under
+ *     `nosniff`, which is exactly the MIME-type block the browser reported.
+ *     Neither file was ever "served as text/plain"; the gate was answering
+ *     instead of the file.
+ *
+ * Two exact paths rather than a prefix, and no new directory to hold them. A
+ * `/viewer/` prefix would be a legal collaboration slug (`[a-z0-9-]{1,64}`
+ * admits `viewer`) and would have passed somebody's document straight through
+ * the session gate; these two spellings cannot be reached by a slug at all,
+ * because the slug grammar admits no dot. The grant is the viewer's own chrome
+ * and nothing else: the documents it renders are fetched from `/api/hosted/...`
+ * and stay gated, and `/docs/<id>` still answers the sign-in redirect to an
+ * anonymous caller and a refusal to a reader with no entitlement.
+ *
+ * They also keep the root `Cache-Control` rule this way -- `public, max-age=0,
+ * must-revalidate`, the same as every other first-party asset here. The
+ * `/_assets/` tree would have been the other home for them, and it is the wrong
+ * one: that prefix carries the year-long `immutable` rule, which is only
+ * truthful for the content-hashed names the build generates there. An
+ * `immutable` `viewer.js` under a stable name is a viewer that can never be
+ * fixed again for a reader who has already loaded one.
  */
 const APP_PASS_THROUGH_PATHS = Object.freeze([
   "/admin",
   "/logout",
   "/logout/",
   "/logout/logout.js",
+  "/viewer.css",
+  "/viewer.js",
 ]);
 
 /**
@@ -243,6 +284,47 @@ export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze([
   "/d/a2e912",
   "/example/",
   "/how-archon-works/",
+]);
+
+/**
+ * The agent-facing files, served to anybody with no session check.
+ *
+ * These three are the files written for a reader that cannot sign in at all:
+ * `/AGENTS.md` and `/llms.txt` are the conventional root addresses an agent
+ * fetches to learn what this site is, and `/skills/archon-doc/SKILL.md` is the
+ * agent skill the splash links and `templates/docbuild/src/site.ts` copies out
+ * of `skills/`. Behind the session gate they answered a sign-in redirect, which
+ * is the same as not publishing them: an anonymous agent is the only reader
+ * they have (#249).
+ *
+ * The set is exact full paths and nothing else, for the reason
+ * `APP_PUBLIC_DOCUMENT_PATHS` above states and `APP_PASS_THROUGH_PATHS` states
+ * for `/admin`. A `"/skills/"` prefix would read as the narrower spelling and
+ * is not: it would publish every future file dropped under `skills/` with
+ * nothing failing. The root files are safe from the slug grammar by accident --
+ * `SLUG_RE` admits no dot and no uppercase -- and `skills` is a legal slug
+ * spelling, so the whole of that tree is reachable by the same mistake that
+ * shipped the `/assets/` prefix. Membership here is equality, and `skills` is
+ * reserved in `RESERVED_ROUTES` and in every reserved-first-segment list so no
+ * document can claim the first segment either.
+ *
+ * The list is closed and the repo-backed build holds it equal:
+ * `preflightAgentFiles` in `templates/docbuild/src/site.ts` fails the build when
+ * this set and the files the site actually publishes differ in either
+ * direction, and exercises `isAgentFile` against the same inventory, so a
+ * second file under `skills/` is a build failure until it is declared here and
+ * a loosened matcher is a build failure on its own. That is the same shape, and
+ * the same caveat, as the public-document list above: the equality is a
+ * property of `templates/build --site`, not of every deploy of this file.
+ *
+ * These are text, not HTML, so `finalizePassThrough` in `gate.ts` gives them the
+ * strict application header set exactly as it gives it to a built asset. They
+ * read no document, no session and no store.
+ */
+export const APP_AGENT_FILE_PATHS = Object.freeze([
+  "/AGENTS.md",
+  "/llms.txt",
+  "/skills/archon-doc/SKILL.md",
 ]);
 
 
@@ -419,6 +501,22 @@ export function isApplicationPublic(pathname) {
  */
 export function isPublicDocument(pathname) {
   return APP_PUBLIC_DOCUMENT_PATHS.includes(pathname);
+}
+
+/**
+ * Whether an application-host path is one of the agent-facing files, served
+ * with no session check.
+ *
+ * Exact membership of `APP_AGENT_FILE_PATHS` and nothing else: no prefix, no
+ * normalization, no trailing-slash tolerance and no case folding. `/skills/`,
+ * `/skills/archon-doc/`, `/skills/archon-doc/SKILL.md/`, `/agents.md` and
+ * `/skills-x/` are all false, and each stays gated.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isAgentFile(pathname) {
+  return APP_AGENT_FILE_PATHS.includes(pathname);
 }
 
 /**

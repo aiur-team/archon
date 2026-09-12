@@ -91,6 +91,14 @@ const RESERVED_ROUTES = new Set([
   "_render",
   "viewer.js",
   "viewer.css",
+  /* The two served root files. Like `viewer.js` above, neither is spellable as
+     a slug -- `SLUG_RE` admits no dot and no uppercase letter -- and they are
+     named here because this set is where a reader looks for what the publish
+     tree already serves at the root, and a route reserved only by an accident
+     of another regular expression is one edit away from not being. Both are
+     served to anonymous agents, so the accident is worth writing down. */
+  "AGENTS.md",
+  "llms.txt",
 ]);
 const NEVER_DESCEND = new Set(["_site", "node_modules", "dist", "netlify"]);
 
@@ -589,6 +597,156 @@ async function preflightPublicRoutes(root: string, docs: SiteMetadata[]): Promis
 }
 
 /**
+ * Every path the site serves an agent-facing file at, in sorted order.
+ *
+ * The two served root files land at their own name, and the skill tree lands
+ * under its own directory, so `skills/archon-doc/SKILL.md` is
+ * `/skills/archon-doc/SKILL.md`. Each is included only when the repository
+ * actually carries it: `copyServedContent` skips an absent root file and
+ * `copyStaticTree` skips an absent tree, so a repository without them publishes
+ * nothing here and declares nothing.
+ *
+ * The tree is read rather than listed. That is the whole point: a second file
+ * dropped into `skills/` is published by the build, so it has to appear here
+ * and force a decision about whether it is public, instead of being covered in
+ * silence by a prefix nobody re-read.
+ */
+function agentFileRoutes(root: string): string[] {
+  const routes: string[] = [];
+  for (const rel of SERVED_ROOT_FILES) {
+    const stat = lstat(root, rel);
+    if (stat !== null && stat.isFile()) routes.push(`/${rel}`);
+  }
+
+  const walk = (rel: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(join(root, rel), { withFileTypes: true });
+    } catch (e) {
+      return fail(`${rel}: ${osError(e)}`);
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const childRel = `${rel}/${entry.name}`;
+      /* `validateStaticTree` has already refused every symlink and every
+         irregular entry in this tree, so a directory is a directory and a file
+         is a file. */
+      if (entry.isDirectory()) walk(childRel);
+      else if (entry.isFile()) routes.push(`/${childRel}`);
+    }
+  };
+  const tree = lstat(root, SKILLS_TREE);
+  if (tree !== null && tree.isDirectory()) walk(SKILLS_TREE);
+
+  return routes.sort();
+}
+
+/**
+ * Hold the deployed gate's agent-file list equal to the agent-facing files the
+ * build actually publishes, and hold its matcher equal to that list.
+ *
+ * `netlify/lib/edge-host.mjs` carries `APP_AGENT_FILE_PATHS`, the closed set of
+ * exact paths the edge gate serves to a caller with no session: `/AGENTS.md`,
+ * `/llms.txt` and the one skill file. The edge cannot derive that set -- the
+ * deploy tree is `netlify/` and the lockfiles, and neither the root files nor
+ * `skills/` travel with it -- so it is a copy, and an unchecked copy of a
+ * security boundary drifts silently in both directions: a published file that
+ * nobody adds stays gated with no diagnostic, and an entry left behind by a
+ * deleted file stands ready for whatever claims the path next.
+ *
+ * So both directions are a build failure instead, and the predicate is
+ * exercised rather than only the array. `isAgentFile` is what the gate actually
+ * serves, so an edit that loosened it to a `startsWith` over `/skills/` --
+ * "fixing" the fact that a second skill file is not published -- would publish
+ * every future file in that tree while a list-only check stayed green. It is
+ * asserted true for each published route and false for the near misses around
+ * each one, which are derived from the routes that exist rather than frozen in
+ * a literal.
+ *
+ * The tolerance is the same as `preflightPublicRoutes`'s and fails in the same
+ * safe direction: a tree with no edge module, or an older vendored module that
+ * carries neither export, is a deployment whose gate serves none of these paths
+ * -- the files are gated, which is the behaviour that predates them being
+ * published at all, not an exposure.
+ */
+async function preflightAgentFiles(root: string): Promise<void> {
+  const stat = lstat(root, EDGE_HOST_MODULE);
+  if (stat === null) return;
+  /* `import()` follows a symlink, so a symlinked module would let the build
+     validate a file that is not the one the deploy carries. */
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    return fail(`${EDGE_HOST_MODULE}: expected a regular file, not a symbolic link or directory`);
+  }
+
+  let listed: unknown;
+  let matches: unknown;
+  try {
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const url = `${pathToFileURL(join(root, EDGE_HOST_MODULE)).href}?build=${nonce}`;
+    const mod = await import(url);
+    listed = mod.APP_AGENT_FILE_PATHS;
+    matches = mod.isAgentFile;
+  } catch (e) {
+    return fail(`${EDGE_HOST_MODULE}: ${osError(e)}`);
+  }
+  if (listed === undefined && matches === undefined) return;
+
+  if (!Array.isArray(listed) || listed.some((path) => typeof path !== "string")) {
+    return fail(`${EDGE_HOST_MODULE}: APP_AGENT_FILE_PATHS must be an array of strings`);
+  }
+  if (typeof matches !== "function") {
+    return fail(`${EDGE_HOST_MODULE}: isAgentFile must be a function`);
+  }
+  const isAgentFile = matches as (pathname: string) => unknown;
+  const published = [...(listed as string[])].sort();
+  const declared = agentFileRoutes(root);
+
+  if (published.length !== declared.length || published.some((path, i) => path !== declared[i])) {
+    return fail(
+      `${EDGE_HOST_MODULE} serves ${published.join(", ") || "nothing"} without a session, ` +
+        `but the build publishes the agent-facing files at ${declared.join(", ") || "no routes"}: ` +
+        "the gate's agent-file set and the published agent files must name the same paths",
+    );
+  }
+
+  for (const route of declared) {
+    if (isAgentFile(route) !== true) {
+      return fail(
+        `${EDGE_HOST_MODULE}: isAgentFile(${JSON.stringify(route)}) is not true, ` +
+          "though the route is published: the gate's matcher disagrees with its own list",
+      );
+    }
+  }
+
+  /* The near misses of every published path: the same path under a trailing
+     slash, a sibling that merely starts with it, each parent directory of it,
+     and its uppercase spelling. A matcher that admits any of these is serving
+     something the build never published -- and `/skills/` and
+     `/skills/archon-doc/` are exactly the prefixes a slug-shaped path could be
+     mistaken for. */
+  const gated = new Set<string>();
+  for (const route of declared) {
+    gated.add(`${route}/`);
+    gated.add(`${route}-x`);
+    gated.add(route.toUpperCase());
+    gated.add(route.toLowerCase());
+    const segments = route.split("/").slice(1);
+    for (let i = 1; i < segments.length; i += 1) {
+      gated.add(`/${segments.slice(0, i).join("/")}`);
+      gated.add(`/${segments.slice(0, i).join("/")}/`);
+    }
+  }
+  for (const route of gated) {
+    if (declared.includes(route)) continue;
+    if (isAgentFile(route) !== false) {
+      return fail(
+        `${EDGE_HOST_MODULE}: isAgentFile(${JSON.stringify(route)}) is not false, ` +
+          "though the build publishes no such file: the gate's matcher is wider than its list",
+      );
+    }
+  }
+}
+
+/**
  * Preflight everything the repository serves as committed content, before the
  * previous `_site/` is deleted: the homepage tree, the skill tree, and each
  * served root file. Every one of them is optional, so a repository that carries
@@ -884,6 +1042,7 @@ export async function buildSite(root: string): Promise<SiteBuildResult> {
   preflightHostedRoutes(root);
   await preflightPublicRoutes(root, docs);
   preflightServedContent(root);
+  await preflightAgentFiles(root);
 
   const outDir = resolve(root, "_site");
   try {

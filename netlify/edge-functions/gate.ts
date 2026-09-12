@@ -8,6 +8,7 @@ import {
   applicationOrigin,
   authorizationOrigin,
   classifyHost,
+  isAgentFile,
   isApplicationPassThrough,
   isApplicationPublic,
   isLandingPage,
@@ -82,6 +83,10 @@ const RESERVED_FIRST_SEGMENTS = [
   "docs",
   "api",
   "welcome",
+  /* The agent-skill tree at `/skills/`. Its one file is public, so a document
+     that claimed the slug would shadow it, and a sign-in must never offer
+     `/skills/` as a destination. */
+  "skills",
   /* The sign-out page. It is not a destination a sign-in may land on, and a
      document that could claim the slug would shadow it. */
   "logout",
@@ -475,11 +480,20 @@ async function applicationHost(
      time to the documents that declare themselves public, so no private
      collaboration document can fall inside the public set. Only the exact root,
      the onboarding page and the published reference routes are public; every
-     other deeper path stays gated. */
+     other deeper path stays gated.
+
+     The three agent-facing files join them on the same terms: `/AGENTS.md`,
+     `/llms.txt` and `/skills/archon-doc/SKILL.md` are written for a reader that
+     cannot sign in, and behind the session gate they answered a sign-in
+     redirect instead of a body (#249). They are matched by exact full path, and
+     the build holds the list equal to the files it actually publishes, so no
+     future file under `skills/` becomes anonymous by inheritance and no
+     slug-shaped path falls inside the set. */
   if (
     isLandingPage(url.pathname) ||
     isApplicationPublic(url.pathname) ||
     isPublicDocument(url.pathname) ||
+    isAgentFile(url.pathname) ||
     isApplicationPassThrough(url.pathname)
   ) {
     let passed: Response;

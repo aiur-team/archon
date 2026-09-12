@@ -31,7 +31,9 @@ import {
   landingPageHeaders,
   LANDING_AVATAR_IMAGE_ORIGINS,
   withDocumentHeaders,
+  APP_AGENT_FILE_PATHS,
   APP_PUBLIC_DOCUMENT_PATHS,
+  isAgentFile,
   isApplicationPublic,
   isApplicationPassThrough,
   isLandingPage,
@@ -46,6 +48,8 @@ import {
   notFoundPageHeaders,
 } from "../lib/edge-host.mjs";
 import { AVATAR_IMAGE_ORIGINS } from "../lib/hosted/contracts.mjs";
+import { VIEWER_ASSET_PATHS, viewerShell } from "../lib/hosted/documents.mjs";
+import { RESERVED_FIRST_SEGMENTS } from "../lib/hosted/identity.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(dirname(HERE));
@@ -175,6 +179,54 @@ test("isPublicDocument matches the reference documents by exact path only", () =
     assert.equal(isApplicationPublic(pub), false, `${pub} is not a landing-page subresource`);
   }
   assert.equal(isPublicDocument("/assets/logo.png"), false, "an image is not a public document");
+});
+
+test("isAgentFile matches the three agent-facing files by exact path only", () => {
+  assert.deepEqual(
+    [...APP_AGENT_FILE_PATHS].sort(),
+    ["/AGENTS.md", "/llms.txt", "/skills/archon-doc/SKILL.md"],
+    "the agent set is the two served root files and the one skill file",
+  );
+  for (const served of APP_AGENT_FILE_PATHS) {
+    assert.equal(isAgentFile(served), true, `${served} is served to an anonymous agent`);
+  }
+  /* The whole safety argument of this set is the same one the public-document
+     set makes: membership is equality, never a prefix. `/skills/` and
+     `/skills/archon-doc/` are the two prefixes a reader might assume were
+     granted, and both are slug-shaped or tree-shaped paths a future file or a
+     future collaboration route could occupy -- exactly the defect the
+     `/assets/` prefix shipped. Each one being false is the guard. */
+  for (const gated of [
+    "/skills",
+    "/skills/",
+    "/skills/archon-doc",
+    "/skills/archon-doc/",
+    "/skills/archon-doc/SKILL.md/",
+    "/skills/archon-doc/OTHER.md",
+    "/skills/other/SKILL.md",
+    "/skills-x/",
+    "/skillset/",
+    "/AGENTS.md/",
+    "/agents.md",
+    "/AGENTS.markdown",
+    "/llms.txt/",
+    "/llms.txt.bak",
+    "/LLMS.TXT",
+    "/",
+    "/some-slug/",
+  ]) {
+    assert.equal(isAgentFile(gated), false, `${gated} is not an agent file`);
+  }
+  /* The grant is this set and nothing else: none of the three rides in on a
+     pass-through prefix, a landing page, a landing-page subresource or the
+     public-document list, so removing `isAgentFile` from the gate leaves them
+     gated rather than quietly served by a neighbour. */
+  for (const served of APP_AGENT_FILE_PATHS) {
+    assert.equal(isApplicationPassThrough(served), false, `${served} is not a pass-through`);
+    assert.equal(isApplicationPublic(served), false, `${served} is not a landing-page subresource`);
+    assert.equal(isPublicDocument(served), false, `${served} is not a public document`);
+    assert.equal(isLandingPage(served), false, `${served} is not a landing page`);
+  }
 });
 
 test("rendererHeaders is the renderer set: one CSP, no X-Frame-Options", () => {
@@ -563,6 +615,11 @@ function staticPage(body = "<!doctype html><title>page</title>") {
   return new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+/** A served text file with no CSP, as `_site/AGENTS.md` has none. */
+function markdownFile(body) {
+  return new Response(body, { status: 200, headers: { "content-type": "text/markdown; charset=utf-8" } });
+}
+
 /** An API answer with no CSP of its own, as a JSON route response has none. */
 function jsonNoCsp() {
   return new Response("{}", {
@@ -754,6 +811,109 @@ test("application host passes through API, assets, login, docs, publish and invi
   }
 });
 
+/* --- the viewer shell's own chrome ---------------------------------------- */
+
+/**
+ * The content type Netlify serves each viewer subresource as, keyed by
+ * extension. The gate never sets a `Content-Type`; what these stand for is the
+ * static answer the deploy gives, which is the answer a browser under `nosniff`
+ * will accept for a stylesheet and for a module.
+ */
+const VIEWER_ASSET_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+};
+
+/** A served static subresource, as `_site/viewer.css` and `_site/viewer.js` are. */
+function staticAsset(path) {
+  const type = VIEWER_ASSET_TYPES[path.slice(path.lastIndexOf("."))];
+  assert.ok(type !== undefined, `no content type is declared for ${path}`);
+  return new Response("/* the committed viewer asset */\n", {
+    status: 200,
+    headers: { "content-type": type },
+  });
+}
+
+test("every subresource the viewer shell references is reachable with no session at all", async () => {
+  /* Derived from the shell rather than restated. The two lists that have to
+     agree are the markup at `/docs/<id>` and the gate's pass-through set, and a
+     test that names the paths itself would keep passing while the shell moved
+     to a third path nobody had granted. */
+  const shell = viewerShell(RENDER_ORIGIN);
+  const referenced = [...shell.matchAll(/(?:href|src)="(\/[^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(
+    referenced.sort(),
+    [VIEWER_ASSET_PATHS.stylesheet, VIEWER_ASSET_PATHS.module].sort(),
+    "the viewer shell references a same-origin subresource this test does not cover",
+  );
+
+  for (const path of referenced) {
+    /* The committed file is really published at this path: a grant for a path
+       the build does not serve is a 404 the gate has made anonymous. */
+    assert.ok(
+      readFileSync(join(ROOT, "netlify/public", path.slice(1))).byteLength > 0,
+      `${path} is not a committed file under netlify/public`,
+    );
+
+    assert.equal(isApplicationPassThrough(path), true, `${path} passes the gate with no session`);
+
+    /* Anonymous: no cookie at all, which is the state of the visitor the
+       sign-in page is about to send to `/docs/<id>`. Before #255 each of these
+       answered a 303 to `/login/` -- the stylesheet and module of the page the
+       sign-in exists to reach were behind the sign-in itself. */
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      next: () => staticAsset(path),
+    });
+    assert.equal(response.status, 200, `${path} is served to an anonymous visitor`);
+    assert.equal(calls.next, 1, `${path} reaches the published file`);
+    assert.equal(control.identifyCalls, 0, `${path} is not session-checked at the gate`);
+    assert.equal(response.headers.get("Location"), null, `${path} is never a sign-in redirect`);
+
+    /* The second half of the defect, and the one `nosniff` turns into a dead
+       page: a stylesheet and a module have to arrive as a stylesheet and a
+       module. `sessionGate` answers anything that is not `text/html` with a
+       `text/plain` refusal body, so a regression that puts either file back
+       inside the gate fails here on the content type even if it kept a 200. */
+    assert.equal(
+      response.headers.get("Content-Type"),
+      VIEWER_ASSET_TYPES[path.slice(path.lastIndexOf("."))],
+      `${path} keeps the content type the deploy served it with`,
+    );
+    assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff", `${path} is still nosniff`);
+  }
+});
+
+test("the viewer asset grant is two exact paths and reaches nothing else", async () => {
+  /* Every near miss of the two granted spellings. Each one being gated is what
+     keeps this grant from becoming the `/assets/` prefix that once served a
+     slug-shaped path: membership is equality, so no document, no deeper file
+     and no look-alike rides in on it. */
+  for (const gated of [
+    "/viewer.css/",
+    "/viewer.js/",
+    "/viewer.css/x",
+    "/viewer.js/x",
+    "/viewer.csset",
+    "/viewer.json",
+    "/viewer/",
+    "/viewer",
+    "/viewer-notes/",
+    "/VIEWER.JS",
+    "/some-slug/viewer.js",
+  ]) {
+    assert.equal(isApplicationPassThrough(gated), false, `${gated} is not a pass-through`);
+  }
+
+  /* And the documents themselves are untouched by the grant: a collaboration
+     slug is still the session gate's business, and an anonymous caller still
+     gets the sign-in redirect rather than a document. */
+  const { response, calls } = await runGate(APP_HOST, "/some-slug/", { cookie: null });
+  assert.equal(response.status, 303, "a document still demands a session");
+  assert.equal(response.headers.get("Location"), "/login/?destination=%2Fsome-slug%2F");
+  assert.equal(calls.next, 0, "no document is read for an anonymous caller");
+});
+
 test("a static HTML page pass-through gets the page CSP; an API/JSON one keeps the strict API CSP", async () => {
   // The sign-in and approval pages are static text/html with no CSP of their
   // own. The API set's `default-src 'none'` freezes them -- no script, no inline
@@ -939,6 +1099,97 @@ test("the built reference documents are served to an anonymous visitor with no s
   assert.equal(control.identifyCalls, 0, "whose session is not even resolved");
   assert.equal(control.resolveCalls, 0, "and still no role is resolved");
   t.diagnostic(`public reference routes: ${APP_PUBLIC_DOCUMENT_PATHS.join(" ")}`);
+});
+
+test("the agent-facing files are served to an anonymous agent, while a slug-shaped path still redirects", async (t) => {
+  /* The acceptance property of #249. These three files exist for a reader that
+     cannot sign in, and behind the session gate each answered `303 -> /login/`
+     on the live site -- published by the build and unreadable by the only
+     audience it has. Each one now answers 200 with its own bytes to a request
+     carrying no session cookie.
+
+     Reverting the grant fails these loudly rather than quietly: the path falls
+     straight back to `sessionGate`, and an anonymous request there is the
+     sign-in redirect asserted at the bottom of this test. */
+  for (const path of APP_AGENT_FILE_PATHS) {
+    const body = `# ${path}\n`;
+    const { response, calls } = await runGate(APP_HOST, path, {
+      cookie: null,
+      next: () => markdownFile(body),
+    });
+    assert.equal(response.status, 200, `${path} is served, not a redirect or a refusal`);
+    assert.equal(calls.next, 1, `${path} is fetched downstream exactly once`);
+    assert.equal(response.headers.get("Location"), null, `${path} is never a redirect`);
+    assert.equal(await response.text(), body, `${path} replays the whole file`);
+    assert.equal(control.identifyCalls, 0, `${path} is never session-checked`);
+    assert.equal(control.resolveCalls, 0, `${path} resolves no role`);
+    assert.equal(response.headers.get("Set-Cookie"), null, `${path} carries no Set-Cookie`);
+    /* Text, not HTML: it takes the strict application set exactly as a built
+       asset does, so the grant adds no script, style, fetch or form capability
+       to the origin. */
+    assert.equal(cspCount(response), 1, `${path} carries exactly one CSP`);
+    assert.equal(
+      response.headers.get("Content-Security-Policy"),
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      `${path} keeps the strict application CSP`,
+    );
+    assert.equal(response.headers.get("X-Frame-Options"), "DENY", `${path} is still frame-denied`);
+  }
+
+  /* The other half of the acceptance criteria, and the one an adversarial
+     reading is about: nothing slug-shaped falls inside the grant. A
+     collaboration slug, the near misses of each granted path, and every
+     containing directory of the skill file all still meet the session gate and
+     answer an anonymous caller with the sign-in redirect. `/skills/` is the one
+     to watch -- `skills` is a legal slug under `[a-z0-9-]{1,64}`, so a prefix
+     grant here would have served somebody else's document to whoever asked. */
+  const expected = new Map([
+    /* Slug-shaped and not reserved: the gate offers the path back as the
+       sign-in destination, which is what an ordinary gated document does. */
+    ["/some-slug/", "/login/?destination=%2Fsome-slug%2F"],
+    ["/skills-x/", "/login/?destination=%2Fskills-x%2F"],
+    /* Slug-shaped and reserved. `skills` is a legal slug under
+       `[a-z0-9-]{1,64}`, so a prefix grant would have served whatever claimed
+       it; the path is gated, and `RESERVED_FIRST_SEGMENTS` additionally refuses
+       it as a destination, so the redirect carries none. */
+    ["/skills/", "/login/"],
+    /* Not slug-shaped at all: deeper paths and the near misses of the two root
+       files. Gated, and no destination is offered for any of them. */
+    ["/skills/archon-doc/", "/login/"],
+    ["/skills/archon-doc/OTHER.md", "/login/"],
+    ["/agents.md", "/login/"],
+    ["/AGENTS.md/", "/login/"],
+    ["/llms.txt.bak", "/login/"],
+  ]);
+  for (const [gated, location] of expected) {
+    const { response } = await runGate(APP_HOST, gated, {
+      cookie: null,
+      session: () => sessionResponse({ v: 1, authenticated: false }),
+    });
+    assert.equal(response.status, 303, `${gated} still demands a session`);
+    assert.equal(response.headers.get("Location"), location, `${gated} redirects to sign in`);
+  }
+
+  /* The skill file's own tree is reserved by every layer that names a first
+     segment, so nothing can claim the slug or be offered it as a destination. */
+  assert.ok(RESERVED_FIRST_SEGMENTS.includes("skills"), "the identity layer reserves the segment");
+  const gateSource = readFileSync(join(ROOT, "netlify/edge-functions/gate.ts"), "utf8");
+  const segments = gateSource.slice(gateSource.indexOf("const RESERVED_FIRST_SEGMENTS"));
+  assert.match(
+    segments.slice(0, segments.indexOf("]")),
+    /"skills",/,
+    "and the gate never offers /skills/ as a sign-in destination",
+  );
+  const siteSource = readFileSync(join(ROOT, "templates/docbuild/src/site.ts"), "utf8");
+  const reserved = siteSource.slice(siteSource.indexOf("const RESERVED_ROUTES"));
+  for (const route of ['"skills",', '"AGENTS.md",', '"llms.txt",']) {
+    assert.ok(
+      reserved.slice(0, reserved.indexOf("]")).includes(route),
+      `templates/docbuild/src/site.ts reserves ${route} so no document can claim it`,
+    );
+  }
+
+  t.diagnostic(`agent files: ${APP_AGENT_FILE_PATHS.join(" ")}`);
 });
 
 test("a public document's permanent link, HEAD and query spellings are public too", async () => {
