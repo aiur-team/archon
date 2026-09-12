@@ -27,14 +27,24 @@ tool holds one capability for the one publication it started, and nothing else.
 material may go, publishing here is subject to exactly the same restriction. Say so plainly rather
 than offering a workaround.
 
-## What is not live yet
+## Before you promise anyone a link
 
-Read this before you promise anyone a link. The builder half of this file — install, author, build —
-is real today. The publishing half describes a service that is **not deployed**: the package has no
-released service origin compiled into it, so `--service` or `ARCHON_PUBLISH_SERVICE` is required and
-there is no public host to point either at. Until an operator gives you one, treat the built HTML as
-the deliverable and say plainly that hosted publishing is not available rather than starting a
-publication that can never complete.
+The builder half of this file — install, author, build — is real today and needs no service at all.
+
+The publishing half describes a service that **is deployed**, but two things still stand between you
+and a link, and both are an operator's to settle:
+
+- **You must be told the origin.** This package has no service origin compiled into it, so
+  `--service <https-origin>` or `ARCHON_PUBLISH_SERVICE` is required on every `archon-publish`
+  invocation. Do not guess a hostname.
+- **Publishing may be switched off on that deployment.** It is a configuration tap
+  (`HOSTED_PUBLISH_ENABLED`), and a deployment with it unset or `false` answers a `start` with
+  `503 publishing_disabled`. That is a deliberate refusal by the operator, not a fault and not
+  something to retry around.
+
+So: if you have no origin, or `start` comes back `publishing_disabled`, stop there. Treat the built
+HTML as the deliverable and say plainly which of the two it was — no origin, or publishing turned off
+on that deployment — rather than beginning a publication that cannot complete.
 
 ## 1. Install
 

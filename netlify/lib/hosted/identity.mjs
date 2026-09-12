@@ -212,6 +212,13 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze([
   "docs",
   "api",
   "welcome",
+  /* The agent-skill tree at `/skills/`, whose one file
+     `/skills/archon-doc/SKILL.md` is served to anonymous agents. No document
+     can claim the slug -- `RESERVED_ROUTES` in `templates/docbuild/src/site.ts`
+     refuses it at build time -- so this entry is what stops a *destination*
+     `/skills/` being accepted as a collaboration slug and landing a fresh
+     sign-in on a tree that holds no document. */
+  "skills",
   /* The sign-out page at `/logout`. Like `admin`, no document can claim the
      slug -- `RESERVED_ROUTES` in `templates/docbuild/src/site.ts` refuses it at
      build time -- so this entry is what stops a *destination* `/logout/` being
