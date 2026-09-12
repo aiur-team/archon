@@ -54,6 +54,12 @@ const APP_PASS_THROUGH_PREFIXES = Object.freeze([
   "/_assets/",
   "/admin/",
   "/login/",
+  /* The hosted viewer's namespace. `netlify/functions/hosted-document-viewer.mjs`
+     is configured at `/docs/:documentId` and makes its own authorisation
+     decision, which is why the prefix is here rather than a gate decision. The
+     bare `/docs/` is not a route: it matches no function, so it answers the
+     deploy's 404 -- a correct not-found for a path that names no document, not
+     a gate defect (#249). The prefix stays for the viewer it exists for. */
   "/docs/",
   "/publish/",
   "/invite/",
@@ -245,6 +251,47 @@ export const APP_PUBLIC_DOCUMENT_PATHS = Object.freeze([
   "/how-archon-works/",
 ]);
 
+/**
+ * The agent-facing files, served to anybody with no session check.
+ *
+ * These three are the files written for a reader that cannot sign in at all:
+ * `/AGENTS.md` and `/llms.txt` are the conventional root addresses an agent
+ * fetches to learn what this site is, and `/skills/archon-doc/SKILL.md` is the
+ * agent skill the splash links and `templates/docbuild/src/site.ts` copies out
+ * of `skills/`. Behind the session gate they answered a sign-in redirect, which
+ * is the same as not publishing them: an anonymous agent is the only reader
+ * they have (#249).
+ *
+ * The set is exact full paths and nothing else, for the reason
+ * `APP_PUBLIC_DOCUMENT_PATHS` above states and `APP_PASS_THROUGH_PATHS` states
+ * for `/admin`. A `"/skills/"` prefix would read as the narrower spelling and
+ * is not: it would publish every future file dropped under `skills/` with
+ * nothing failing. The root files are safe from the slug grammar by accident --
+ * `SLUG_RE` admits no dot and no uppercase -- and `skills` is a legal slug
+ * spelling, so the whole of that tree is reachable by the same mistake that
+ * shipped the `/assets/` prefix. Membership here is equality, and `skills` is
+ * reserved in `RESERVED_ROUTES` and in every reserved-first-segment list so no
+ * document can claim the first segment either.
+ *
+ * The list is closed and the repo-backed build holds it equal:
+ * `preflightAgentFiles` in `templates/docbuild/src/site.ts` fails the build when
+ * this set and the files the site actually publishes differ in either
+ * direction, and exercises `isAgentFile` against the same inventory, so a
+ * second file under `skills/` is a build failure until it is declared here and
+ * a loosened matcher is a build failure on its own. That is the same shape, and
+ * the same caveat, as the public-document list above: the equality is a
+ * property of `templates/build --site`, not of every deploy of this file.
+ *
+ * These are text, not HTML, so `finalizePassThrough` in `gate.ts` gives them the
+ * strict application header set exactly as it gives it to a built asset. They
+ * read no document, no session and no store.
+ */
+export const APP_AGENT_FILE_PATHS = Object.freeze([
+  "/AGENTS.md",
+  "/llms.txt",
+  "/skills/archon-doc/SKILL.md",
+]);
+
 
 /**
  * A header-safe origin serialization, the same shape `renderer/scripts/build.mjs`
@@ -419,6 +466,22 @@ export function isApplicationPublic(pathname) {
  */
 export function isPublicDocument(pathname) {
   return APP_PUBLIC_DOCUMENT_PATHS.includes(pathname);
+}
+
+/**
+ * Whether an application-host path is one of the agent-facing files, served
+ * with no session check.
+ *
+ * Exact membership of `APP_AGENT_FILE_PATHS` and nothing else: no prefix, no
+ * normalization, no trailing-slash tolerance and no case folding. `/skills/`,
+ * `/skills/archon-doc/`, `/skills/archon-doc/SKILL.md/`, `/agents.md` and
+ * `/skills-x/` are all false, and each stays gated.
+ *
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function isAgentFile(pathname) {
+  return APP_AGENT_FILE_PATHS.includes(pathname);
 }
 
 /**
