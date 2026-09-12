@@ -976,6 +976,15 @@ ${rows}
  */
 export const HOSTED_REWRITES = [
   "/publish/authorize /publish/authorize.html 200",
+  /* The two self-serve publish pages, and the same shape for the same reason:
+     both are exact paths named by the sign-in destination allowlist in
+     `netlify/lib/hosted/identity.mjs`, so both have to answer on the spelling
+     with no trailing slash and with no 301 hop. They are also the two addresses
+     a person types from memory when the agent's link is lost, which is the
+     whole reason they exist -- a page you can only reach through a redirect is
+     not a page you can be told to go to. */
+  "/publish/pending /publish/pending.html 200",
+  "/publish/approve /publish/approve.html 200",
   "/welcome /welcome/index.html 200",
   "/logout /logout/index.html 200",
 ];

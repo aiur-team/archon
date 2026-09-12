@@ -38,6 +38,7 @@ import {
   HostedContractError,
   isLoopbackOrigin,
   LOOPBACK_HOSTS,
+  PUBLICATION_RECORD_VERSION,
   PUBLICATION_STATES,
   registrableSite,
   RENDER_MESSAGE_TYPES,
@@ -328,7 +329,7 @@ test("an absent domain list reads as an empty one, and never as a fault", () => 
   for (const value of [undefined, null]) {
     const record = validatePublication({ ...legacy, v: 1, allowedDomains: value });
     assert.deepEqual(record.allowedDomains, []);
-    assert.equal(record.v, 2);
+    assert.equal(record.v, PUBLICATION_RECORD_VERSION);
   }
   assert.deepEqual(validatePublication({ ...legacy, v: 1 }).allowedDomains, []);
 });
@@ -769,10 +770,11 @@ test("every contract shape pins its version", () => {
   const cases = [
     [() => validateSessionResponse(replacing(SIGNED_OUT_SESSION, { v: 2 })), "session.v"],
     [() => validateSessionResponse(replacing(SIGNED_IN_SESSION, { v: 2 })), "session.v"],
-    /* The stored record is the one shape with two readable versions: ACN-007
-       writes `2` and still reads the `1` that ACN-004 left in stores. So the
-       version this guard has to refuse is the next one up, not `2`. */
-    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 3 })), "publication.v"],
+    /* The stored record is the one shape with several readable versions: #254
+       writes `3`, and still reads the `2` ACN-007 wrote and the `1` ACN-004
+       left in stores. So the version this guard has to refuse is the next one
+       up, not any of those. */
+    [() => validatePublication(replacing(PUBLICATION_FIXTURES.pending, { v: 4 })), "publication.v"],
     [() => validateStartResponse(replacing(START_RESPONSE, { v: 2 }), APP), "start.v"],
     [() => validateResult(replacing(PENDING_RESULT_ENVELOPE, { v: 2 })), "result.v"],
     [() => validateWireError(replacing(ERROR_ENVELOPE, { v: 2 })), "errorEnvelope.v"],

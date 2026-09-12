@@ -218,7 +218,7 @@ the command refuses text that could render differently from its bytes.
 
 **Check it will fit.** `start` validates locally before it touches the network, so these are
 refusals you can predict rather than discover: the artifact must be 1 byte to 2 MiB, valid UTF-8,
-free of NUL, and recognisably HTML. `--hosted` inlines every asset, so a document with large
+free of NUL, and recognizably HTML. `--hosted` inlines every asset, so a document with large
 embedded images can exceed 2 MiB — the fix for that is a smaller document, not a retry.
 
 **Keep the local file.** Nothing in this flow deletes or moves your source or your built HTML, and
@@ -275,22 +275,46 @@ Exit 10, and one JSON object on stdout:
   "requestFile": "/home/you/.local/state/archon-publish/<id>.json",
   "verificationUrl": "https://docs.example.com/publish/authorize#…",
   "userCode": "ABCD-EFGH",
+  "expiresAt": "2026-09-12T15:04:00.000Z",
   "nextAction": "Ask the human to open …",
   "serviceOrigin": "https://docs.example.com"
 }
 ```
 
-Hand `verificationUrl` and `userCode` **to the person who asked for the publication, and to nobody
+`verificationUrl` and `userCode` are **for the person who asked for the publication, and for nobody
 else.** That link is a claim capability: anyone who opens it can claim this publication under their
 own account. Do not paste it into a shared channel, an issue, a commit message or CI output.
 Matching the code proves the person is looking at the same publication — it does not prove who you
 are to them, and it is not an authentication step you can perform on their behalf.
 
-The authorization window is finite, and `start`'s JSON does not carry the deadline. It is in the
-request file as `expiresAt` — read it from there if the person asks how long they have.
+**Deliver the link so a person can actually find it.** Put the URL and the pairing code on their own
+lines, in plain text, first in your reply — before any explanation — and repeat the code again in
+prose. A fenced code block is not good enough on its own: some clients collapse or fold it, and a
+person scanning past a wall of text can miss it entirely. That is exactly what happened during a real
+publication: the operator asked three times where the link was while the agent had already sent it,
+every time inside a code block further down the message. Lead with the plain-text line instead:
 
-They open the link, check the code matches, sign in, read the title and byte count, and approve.
-Then:
+```
+https://docs.example.com/publish/authorize#…
+Pairing code: ABCD-EFGH
+```
+
+followed by a sentence such as "Open the link above, sign in, and check the pairing code reads
+ABCD-EFGH before you approve."
+
+State the expiry **in the person's own clock, not as an abstract window.** `start --json` returns it
+as `expiresAt`, an ISO-8601 instant; convert it to local time and say something like "you have about
+25 minutes, until 3:04 PM your time" rather than "there is a time limit." Nobody converts UTC in
+their head under a deadline.
+
+If the person cannot find or use the link, they still have two ways in that need nothing from you:
+they can sign in on the site and open `/publish/approve`, type the pairing code, and approve from
+there; and once signed in, `/publish/pending` lists any of their own publications that are still
+waiting, link or no link. Mention this as a fallback, not as the primary path — it exists precisely
+for the case your message did not land.
+
+They open the link (or use the fallback above), check the code matches, sign in, read the title and
+byte count, and approve. Then:
 
 ```sh
 npx --no archon-publish resume --request <requestFile> --json
@@ -342,6 +366,14 @@ an interruption. `start` writes it mode-0600 into a mode-0700 directory outside 
 `~/.local/state/archon-publish`; each must be an absolute path). `start` also takes
 `--state-dir <absolute path>`, which is the way out when `HOME` is absent or unwritable — a
 sandbox where the default directory cannot be created or cannot be given mode 0700.
+
+**The state directory must be mode 0700, owned by you, and not a symlink.** If you point
+`--state-dir` at a shared scratch location — a `/tmp` subdirectory another process already created,
+or one owned by a different user — the command refuses it with `code: "unsafe_state_dir"` rather
+than writing an operation bearer somewhere another user or process could read it. This is a
+guaranteed first-run stumble for any agent using a scratch directory, so expect it and fix it rather
+than treat it as a bug: `mkdir -p <dir> && chmod 700 <dir>`, or simply point `--state-dir` at a
+private directory inside your own project instead of a shared `/tmp` path.
 
 On exit 21 with a `receipt_expired` code, the output carries a `checkPublicationUrl` labelled
 **Check publication**, built only from the pinned origin and the saved publication ID. Pass it on

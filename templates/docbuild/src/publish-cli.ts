@@ -354,8 +354,11 @@ async function runStart(options: Options): Promise<number> {
   );
 
   const nextAction = `Ask the human to open ${state.verificationUrl}, confirm the pairing code ${state.userCode}, sign in and approve. Then run: archon-publish resume --request ${stripControls(requestFile)}`;
-  /* Exactly the seven fields C5 fixes for this command, and no others. The
-     agent secret is in the request file and stays there. */
+  /* Exactly the eight fields C5 fixes for this command, and no others. The
+     agent secret is in the request file and stays there. `expiresAt` is the
+     same pending deadline already written into the request file — the
+     service's own value, never recomputed here — so the agent can tell the
+     person how long they have without opening the file. */
   emit(
     options,
     {
@@ -364,6 +367,7 @@ async function runStart(options: Options): Promise<number> {
       requestFile,
       verificationUrl: state.verificationUrl,
       userCode: state.userCode,
+      expiresAt: state.expiresAt,
       nextAction,
       serviceOrigin: state.serviceOrigin,
     },
@@ -371,6 +375,7 @@ async function runStart(options: Options): Promise<number> {
       `state pending`,
       `open ${state.verificationUrl}`,
       `pairing code ${state.userCode}`,
+      `expires ${state.expiresAt}`,
       `request ${requestFile}`,
       `next: ${nextAction}`,
     ],

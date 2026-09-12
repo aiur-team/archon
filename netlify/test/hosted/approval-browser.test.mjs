@@ -61,6 +61,7 @@ import { createCallbackRoute } from "../../functions/hosted-auth-callback.mjs";
 import { SESSION_COOKIE_MAX_AGE, serializeCookie } from "../../lib/hosted/identity.mjs";
 import { createSessionRoute } from "../../functions/hosted-session.mjs";
 import { createBindRoute } from "../../functions/hosted-publications-bind.mjs";
+import { createClaimRoute } from "../../functions/hosted-publications-claim.mjs";
 import { createReviewRoute } from "../../functions/hosted-publications-review.mjs";
 import { createDecisionRoute } from "../../functions/hosted-publications-decision.mjs";
 import { MemoryBlobStore, fixedClock, localKeySet, memoryAuthStore, signIdToken } from "./fixtures/auth.mjs";
@@ -413,6 +414,11 @@ async function startDeployment(record) {
     withErrorBoundary(createCallbackRoute({ store, config, fetchImpl, getKeySet: localKeySet })),
   );
   routes.set("/api/hosted/publications/bind", createBindRoute(() => dependencies));
+  /* The approval page claims the operation for the signed-in account once the
+     review has rendered, so that the same publication is reachable afterwards
+     from `/publish/pending`. The route is served here rather than left to 404
+     so the oracle exercises what the page actually does. */
+  routes.set("/api/hosted/publications/claim", createClaimRoute(() => dependencies));
   routes.set("/api/hosted/publications/:id/review", createReviewRoute(() => dependencies));
   routes.set("/api/hosted/publications/:id/decision", createDecisionRoute(() => dependencies));
 

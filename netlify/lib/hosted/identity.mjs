@@ -245,22 +245,23 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 /**
  * The internal destinations a callback may return a browser to.
  *
- * An allowlist of five exact shapes, matched against the raw string with no
+ * An allowlist of seven exact shapes, matched against the raw string with no
  * decoding, no normalisation and no `new URL` anywhere near it. That is what
  * makes the whole family of redirect-injection spellings uninteresting rather
  * than individually defended: `//evil.example`, `/\evil.example`,
  * `https://evil.example`, `/docs/%2e%2e/admin`, `/publish/authorize?next=...`
  * and a backslash-separated variant all fail to be one of the five.
  *
- * The five shapes are `/publish/authorize`, `/welcome`, `/admin`,
+ * The seven shapes are `/publish/authorize`, `/publish/pending`,
+ * `/publish/approve`, `/welcome`, `/admin`,
  * `/docs/<32 hex>`, and a single collaboration document slug
  * `^/[a-z0-9-]{1,64}/$` whose one segment is not a reserved route name.
- * `/welcome` is the ordinary sign-in's default and, like the other two exact
+ * `/welcome` is the ordinary sign-in's default and, like the other four exact
  * paths, is matched with no trailing slash, so it cannot be reached through the
  * slug shape either: `welcome` is a reserved first segment, and `/welcome/` is
  * refused rather than quietly treated as a document named "welcome".
  *
- * `/` was briefly a sixth shape. #236 added it so a plain sign-in could land on
+ * `/` was briefly a shape of its own. #236 added it so a plain sign-in could land on
  * the splash rather than the approval page's "No pending publication" dead end,
  * and said so: an interim landing until the onboarding page existed. It does
  * now, so the interim shape is gone rather than left as a second answer to the
@@ -275,6 +276,14 @@ const COLLABORATION_SLUG = /^\/([a-z0-9-]{1,64})\/$/;
 export function validateDestination(value) {
   if (typeof value !== "string") throw new AuthRequestError("unknown destination");
   if (value === HOSTED_LIMITS.AUTHORIZE_PATH) return value;
+  /* The two self-serve publish pages. Both are exact internal paths with
+     nothing caller-controlled in them, so they widen the allowlist by two
+     destinations and by no shape - and both have to be here, because they are
+     the pages a person who never received the agent's link signs in *from*.
+     A sign-in that could not come back to them would land the visitor on the
+     onboarding page and lose the thing they came to do. */
+  if (value === HOSTED_LIMITS.PENDING_PATH) return value;
+  if (value === HOSTED_LIMITS.APPROVE_PATH) return value;
   /* The onboarding page an ordinary sign-in defaults to, and what replaced
      #236's interim `/` landing: it answers the same "where does a sign-in with
      nothing to approve go" question, with a page that explains the flow. */

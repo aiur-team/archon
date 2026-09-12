@@ -61,7 +61,7 @@ continue with Google or GitHub, and the session that comes back is the same one 
 uses. Archon never sees a password, and there is no email-and-password form to configure.
 
 The five variables above are what sign-in needs. Without them the sign-in route answers `503` and gated
-documents stay unreachable, which is the intended behaviour for a site vendored by `scripts/connect.mjs`
+documents stay unreachable, which is the intended behavior for a site vendored by `scripts/connect.mjs`
 that has no Auth0 tenant of its own — not a failure to repair. A site that does want sign-in configures its
 own Auth0 application against these same names.
 

@@ -152,6 +152,18 @@ export const HOSTED_LIMITS = Object.freeze({
   DOCUMENT_PATH_PREFIX: "/docs/",
   AUTHORIZE_PATH: "/publish/authorize",
   /**
+   * The two self-serve publish pages, both exact sign-in destinations.
+   *
+   * `PENDING_PATH` lists the pending publications the signed-in person has
+   * claimed; `APPROVE_PATH` takes a typed pairing code and reaches the same
+   * approval screen. They are named here for the same reason `AUTHORIZE_PATH`
+   * and `WELCOME_PATH` are: the sign-in destination grammar is an allowlist of
+   * exact strings, and a page a first-time visitor signs in *from* has to be
+   * one of them or the sign-in cannot come back to it.
+   */
+  PENDING_PATH: "/publish/pending",
+  APPROVE_PATH: "/publish/approve",
+  /**
    * The onboarding page an ordinary sign-in lands on, and the first page a
    * person who has just discovered Archon sees.
    *
@@ -978,11 +990,12 @@ function requireArtifactHtml(html, descriptor, field) {
  * The version a record is written with.
  *
  * Read as "the shape this code produces", never as "the only shape it accepts":
- * `validatePublication` reads a `1` and upgrades it, because two tickets added
- * one field each - ACN-004's `ownerEmail` and ACN-007's `allowedDomains` - and
- * one bump covers both.
+ * `validatePublication` reads a `1` and a `2` and upgrades either, because
+ * three tickets added one field each - ACN-004's `ownerEmail`, ACN-007's
+ * `allowedDomains` and this ticket's `claimantAccountId` - and an older record
+ * is a record missing a field rather than a record this version cannot read.
  */
-export const PUBLICATION_RECORD_VERSION = 2;
+export const PUBLICATION_RECORD_VERSION = 3;
 
 const PUBLICATION_KEYS = Object.freeze([
   "v",
@@ -994,6 +1007,7 @@ const PUBLICATION_KEYS = Object.freeze([
   "userCode",
   "createdAt",
   "pendingExpiresAt",
+  "claimantAccountId",
   "ownerAccountId",
   "ownerEmail",
   "allowedDomains",
@@ -1028,15 +1042,22 @@ export function validatePublication(value, { field = "publication" } = {}) {
      record shape that already exists in stores. A record written before it
      existed is a legal record with no domains listed, not a record this version
      cannot interpret - and `publication-store.mjs` turns the latter into a 503,
-     so refusing it here would take every pre-existing document offline. */
-  requireExactKeys(value, PUBLICATION_KEYS, field, { optional: ["allowedDomains"] });
+     so refusing it here would take every pre-existing document offline.
+
+     `claimantAccountId` is optional for the same reason and one more: it is the
+     only field a record may gain *after* it was written, so a record stored
+     before this version existed is a record nobody has claimed yet rather than
+     one this version cannot interpret. */
+  requireExactKeys(value, PUBLICATION_KEYS, field, {
+    optional: ["allowedDomains", "claimantAccountId"],
+  });
 
   /* Two versions are readable and one is written. ACN-004 added `ownerEmail`
      without bumping and ACN-007 adds `allowedDomains` with one bump for both,
      so a stored `1` is a record from either of those points and upgrades on
      read by defaulting the field it is missing. */
-  if (value.v !== 1 && value.v !== PUBLICATION_RECORD_VERSION) {
-    throw invalid(`${field}.v`, `must be 1 or ${PUBLICATION_RECORD_VERSION}`);
+  if (value.v !== 1 && value.v !== 2 && value.v !== PUBLICATION_RECORD_VERSION) {
+    throw invalid(`${field}.v`, `must be 1, 2 or ${PUBLICATION_RECORD_VERSION}`);
   }
   requireLowerHex(value.id, HOSTED_LIMITS.PUBLICATION_ID_HEX_LENGTH, `${field}.id`);
   const descriptor = validateDescriptor(value.descriptor, { field: `${field}.descriptor` });
@@ -1071,6 +1092,25 @@ export function validatePublication(value, { field = "publication" } = {}) {
     `${field}.createdAt`,
     `${field}.pendingExpiresAt`,
   );
+
+  /* Who may *reach* this operation's approval, which is a different question
+     from who owns the document and answers it earlier.
+
+     A pending record has no owner by construction - C2 fixes one only on
+     approval - so until this field existed there was nothing on a record that
+     could scope a listing to a person, and the only way to reach an approval
+     was to hold the link. It is set once, by `claimPublication`, for the
+     account that presented the link's browser secret or the pairing code; it is
+     never chosen by a caller, and it is never an approval. Approving still
+     needs the browser binding, the session, the CSRF token and the exact
+     Origin, exactly as before.
+
+     It is nullable in every state: a record claimed by nobody is the ordinary
+     case for an operation that was approved from the link in one sitting. */
+  const claimantAccountId =
+    value.claimantAccountId === null || value.claimantAccountId === undefined
+      ? null
+      : requireAccountId(value.claimantAccountId, `${field}.claimantAccountId`);
 
   const ownerAccountId =
     value.ownerAccountId === null
@@ -1150,6 +1190,7 @@ export function validatePublication(value, { field = "publication" } = {}) {
     userCode: value.userCode,
     createdAt: value.createdAt,
     pendingExpiresAt: value.pendingExpiresAt,
+    claimantAccountId,
     ownerAccountId,
     ownerEmail,
     allowedDomains,

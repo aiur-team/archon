@@ -1829,7 +1829,7 @@ async function happyPath(world, browser, client) {
   ], { cwd: client.consumer, env }));
   assert.deepEqual(
     Object.keys(started).sort(),
-    ["nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
+    ["expiresAt", "nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
     "the start command printed fields C5 does not allow it to print",
   );
   assert.equal(started.serviceOrigin, app.origin);

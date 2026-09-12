@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Waiting to publish — Archon</title>
+    <!--
+      The page that removes the relay.
+
+      ## What it is for
+
+      Until this page existed, the only address of a pending approval was the
+      fragment URL in the agent's message, and the approval page deliberately
+      removes that fragment from the browser on first load. A person who lost
+      the message, read it on another device, or simply could not find it had
+      nothing to go to - which is exactly what happened on the live run this
+      page came out of: three rounds of "you did not send me the link" against
+      an agent that had sent it repeatedly, with the window running down.
+
+      So this is the address a person can reach on their own. Sign in, and the
+      publications waiting for you are on the screen.
+
+      ## What it may show
+
+      Only publications this account has claimed, and the server decides that:
+      `GET /api/hosted/publications/pending` filters on the claimant account in
+      the adapter and projects nothing for any other record. There is no request
+      this page can make that returns somebody else's publication, and no
+      parameter it can send that widens the list.
+
+      ## What it does not do
+
+      It does not approve anything. The Approve button asks
+      `POST /api/hosted/publications/claim` to re-issue the browser binding for
+      a publication this account already claimed, and then hands the visitor to
+      `/publish/authorize`, which is still the one page with the two decision
+      buttons and still behind the session, the CSRF token and the binding.
+
+      Everything variable is written with `textContent`; there is no
+      `innerHTML` in `pending.js`. A title comes from an agent, so it is text in
+      every state. The stylesheet is inline for the same reason it is inline on
+      the approval page: the static CSP allows `style-src 'unsafe-inline'` and
+      not `'self'`, and a separate file would need that widened for the whole
+      tree.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 34rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+      h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      .status { margin-top: 1rem; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      .card {
+        border: 1px solid;
+        border-radius: 0.5rem;
+        margin-top: 1.25rem;
+        padding: 1rem 1.25rem;
+      }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0 0 1rem; }
+      dt { font-weight: 600; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.08em; }
+      button {
+        cursor: pointer;
+        font: inherit;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      button[disabled] { cursor: progress; opacity: 0.6; }
+      .account { margin-top: 1.5rem; }
+      .elsewhere { margin-top: 2rem; }
+      noscript p { color: #b3261e; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Waiting to publish</h1>
+    <p class="lede">
+      Publications your agent started and asked you to approve. Nothing is
+      published until you approve it.
+    </p>
+
+    <noscript>
+      <p>JavaScript is required. This page has to ask Archon what is waiting for you.</p>
+    </noscript>
+
+    <p class="status" id="status" role="status" aria-live="polite">Checking…</p>
+
+    <p id="retry-row" hidden><button type="button" id="retry">Try again</button></p>
+
+    <!-- One card per waiting publication, cloned from this template. -->
+    <template id="row">
+      <!-- No `id` anywhere inside: the template is cloned once per row, and an
+           id in here would be a duplicate id on the page as soon as two
+           publications were waiting. The heading names the region instead. -->
+      <section class="card">
+        <h2 class="row-title"></h2>
+        <dl>
+          <dt>Size</dt>
+          <dd class="row-size"></dd>
+          <dt>Pairing code</dt>
+          <dd class="code row-code"></dd>
+          <dt>Approve before</dt>
+          <dd class="row-expiry"></dd>
+        </dl>
+        <button type="button" class="row-open">Review and approve</button>
+      </section>
+    </template>
+    <div id="list"></div>
+
+    <!-- Sign-in continuation. A real form, so it works from the keyboard. -->
+    <div class="account" id="signin" hidden>
+      <form method="post" action="/api/hosted/auth/start">
+        <input type="hidden" name="destination" value="/publish/pending" />
+        <button type="submit" id="signin-submit">Sign in</button>
+      </form>
+      <p class="lede">
+        Archon identifies you through Auth0, which lets you continue with Google
+        or GitHub. It reads only your name and email.
+      </p>
+    </div>
+
+    <div class="elsewhere">
+      <p class="lede">
+        Nothing here? If your agent gave you a pairing code, you can
+        <a href="/publish/approve">type the code</a> instead.
+      </p>
+    </div>
+
+    <script src="/publish/pending.js"></script>
+  </body>
+</html>

@@ -304,7 +304,7 @@ test("start writes private state, prints exactly the C5 fields, and exits 10", a
   const payload = onlyObject(result.stdout);
   assert.deepEqual(
     Object.keys(payload).sort(),
-    ["nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
+    ["expiresAt", "nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
   );
   assert.equal(payload["state"], "pending");
   assert.equal(payload["serviceOrigin"], serviceOrigin);
@@ -317,6 +317,9 @@ test("start writes private state, prints exactly the C5 fields, and exits 10", a
   /* The bearer is in the file and nowhere a person or a log can see it. */
   const saved = readRequestState(requestFile).state;
   assert.equal(saved.agentSecret, AGENT_SECRET);
+  /* `expiresAt` in the JSON is the same pending deadline written into the
+     request file — the service's own value, not recomputed here. */
+  assert.equal(payload["expiresAt"], saved.expiresAt);
   assert.ok(!result.stdout.includes(AGENT_SECRET), "stdout must not carry the bearer");
   assert.ok(!result.stderr.includes(AGENT_SECRET), "stderr must not carry the bearer");
   assert.ok(result.stderr.includes(serviceOrigin), "stderr must name the resolved service origin");

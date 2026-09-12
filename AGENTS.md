@@ -59,8 +59,12 @@ Your output is one built HTML file. A hosted link is a separate step and only ha
 ## 5. Publish (only when asked, and only with a service origin the person gives you)
 
 1. `npx --no archon-publish start --file my-doc/dist/my-doc.hosted.html --title "..." --service <origin> --json`
-   Exit 10 returns `verificationUrl`, `userCode` and `requestFile`.
-2. Hand `verificationUrl` and `userCode` to the person, and to nobody else. They open it, sign in, and approve.
+   Exit 10 returns `verificationUrl`, `userCode`, `expiresAt` and `requestFile`.
+2. Put `verificationUrl` and `userCode` on their own lines, in plain text, first in your reply — not
+   only inside a fenced code block, which can be collapsed or missed — and repeat the code in
+   prose. State `expiresAt` in the person's local clock. Send this to the person, and to nobody
+   else. They open it, sign in, and approve — or use `/publish/approve` and `/publish/pending` as a
+   fallback if they lose the link. See the skill's section 5 for the full wording.
 3. `npx --no archon-publish resume --request <requestFile> --json`
    Exit 0 returns the receipt; report `result.url` and `serviceOrigin` exactly as returned.
 

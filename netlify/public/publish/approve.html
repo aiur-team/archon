@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Approve with a code — Archon</title>
+    <!--
+      The typeable way in.
+
+      `/publish/authorize` needs the fragment from the agent's link and answers
+      404 to anybody who types it from memory. This page needs only the pairing
+      code, which is already shaped `XXXX-XXXX` for exactly this purpose and is
+      the same value C2 asks the person to check against their agent's output.
+      It is what every OAuth device flow does, and it is the fallback under the
+      pending list: a person who has the code but no account yet can sign in
+      here and land on the approval screen without the link ever being found.
+
+      ## This page must not become an oracle
+
+      A wrong code, an unknown code, a code for something already decided and a
+      code somebody else claimed first all produce one identical refusal, and the
+      server is what makes that true - `claimPublication` throws the same
+      `not_found` for every one of them, and the claim route is rate limited the
+      same way the anonymous start route is. Nothing on this page may report a
+      distinction the server declined to make, so there is exactly one failure
+      message in `approve.js` for every refusal that is not a storage outage.
+
+      ## What it does not do
+
+      It does not approve anything. A correct code gets the browser binding for
+      that publication and a redirect to `/publish/authorize`, which is still the
+      only page with the two decision buttons, still behind the session, the CSRF
+      token and the binding, and still the only thing that can fix an owner.
+
+      The stylesheet is inline for the same reason it is on the approval page:
+      the static CSP allows `style-src 'unsafe-inline'` and not `'self'`.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.5;
+        margin: 0 auto;
+        max-width: 34rem;
+        padding: 3rem 1.25rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+      p.lede { margin-top: 0; opacity: 0.8; }
+      .status { margin-top: 1rem; }
+      .status[data-tone="error"] { color: #b3261e; font-weight: 600; }
+      form.code-form { margin-top: 1.5rem; }
+      label { display: block; font-weight: 600; margin-bottom: 0.35rem; }
+      input[type="text"] {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 1.25rem;
+        letter-spacing: 0.12em;
+        padding: 0.6rem 0.75rem;
+        text-transform: uppercase;
+        width: 100%;
+      }
+      button {
+        cursor: pointer;
+        font: inherit;
+        margin-top: 0.75rem;
+        padding: 0.6rem 1rem;
+        width: 100%;
+      }
+      button[disabled] { cursor: progress; opacity: 0.6; }
+      .account { margin-top: 1.5rem; }
+      .elsewhere { margin-top: 2rem; }
+      noscript p { color: #b3261e; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Approve with a code</h1>
+    <p class="lede">
+      Your agent printed a pairing code when it asked to publish. Type it here to
+      reach the approval screen. Nothing is published until you approve it there.
+    </p>
+
+    <noscript>
+      <p>JavaScript is required. This page has to check the code with Archon.</p>
+    </noscript>
+
+    <p class="status" id="status" role="status" aria-live="polite">Checking…</p>
+
+    <form class="code-form" id="code-form" hidden>
+      <label for="code">Pairing code</label>
+      <input
+        type="text"
+        id="code"
+        name="code"
+        autocomplete="off"
+        autocapitalize="characters"
+        spellcheck="false"
+        inputmode="text"
+        maxlength="9"
+        placeholder="XXXX-XXXX"
+        aria-describedby="code-help"
+      />
+      <p class="lede" id="code-help">
+        Eight characters, usually with a dash in the middle. Upper or lower case
+        both work.
+      </p>
+      <button type="submit" id="submit">Find this publication</button>
+    </form>
+
+    <!-- Sign-in continuation. A real form, so it works from the keyboard. -->
+    <div class="account" id="signin" hidden>
+      <form method="post" action="/api/hosted/auth/start">
+        <input type="hidden" name="destination" value="/publish/approve" />
+        <button type="submit" id="signin-submit">Sign in</button>
+      </form>
+      <p class="lede">
+        Archon identifies you through Auth0, which lets you continue with Google
+        or GitHub. It reads only your name and email. Come back to this page
+        afterwards and type the code.
+      </p>
+    </div>
+
+    <div class="elsewhere">
+      <p class="lede">
+        Lost the code too? Everything waiting for you is on
+        <a href="/publish/pending">your pending publications</a>.
+      </p>
+    </div>
+
+    <script src="/publish/approve.js"></script>
+  </body>
+</html>

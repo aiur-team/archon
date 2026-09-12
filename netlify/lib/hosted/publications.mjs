@@ -509,6 +509,12 @@ export async function createPublication(descriptor, dependencies) {
       userCode: mintUserCode(randomBytes),
       createdAt,
       pendingExpiresAt,
+      /* Nobody has claimed the approval yet. `start` is anonymous by
+         construction - it mints the capability rather than checking one - so
+         there is no account to record here, and the first person to present the
+         link or the pairing code from a signed-in browser becomes the claimant.
+         See `claimPublication`. */
+      claimantAccountId: null,
       ownerAccountId: null,
       /* No owner yet, and therefore no owner email. Both are set once, by the
          approval below, from the session that authorized it. */
@@ -725,6 +731,274 @@ export async function decidePublication(
   }
 
   throw unavailable("could not record the decision");
+}
+
+/* ------------------------------------------------------------------ */
+/* self-serve: claiming an approval and listing what is waiting        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The one refusal every self-serve failure is spelled with.
+ *
+ * A code that names nothing, a code that names something terminal, a code
+ * somebody else already claimed, and an id this caller has no capability for
+ * all answer with this identical error. That is the whole anti-oracle property
+ * of `/publish/approve`: a person typing codes learns only whether *they* can
+ * approve something, never whether a publication exists.
+ *
+ * `not_found` rather than `invalid_capability` for the same reason - the second
+ * one would confirm that the thing being named is real.
+ */
+function noPendingMatch() {
+  return fail("not_found", "no pending publication matches", "publication");
+}
+
+/**
+ * A typed pairing code in the shape the minter produces, or null.
+ *
+ * People type a code off a screen, so spaces, lower case and a missing dash are
+ * ordinary rather than hostile and are all normalised away. Anything that is
+ * still not the recommended grammar afterwards is refused before a single store
+ * read: the grammar is public, so failing early leaks nothing, and it keeps a
+ * stream of junk from turning into a stream of enumerations.
+ */
+export function normalizeUserCode(value) {
+  if (typeof value !== "string" || value.length > HOSTED_LIMITS.USER_CODE_MAX_SCALARS) return null;
+  const bare = value.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+  if (bare.length !== 8) return null;
+  const code = `${bare.slice(0, 4)}-${bare.slice(4)}`;
+  return HOSTED_LIMITS.RECOMMENDED_USER_CODE_PATTERN.test(code) ? code : null;
+}
+
+/** Constant-time equality of two same-shaped display strings. */
+function codeMatches(presented, stored) {
+  const left = Buffer.from(presented, "utf8");
+  const right = Buffer.from(stored, "utf8");
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/** The store adapter's census, or a clear programming fault. */
+function requireCensus(store) {
+  if (typeof store.list !== "function") {
+    throw new TypeError("this operation requires a publication store with a census");
+  }
+  return store.list;
+}
+
+/**
+ * The pending record a typed pairing code names, with its ETag, or a refusal.
+ *
+ * A linear census, because the store is keyed by publication id and a code is
+ * not a key. That is affordable precisely because it is bounded on both sides:
+ * `list` reads at most `MAX_LIST_RECORDS` records, and the route above this one
+ * is rate limited the same way the anonymous start route is. It is not a design
+ * that would survive a hundred thousand documents, and the honest place to fix
+ * that is a code-to-id index rather than a laxer refusal here.
+ *
+ * Records that are not pending are skipped rather than matched and then
+ * refused, so a code that was recycled by a later minting cannot be shadowed by
+ * a terminal record holding the same value.
+ */
+async function findPendingByUserCode(store, code, nowMs) {
+  const census = requireCensus(store);
+  const { records } = await census.call(store);
+  for (const record of records) {
+    if (effectiveState(record, nowMs) !== "pending") continue;
+    if (codeMatches(code, record.userCode)) return record.id;
+  }
+  return null;
+}
+
+/**
+ * Bind a signed-in person to a pending publication they can prove they were
+ * sent, and hand back the browser binding that reaches its approval.
+ *
+ * ## What this does not do
+ *
+ * It does not approve anything and it does not fix an owner. `decidePublication`
+ * is untouched: it still demands the exact `Origin`, a live session, the
+ * session-bound CSRF token and the `__Host-archon_publish` binding, and the
+ * owner it writes is still the session's account. This call is a *way to reach*
+ * that gate for a person who has the capability but has lost the page, which is
+ * the whole of #254: during a live run the operator could not find the link the
+ * agent had sent several times, and the approval window was expiring.
+ *
+ * ## The three proofs, and why each one is a capability
+ *
+ *  - **the pairing code**, typed on `/publish/approve`. The code is minted from
+ *    128 bits of rejection-sampled randomness, travels only to the person the
+ *    agent is talking to, and is exactly the value C2 already asks them to check
+ *    against their agent's output. Presenting it proves the same thing
+ *    presenting the link does.
+ *  - **the browser binding**, held by the approval page after it exchanged the
+ *    link's secret. This is the claim the ordinary flow makes: the person opened
+ *    the link and then signed in, and from that moment the operation is theirs
+ *    on any device that account signs in on, not merely in that tab.
+ *  - **an existing claim by this same account**, which is how the pending list's
+ *    Approve button re-issues a binding whose fifteen minutes ran out while the
+ *    person was reading their email.
+ *
+ * Nothing else is accepted. In particular a bare publication id is not a proof:
+ * ids appear in document URLs and in receipts, and treating one as sufficient
+ * would let any signed-in account take over any pending publication whose id it
+ * could see or guess.
+ *
+ * ## First claim wins, permanently
+ *
+ * A record already claimed by another account refuses with the same
+ * `not_found` every other failure uses, *including* to a caller presenting the
+ * correct pairing code. Two people cannot hold one approval, and telling the
+ * second one that the code was right would turn a refusal into a confirmation.
+ *
+ * @returns {Promise<Readonly<{publicationId: string, binding: {publicationId: string, browserSecretHash: string}, expiresAt: string}>>}
+ */
+export async function claimPublication(
+  { publicationId, userCode, browserBinding, principal } = {},
+  dependencies,
+) {
+  const { store, now } = requireDependencies(dependencies);
+  const claimant = validatePrincipal(principal);
+
+  /* The code path resolves an id first, so from here both paths are the same
+     code. A caller that sends both is answered on the code, which is the
+     stronger of the two proofs. */
+  let targetId = publicationId;
+  let provedByCode = false;
+  if (userCode !== undefined && userCode !== null) {
+    const code = normalizeUserCode(userCode);
+    if (code === null) throw noPendingMatch();
+    const found = await findPendingByUserCode(store, code, now());
+    if (found === null) throw noPendingMatch();
+    targetId = found;
+    provedByCode = true;
+  }
+  if (typeof targetId !== "string") throw noPendingMatch();
+
+  for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
+    const found = await store.read(targetId).catch((error) => {
+      /* A malformed id is the caller naming something that cannot exist, and
+         that is the same answer as naming something that does not. A storage
+         failure is not, and is re-thrown. */
+      if (error instanceof HostedContractError && error.code === "invalid_request") {
+        throw noPendingMatch();
+      }
+      throw error;
+    });
+    if (found === null) throw noPendingMatch();
+    const { record, etag } = found;
+
+    /* Ordered so that a caller with no capability learns nothing about the
+       record's state: every branch below is the same refusal. */
+    const proved =
+      provedByCode ||
+      (browserBinding !== undefined &&
+        browserBinding !== null &&
+        bindingMatches(browserBinding, record)) ||
+      (record.claimantAccountId !== null && record.claimantAccountId === claimant.accountId);
+    if (!proved) throw noPendingMatch();
+    if (effectiveState(record, now()) !== "pending") throw noPendingMatch();
+    if (record.claimantAccountId !== null && record.claimantAccountId !== claimant.accountId) {
+      throw noPendingMatch();
+    }
+
+    const binding = Object.freeze({
+      publicationId: record.id,
+      browserSecretHash: record.browserSecretHash,
+    });
+    if (record.claimantAccountId === claimant.accountId) {
+      /* Already this person's. Re-issuing the binding is the whole point of the
+         repeat call and there is nothing to write. */
+      return Object.freeze({
+        publicationId: record.id,
+        binding,
+        expiresAt: record.pendingExpiresAt,
+      });
+    }
+
+    const next = validatePublication({ ...record, claimantAccountId: claimant.accountId });
+    const written = await store.update(next, etag);
+    if (written.outcome === "committed" || written.outcome === "observed") {
+      return Object.freeze({
+        publicationId: record.id,
+        binding,
+        expiresAt: record.pendingExpiresAt,
+      });
+    }
+    /* `refused` means somebody else wrote the record between the read and the
+       write - most plausibly the other half of a double-click, or the agent
+       cancelling. The loop re-reads and re-judges, and a claim that now belongs
+       to another account is refused on the next pass rather than overwritten. */
+  }
+
+  throw unavailable("could not record the claim");
+}
+
+/** Whether a presented binding is the one this record's link would produce. */
+function bindingMatches(browserBinding, record) {
+  return (
+    typeof browserBinding === "object" &&
+    browserBinding.publicationId === record.id &&
+    typeof browserBinding.browserSecretHash === "string" &&
+    secretMatchesHash(browserBinding.browserSecretHash, record.browserSecretHash)
+  );
+}
+
+/**
+ * The fields the pending list may show for one waiting publication.
+ *
+ * The same bound as the review projection, minus the account: neither secret
+ * hash, no HTML, and nothing about any record this person did not claim. The
+ * pairing code is here because it is what lets somebody with two agents running
+ * tell the two rows apart, and because the person is already entitled to it -
+ * they proved they hold it, or they followed the link that carries it.
+ */
+function pendingProjection(record) {
+  return Object.freeze({
+    publicationId: record.id,
+    title: record.descriptor.title,
+    contentBytes: record.descriptor.contentBytes,
+    userCode: record.userCode,
+    createdAt: record.createdAt,
+    expiresAt: record.pendingExpiresAt,
+  });
+}
+
+/**
+ * Every pending publication this account has claimed, and nothing else.
+ *
+ * The filter is an equality against `claimantAccountId` and it is applied here,
+ * in the only place that reads the census, rather than in the route: a route
+ * that received unfiltered records could ship one by projecting the wrong
+ * variable, and there would be nothing in this module to fail when it did.
+ *
+ * A record that is not claimed by exactly this account is not merely omitted
+ * from the body - it is never projected at all, so there is no shape in which
+ * another person's title, code or id can reach this caller. An unreadable
+ * record is skipped for the same reason: the census cannot say whose it is, and
+ * an operator census (`/api/hosted/admin/documents`) is where an unreadable
+ * record is meant to surface.
+ *
+ * @returns {Promise<Readonly<{v: 1, publications: object[], truncated: boolean}>>}
+ */
+export async function listClaimedPendingPublications({ principal } = {}, dependencies) {
+  const { store, now } = requireDependencies(dependencies);
+  const viewer = validatePrincipal(principal);
+  const census = requireCensus(store);
+  const { records, truncated } = await census.call(store);
+  const nowMs = now();
+
+  const mine = records
+    .filter(
+      (record) =>
+        record.claimantAccountId !== null &&
+        record.claimantAccountId === viewer.accountId &&
+        effectiveState(record, nowMs) === "pending",
+    )
+    .sort((left, right) => (left.createdAt < right.createdAt ? 1 : -1))
+    .map(pendingProjection);
+
+  return Object.freeze({ v: 1, publications: mine, truncated });
 }
 
 /* ------------------------------------------------------------------ */

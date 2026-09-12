@@ -809,13 +809,13 @@ async function publishLifecycle(consumer, artifact, fixture, stateDir) {
   ];
 
   /* 1. start, while nobody has approved anything: exit 10 and exactly the
-        seven fields C5 allows this command to print. */
+        eight fields C5 allows this command to print. */
   fixture.plan({ kind: "pending" });
   const started = await runExpecting(EXIT.CHECKPOINT, publish, startArgs("Payments review"), { cwd: consumer, env });
   const start = stdoutJson(started);
   assert.deepEqual(
     Object.keys(start).sort(),
-    ["nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
+    ["expiresAt", "nextAction", "requestFile", "serviceOrigin", "state", "userCode", "v", "verificationUrl"],
     `start printed fields C5 does not fix: ${Object.keys(start).join(", ")}`,
   );
   assert.equal(start.state, "pending");
