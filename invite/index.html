@@ -58,19 +58,23 @@
         padding: 0.625rem 1rem;
         font-weight: 600;
         text-align: center;
+        /* The Example Doc skin from the splash, in both themes: white on
+           #1f57c4 is 6.5:1, darker on hover (8.1:1) and press (10:1). */
         color: #ffffff;
-        background: #1a5fb4;
-        border: 1px solid #1a5fb4;
-        border-radius: 4px;
+        background: #1f57c4;
+        border: 1px solid transparent;
+        border-radius: 999px;
         text-decoration: none;
       }
+      a.action:hover { background: #1a4aa8; }
+      a.action:active { background: #163e8c; }
+      /* CanvasText is black on the light canvas and white on the dark one. */
       a.action:focus-visible {
-        outline: 2px solid #1a5fb4;
+        outline: 2px solid CanvasText;
         outline-offset: 2px;
       }
       @media (prefers-color-scheme: dark) {
         body { background: #16181c; color: #f2f2f2; }
-        a.action { background: #4a8ee0; border-color: #4a8ee0; color: #101216; }
       }
       @media (forced-colors: active) {
         a.action {

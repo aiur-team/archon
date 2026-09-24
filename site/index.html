@@ -13,9 +13,26 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script>
+  /* A theme chosen with the toggle is applied here, in the head and before the
+     stylesheet, so the page paints in that theme from its first frame instead of
+     flashing the system one. No stored choice leaves `data-theme` unset and the
+     page follows `prefers-color-scheme`. Storage is guarded: a browser with site
+     data blocked throws on access, and the page then simply follows the system. */
+  (function () {
+    try {
+      var theme = localStorage.getItem("archon.theme");
+      if (theme === "light" || theme === "dark") document.documentElement.setAttribute("data-theme", theme);
+    } catch (error) { /* unreadable storage follows the system theme */ }
+  })();
+</script>
 <style>
-  /* Light is the bare :root so no colour exists only inside a media block. */
+  /* Light is the bare :root so no colour exists only inside a media block. The
+     dark set applies when the system asks for it and the toggle has not chosen
+     light, or whenever the toggle has chosen dark; the two blocks hold the same
+     values. */
   :root {
+    color-scheme: light;
     --bg: #e7d6b2;
     --fg: #2a2520;
     --muted: #5f5645;
@@ -24,9 +41,18 @@
     --pill-bd: rgba(42, 37, 26, 0.16);
     --pill-bg: rgba(42, 37, 26, 0.035);
     --line: rgba(42, 37, 26, 0.17);
+    /* Every button wears the Example Doc skin: white text on the light theme's
+       accent blue. The same values hold in both themes, because white on the
+       dark theme's brighter #2f86ff accent is 3.5:1 and fails AA for body-size
+       text, while white on #1f57c4 is 6.5:1 (hover 8.1:1, pressed 10:1). */
+    --btn-bg: #1f57c4;
+    --btn-bg-hover: #1a4aa8;
+    --btn-bg-active: #163e8c;
+    --btn-fg: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #1a1b1e;
       --fg: #edeef0;
       --muted: #8c8d93;
@@ -36,6 +62,17 @@
       --pill-bg: rgba(221, 226, 235, 0.03);
       --line: rgba(221, 226, 235, 0.14);
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1a1b1e;
+    --fg: #edeef0;
+    --muted: #8c8d93;
+    --accent: #2f86ff;
+    --hairline: rgba(221, 226, 235, 0.10);
+    --pill-bd: rgba(221, 226, 235, 0.13);
+    --pill-bg: rgba(221, 226, 235, 0.03);
+    --line: rgba(221, 226, 235, 0.14);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -93,15 +130,17 @@
     display: grid;
     place-items: center;
     border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--muted);
+    border-radius: 999px;
+    background: var(--btn-bg);
+    color: var(--btn-fg);
     font: inherit;
     font-size: 15px;
     line-height: 1;
     cursor: pointer;
+    transition: background-color 0.2s ease;
   }
-  .banner-close:hover { color: var(--fg); background: var(--pill-bd); }
+  .banner-close:hover { background: var(--btn-bg-hover); }
+  .banner-close:active { background: var(--btn-bg-active); }
   .banner-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* Sign in sits in normal flow, right-aligned, directly after the banner. When
@@ -111,6 +150,8 @@
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
+    align-items: center;
+    gap: 0.5rem;
     padding: 0.75rem clamp(0.9rem, 3vw, 1.25rem) 0;
     margin: 0;
     position: relative;
@@ -137,14 +178,48 @@
   .site-signin button {
     cursor: pointer;
     font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
-    color: var(--accent);
-    border: 1px solid var(--pill-bd);
-    background: var(--bg);
+    color: var(--btn-fg);
+    border: 1px solid transparent;
+    background: var(--btn-bg);
     padding: 0.55rem 1rem;
     border-radius: 999px;
+    transition: background-color 0.2s ease;
   }
+  .site-signin button:hover:not([disabled]) { background: var(--btn-bg-hover); }
+  .site-signin button:active:not([disabled]) { background: var(--btn-bg-active); }
   .site-signin button[disabled] { cursor: default; opacity: 0.6; }
   .site-signin button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Docs and the theme toggle sit left of Sign in, in the same button skin. The
+     toggle is a round icon button the height of the Sign in pill; it ships
+     hidden and the script that drives it reveals it, so a page without script
+     shows no control that does nothing. */
+  .site-tools { display: flex; align-items: center; gap: 0.5rem; }
+  .site-signin .site-docs {
+    display: inline-flex;
+    align-items: center;
+    font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
+    color: var(--btn-fg);
+    border: 1px solid transparent;
+    background: var(--btn-bg);
+    padding: 0.55rem 1rem;
+    border-radius: 999px;
+    text-decoration: none;
+    transition: background-color 0.2s ease;
+  }
+  .site-signin .theme-toggle {
+    display: grid;
+    place-items: center;
+    width: calc(0.95rem + 1.1rem + 2px);
+    height: calc(0.95rem + 1.1rem + 2px);
+    padding: 0;
+  }
+  .site-signin .theme-toggle[hidden] { display: none; }
+  .site-signin .theme-toggle svg { width: 16px; height: 16px; }
+  .theme-toggle[aria-pressed="true"] .icon-moon,
+  .theme-toggle[aria-pressed="false"] .icon-sun { display: none; }
+  .site-signin .site-docs:hover { background: var(--btn-bg-hover); }
+  .site-signin .site-docs:active { background: var(--btn-bg-active); }
+  .site-signin .site-docs:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* nav:start */
   /* The signed-in half of the nav: the visitor's picture and handle, and a menu
      whose only item signs them out. It is written here and on the onboarding
@@ -166,13 +241,16 @@
     max-width: min(60vw, 15rem);
     cursor: pointer;
     font: 500 0.95rem/1 "Space Grotesk", system-ui, sans-serif;
-    color: var(--fg);
-    border: 1px solid var(--pill-bd);
-    background: var(--pill-bg);
+    color: var(--btn-fg);
+    border: 1px solid transparent;
+    background: var(--btn-bg);
     padding: 0.3rem 0.8rem 0.3rem 0.35rem;
     border-radius: 999px;
+    transition: background-color 0.2s ease;
   }
-  .site-signin .account-trigger:hover { border-color: var(--accent); color: var(--accent); }
+  .site-signin .account-trigger:hover { background: var(--btn-bg-hover); }
+  .site-signin .account-trigger:active { background: var(--btn-bg-active); }
+  .site-signin .account-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* The picture and its fallback occupy the same box, so the pill keeps its
      width whether or not the identity published an avatar. */
   .site-signin .account-avatar,
@@ -181,7 +259,7 @@
     width: 1.65rem;
     height: 1.65rem;
     border-radius: 999px;
-    border: 1px solid var(--pill-bd);
+    border: 1px solid color-mix(in srgb, var(--btn-fg) 55%, transparent);
     background: var(--bg);
   }
   .site-signin .account-avatar { display: block; object-fit: cover; }
@@ -220,13 +298,15 @@
     text-align: left;
     cursor: pointer;
     font: 500 0.9rem/1 "Space Grotesk", system-ui, sans-serif;
-    color: var(--fg);
+    color: var(--btn-fg);
     border: 0;
-    background: transparent;
+    background: var(--btn-bg);
     padding: 0.5rem 0.7rem;
     border-radius: 8px;
   }
-  .site-signin .account-menu button:hover { background: var(--pill-bg); color: var(--accent); }
+  .site-signin .account-menu button:hover { background: var(--btn-bg-hover); }
+  .site-signin .account-menu button:active { background: var(--btn-bg-active); }
+  .site-signin .account-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* At phone width the handle gives up room before the page does, so the pill
      narrows and the name ellipses rather than pushing the row into a wrap. */
   @media (max-width: 30rem) {
@@ -347,20 +427,21 @@
     flex: none;
     position: relative;
     border: 0;
-    background: transparent;
-    color: var(--muted);
+    background: var(--btn-bg);
+    color: var(--btn-fg);
     cursor: pointer;
     display: grid;
     place-items: center;
     width: 28px;
     height: 28px;
     border-radius: 7px;
-    transition: background-color .2s, color .2s;
+    transition: background-color .2s;
   }
-  .install .copy:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 9%, transparent); }
+  .install .copy:hover { background: var(--btn-bg-hover); }
+  .install .copy:active,
+  .install .copy.copied { background: var(--btn-bg-active); }
   .install .copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .install .copy svg { width: 15px; height: 15px; }
-  .install .copy.copied { color: var(--accent); }
   /* "Copied" is announced to a screen reader and shown as a small label above
      the button, so the confirmation is not colour alone. */
   .copy-status {
@@ -407,8 +488,8 @@
     padding: 13px 22px;
     border: 1px solid transparent;
     border-radius: 999px;
-    background: var(--accent);
-    color: var(--bg);
+    background: var(--btn-bg);
+    color: var(--btn-fg);
     font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
     font-weight: 500;
     font-size: clamp(13px, 1.8vw, 15px);
@@ -417,11 +498,8 @@
     cursor: pointer;
     transition: background-color 0.2s ease;
   }
-  /* Mixing toward the foreground darkens in light and brightens in dark, so
-     one rule covers both themes. */
-  .cta:hover {
-    background: color-mix(in srgb, var(--accent) 82%, var(--fg));
-  }
+  .cta:hover { background: var(--btn-bg-hover); }
+  .cta:active { background: var(--btn-bg-active); }
   .cta svg {
     width: 15px;
     height: 15px;
@@ -445,7 +523,8 @@
   .aside a:hover { color: var(--fg); }
 
   @media (prefers-reduced-motion: reduce) {
-    .cta, .cta svg, .install .copy, .copy-status { transition: none; }
+    .cta, .cta svg, .install .copy, .copy-status, .banner-close,
+    .site-signin button, .site-signin .site-docs { transition: none; }
     /* show the wordmark at once instead of leaving the letters hidden */
     .wordmark span { animation: none; opacity: 1; transform: none; }
   }
@@ -459,6 +538,13 @@
     <button class="banner-close" id="aiur-banner-close" type="button" aria-label="Dismiss announcement">&#215;</button>
   </aside>
   <div class="site-signin">
+    <nav class="site-tools" aria-label="Site">
+      <a class="site-docs" href="https://aiur.team/docs/archon/quick-start">Docs</a>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="Dark mode" aria-pressed="false" hidden>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      </button>
+    </nav>
     <form id="siteSignin" method="post" action="/api/hosted/auth/start">
       <!-- Somebody signing in from the splash has nothing to approve yet, so they
            land on the onboarding page, which explains the flow. #236 landed them
@@ -669,6 +755,38 @@
 
   <p class="aside keepout">built with <a href="https://aiur.team">Aiur</a></p>
   </main>
+
+<script>
+  /* The theme toggle. `aria-pressed` says whether dark is showing, whichever
+     way it came to be: a stored choice (applied in the head before first paint)
+     or the system preference when there is none. A choice is stored so the next
+     visit opens in it, and every storage access is guarded: with site data
+     blocked the toggle still switches the page and only forgets on reload. */
+  (function () {
+    var KEY = "archon.theme";
+    var root = document.documentElement;
+    var btn = document.getElementById("themeToggle");
+    if (!btn) return;
+    var media = window.matchMedia("(prefers-color-scheme: dark)");
+
+    function isDark() {
+      var chosen = root.getAttribute("data-theme");
+      return chosen === "dark" || (chosen !== "light" && media.matches);
+    }
+    function sync() { btn.setAttribute("aria-pressed", isDark() ? "true" : "false"); }
+
+    btn.addEventListener("click", function () {
+      var next = isDark() ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem(KEY, next); } catch (error) { /* the choice then lasts this page load */ }
+      sync();
+      document.dispatchEvent(new Event("archon:themechange"));
+    });
+    if (media.addEventListener) media.addEventListener("change", sync);
+    sync();
+    btn.hidden = false;
+  })();
+</script>
 
 <script>
   /* Copy the agent prompt. The text copied is the exact content of the line on
@@ -929,6 +1047,7 @@
 
     // Follow a live theme switch: the line colour is a themed token.
     if (darkQuery.addEventListener) darkQuery.addEventListener("change", draw);
+    document.addEventListener("archon:themechange", draw);
 
     window.addEventListener("load", start);
     if (document.readyState === "complete") start();

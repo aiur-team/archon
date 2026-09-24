@@ -133,3 +133,41 @@ button {
 .documents td[data-tone="error"] {
   color: #b3261e;
 }
+
+/* Every button wears the Example Doc skin from the splash: white text on
+   #1f57c4 (6.5:1), darker on hover (8.1:1) and press (10:1). The values are
+   fixed rather than following the system theme, because white on a lighter
+   dark-mode blue would fall under AA. The focus ring is CanvasText, which the
+   page's `color-scheme` resolves to black on the light canvas and white on the
+   dark one, so it stays visible in both. */
+button {
+  background: #1f57c4;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+button:hover:not([disabled]) {
+  background: #1a4aa8;
+}
+
+button:active:not([disabled]) {
+  background: #163e8c;
+}
+
+button:focus-visible {
+  outline: 2px solid CanvasText;
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  button {
+    border-color: ButtonBorder;
+  }
+
+  button:focus-visible {
+    outline-color: Highlight;
+  }
+}
