@@ -28,7 +28,12 @@
 [build]
   command = "templates/build --site"
   publish = "_site"
-  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- ':!*.md' ':!**/dist/**'"
+  # Production builds triggered by a push are always cancelled: the Netlify
+  # credit pool is shared with khala.aiur.team and aiur.team, so production
+  # ships only through a deliberate manual `netlify deploy --prod`. Deploy
+  # previews still build when content changed. This also freezes the hosted
+  # functions (/api/hosted/*) until that manual deploy.
+  ignore = "if [ \"$CONTEXT\" = production ]; then exit 0; fi; git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- ':!*.md' ':!**/dist/**'"
 
 [build.environment]
   NODE_VERSION = "22"
