@@ -73,7 +73,7 @@ import { getStore } from "@netlify/blobs";
 
 import { AuthUnavailableError } from "./auth-errors.mjs";
 import { validatePrincipal } from "./contracts.mjs";
-import { hashToken, randomToken } from "./secrets.mjs";
+import { constantTimeEqual, hashToken, randomToken } from "./secrets.mjs";
 
 /** The private, strongly consistent store this ticket's records live in. */
 export const HOSTED_STORE_NAME = "archon-hosted-v1";
@@ -110,6 +110,24 @@ export const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 /** C1: the ceiling on every transient cookie and its record. Fifteen minutes. */
 export const TRANSIENT_TTL_SECONDS = 15 * 60;
+
+/**
+ * Publish codes: a bearer a signed-in person hands their agent so it can start
+ * one publication as them with no approval step (archon#253). Retries are
+ * bound to that publication by the publication store. Keyed by the
+ * code's hash, like a session, but under a prefix no session lookup reads, so a
+ * code can never be presented as a session or exchanged for one.
+ */
+export const PUBLISH_CODE_PREFIX = "publish-codes/";
+
+/**
+ * One pointer per account naming the only code that account may use. Minting
+ * rewrites it, which is what makes a new code invalidate the previous one.
+ */
+export const PUBLISH_CODE_ACCOUNT_PREFIX = "publish-code-accounts/";
+
+/** A publish code's lifetime: one hour, long enough for an agent to build a document. */
+export const PUBLISH_CODE_TTL_SECONDS = 60 * 60;
 
 /** A store operation that failed for any reason at all. Never a null. */
 function unavailable() {
@@ -182,6 +200,16 @@ export class AuthStore {
   /** The key a session token lives under. */
   static sessionKey(token) {
     return `${SESSION_PREFIX}${hashToken(token)}`;
+  }
+
+  /** The key a publish code lives under. */
+  static publishCodeKey(code) {
+    return `${PUBLISH_CODE_PREFIX}${hashToken(code)}`;
+  }
+
+  /** The key of an account's live-code pointer. The account id is hashed so keys carry no identity. */
+  static publishCodeAccountKey(accountId) {
+    return `${PUBLISH_CODE_ACCOUNT_PREFIX}${hashToken(accountId)}`;
   }
 
   /** A strongly consistent read of one record, with its ETag. Never a null on error. */
@@ -462,6 +490,99 @@ export class AuthStore {
   async revokeTransient(kind, token) {
     if (typeof token !== "string" || token === "") return false;
     return this.#revoke(AuthStore.transientKey(kind, token), { revokedAt: isoAt(this.now()) });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* publish codes                                                     */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Mint a publish code for `principal`, replacing any code it already had.
+   *
+   * The code record is written first and the account pointer second, so a
+   * pointer write that fails leaves a code nothing will honour rather than one
+   * that works without being visible to the person.
+   *
+   * @returns {Promise<{code: string, expiresAt: string}>} the raw code, returned
+   *   exactly once and never stored.
+   */
+  async mintPublishCode(principal) {
+    const checked = validatePrincipal(principal);
+    const at = this.now();
+    const code = randomToken();
+    const expiresAt = isoAt(at + PUBLISH_CODE_TTL_SECONDS * 1000);
+    const record = {
+      v: 1,
+      principal: checked,
+      createdAt: isoAt(at),
+      expiresAt,
+      revokedAt: null,
+      writeId: randomToken(),
+    };
+    if (!(await this.#applyGuarded(AuthStore.publishCodeKey(code), record, { onlyIfNew: true }))) {
+      throw unavailable();
+    }
+    const pointer = { v: 1, codeHash: hashToken(code), expiresAt, writeId: randomToken() };
+    if (!(await this.#applyGuarded(AuthStore.publishCodeAccountKey(checked.accountId), pointer, {}))) {
+      throw unavailable();
+    }
+    return { code, expiresAt };
+  }
+
+  /**
+   * The account's live code record, with its key and ETag, or null when it has
+   * none that is still active.
+   */
+  async #livePublishCode(accountId) {
+    const pointer = await this.#read(AuthStore.publishCodeAccountKey(accountId));
+    if (pointer === null || typeof pointer.data?.codeHash !== "string") return null;
+    const key = `${PUBLISH_CODE_PREFIX}${pointer.data.codeHash}`;
+    const found = await this.#read(key);
+    if (found === null || !isLive(found.data, this.now())) return null;
+    return { key, found };
+  }
+
+  /** Whether `accountId` holds an active code, as `{expiresAt}`, or null. Never the code. */
+  async readPublishCode(accountId) {
+    if (typeof accountId !== "string" || accountId === "") return null;
+    const live = await this.#livePublishCode(accountId);
+    return live === null ? null : Object.freeze({ expiresAt: live.found.data.expiresAt });
+  }
+
+  /** Revoke the account's live code. `true` when one was live and is now dead. */
+  async revokePublishCode(accountId) {
+    if (typeof accountId !== "string" || accountId === "") return false;
+    const live = await this.#livePublishCode(accountId);
+    if (live === null) return false;
+    return this.#revoke(live.key, { revokedAt: isoAt(this.now()) });
+  }
+
+  /**
+   * Resolve a publish code to the principal and request-local seed it was
+   * issued with, or null for absent, expired, revoked or superseded. The
+   * publication state machine uses the seed to derive one deterministic
+   * publication; this value is never persisted or returned by an HTTP route.
+   *
+   * The principal comes from the stored record, never from the code: the code
+   * is only a lookup key and carries no claims.
+   */
+  async resolvePublishCode(code) {
+    if (typeof code !== "string" || code === "") return null;
+    const key = AuthStore.publishCodeKey(code);
+    const found = await this.#read(key);
+    if (found === null || !isLive(found.data, this.now())) return null;
+    let principal;
+    try {
+      principal = validatePrincipal(found.data.principal);
+    } catch {
+      return null;
+    }
+    /* A code the account pointer no longer names was superseded by a newer one. */
+    const pointer = await this.#read(AuthStore.publishCodeAccountKey(principal.accountId));
+    if (pointer === null || typeof pointer.data?.codeHash !== "string") return null;
+    if (!constantTimeEqual(pointer.data.codeHash, hashToken(code))) return null;
+
+    return Object.freeze({ principal, code });
   }
 }
 

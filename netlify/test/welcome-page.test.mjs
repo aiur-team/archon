@@ -89,7 +89,7 @@ test("the onboarding page walks the three steps, in order", () => {
   assert.deepEqual(numbers, ["1", "2", "3"], "the onboarding steps are misnumbered");
 });
 
-test("the onboarding page reaches no network but the fonts and its own session route", () => {
+test("the onboarding page reaches no network but the fonts and its own session and publish-code routes", () => {
   const page = read(WELCOME);
   /* The page reads no cookie and keeps no store of its own. It does make one
      request, and exactly one: the session route, same-origin, which is the only
@@ -98,8 +98,14 @@ test("the onboarding page reaches no network but the fonts and its own session r
   for (const name of ["XMLHttpRequest", "document.cookie", "localStorage", "sessionStorage"]) {
     assert.equal(page.includes(name), false, `the onboarding page must not use ${name}`);
   }
-  const fetched = [...page.matchAll(/fetch\(\s*"([^"]*)"/g)].map((m) => m[1]);
-  assert.deepEqual(fetched, ["/api/hosted/session"], "the onboarding page fetches one path");
+  /* Plus the publish-code route (archon#253), same-origin and session-bound,
+     which a signed-in visitor's Copy and account menu use. */
+  const fetched = new Set([...page.matchAll(/fetch\(\s*"([^"]*)"/g)].map((m) => m[1]));
+  assert.deepEqual(
+    [...fetched].sort(),
+    ["/api/hosted/publish-code", "/api/hosted/session"],
+    "the onboarding page fetches only its own session and publish-code routes",
+  );
 
   const origins = [...page.matchAll(/https:\/\/([a-z0-9.-]+)/g)].map((m) => m[1]);
   for (const origin of origins) {

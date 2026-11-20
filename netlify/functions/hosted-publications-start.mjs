@@ -15,8 +15,11 @@
 
 import { getStore } from "@netlify/blobs";
 
+import { openAuthStore } from "../lib/hosted/auth-store.mjs";
+import { HostedContractError } from "../lib/hosted/contracts.mjs";
 import { createPublication, publicationDependencies } from "../lib/hosted/publications.mjs";
 import {
+  agentSecretFrom,
   browserHeadersRejection,
   errorResponse,
   jsonBody,
@@ -42,7 +45,27 @@ export async function handleStart(request, resolveDependencies) {
     if (browser !== null) return browser;
 
     const descriptor = await jsonBody(request);
-    const started = await createPublication(descriptor, resolveDependencies());
+    /* No Authorization header is the anonymous flow. A bearer here can only be
+       a publish code (archon#253); one that does not resolve is refused outright
+       rather than falling back to the approval flow the caller meant to skip. */
+    const code = request.headers.get("authorization") === null ? null : agentSecretFrom(request);
+    const dependencies = resolveDependencies();
+    const started = await createPublication(descriptor, dependencies, {
+      resolveOwner:
+        code === null
+          ? null
+          : async () => {
+              const authorization = await dependencies.authStore.resolvePublishCode(code);
+              if (authorization === null) {
+                throw new HostedContractError(
+                  "invalid_capability",
+                  "this publish code is expired, revoked or superseded; ask the person to copy the prompt again for a new one",
+                  { field: "authorization" },
+                );
+              }
+              return authorization;
+            },
+    });
     return jsonResponse(201, started);
   } catch (error) {
     return errorResponse(error);
@@ -51,7 +74,10 @@ export async function handleStart(request, resolveDependencies) {
 
 /** The Netlify entry point: the same handler, wired to the real provider. */
 export default (request) =>
-  handleStart(request, () => publicationDependencies({ env: process.env, getStore }));
+  handleStart(request, () => ({
+    ...publicationDependencies({ env: process.env, getStore }),
+    authStore: openAuthStore(),
+  }));
 
 export const config = {
   path: "/api/hosted/publications",

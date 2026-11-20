@@ -111,6 +111,7 @@ jobs:
           netlify/test/hosted/publications-artifact.test.mjs
           netlify/test/hosted/domain-access.test.mjs
           netlify/test/hosted/publications-access.test.mjs
+          netlify/test/hosted/publish-code.test.mjs
 
       # The site-level access surfaces #227 added, and #6's post-rejection request
       # flow on top of them: the platform-access evaluator and the configuration

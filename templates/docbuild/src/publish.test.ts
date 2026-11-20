@@ -254,10 +254,10 @@ interface CliResult {
 }
 
 /** Spawn the compiled binary. Never inherits the caller's state directory. */
-async function cli(args: readonly string[], stateDir: string): Promise<CliResult> {
+async function cli(args: readonly string[], stateDir: string, env: NodeJS.ProcessEnv = {}): Promise<CliResult> {
   try {
     const { stdout, stderr } = await run(process.execPath, [CLI, ...args], {
-      env: { ...process.env, ARCHON_PUBLISH_STATE_DIR: stateDir, ARCHON_PUBLISH_SERVICE: "" },
+      env: { ...process.env, ARCHON_PUBLISH_STATE_DIR: stateDir, ARCHON_PUBLISH_SERVICE: "", ARCHON_PUBLISH_CODE: "", ...env },
       /* A guard that fails open — a NaN deadline, a loop that never checks its
          bound — shows up as a command that never returns. Without this the
          suite hangs instead of going red, and a hang reads as "still running"
@@ -291,6 +291,57 @@ async function startVia(space: Workspace, origin: string, extra: readonly string
 /* ------------------------------------------------------------------ */
 /* start                                                               */
 /* ------------------------------------------------------------------ */
+
+const PUBLISH_CODE = "pc-0123456789abcdefghijklmnopqrstuvwxyzABCD";
+
+test("start with ARCHON_PUBLISH_CODE presents it, uploads at once and exits 0 with the receipt", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, {
+    start: () => ({ status: 201, json: startBody(serviceOrigin) }),
+    status: () => ({ status: 200, json: envelope("approved", 600) }),
+    artifact: () => ({ status: 201, json: completeBody(serviceOrigin) }),
+  });
+  const serviceOrigin = service.origin;
+
+  const result = await cli(
+    ["start", "--file", space.file, "--title", "A test document", "--service", serviceOrigin, "--local-test", "--json"],
+    space.stateDir,
+    { ARCHON_PUBLISH_CODE: PUBLISH_CODE },
+  );
+  await service.close();
+
+  assert.equal(result.code, 0, result.stderr);
+  const payload = onlyObject(result.stdout);
+  assert.equal(payload["state"], "complete");
+  assert.equal((payload["result"] as Record<string, unknown>)["url"], `${serviceOrigin}/docs/${PUBLICATION_ID}`);
+  assert.equal(service.seen.start[0]?.authorization, `Bearer ${PUBLISH_CODE}`);
+  assert.equal(service.seen.artifact[0]?.authorization, `Bearer ${AGENT_SECRET}`, "the upload uses the publication bearer, not the code");
+  assert.ok(!result.stdout.includes(PUBLISH_CODE) && !result.stderr.includes(PUBLISH_CODE), "the code must not be echoed");
+});
+
+test("start reports a refused publish code as a terminal local error", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, {
+    start: () => ({ status: 401, json: wireError("invalid_capability", false, "this publish code is expired, revoked or superseded") }),
+  });
+  const result = await cli(
+    ["start", "--file", space.file, "--title", "A test document", "--service", service.origin, "--local-test", "--json"],
+    space.stateDir,
+    { ARCHON_PUBLISH_CODE: PUBLISH_CODE },
+  );
+  await service.close();
+  assert.equal(result.code, 22, result.stderr);
+  assert.equal(service.calls.start, 1, "a refused code is not retried");
+});
+
+test("start without ARCHON_PUBLISH_CODE sends no Authorization header", async (t: TestContext) => {
+  const space = workspace(t);
+  const service = await fixture(t, { start: () => ({ status: 201, json: startBody(service.origin) }) });
+  const result = await startVia(space, service.origin);
+  await service.close();
+  assert.equal(result.code, 10, result.stderr);
+  assert.equal(service.seen.start[0]?.authorization, null);
+});
 
 test("start writes private state, prints exactly the C5 fields, and exits 10", async (t: TestContext) => {
   const space = workspace(t);
