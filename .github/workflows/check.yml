@@ -6,7 +6,8 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned: the browser runners' playwright@1.55.0 refuses ubuntu26.04 (#266).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
