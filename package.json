@@ -5,12 +5,16 @@
   "engines": {
     "node": ">=22.15.0"
   },
+  "scripts": {
+    "test:site-visual": "playwright test -c tests/site-visual/playwright.config.mjs"
+  },
   "dependencies": {
     "@netlify/blobs": "11.0.2",
     "jose": "6.1.0",
     "tldts": "7.4.12"
   },
   "devDependencies": {
-    "@netlify/functions": "6.0.0"
+    "@netlify/functions": "6.0.0",
+    "@playwright/test": "1.55.0"
   }
 }
