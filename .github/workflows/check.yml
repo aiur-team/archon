@@ -544,3 +544,45 @@ jobs:
 
       - name: every document rebuilds byte-identically
         run: templates/check-dist
+
+  # Screenshot baselines for the static site pages a signed-out visitor sees
+  # (splash, 404, welcome), taken before the aiur-style migration. The job runs
+  # inside the Playwright image whose version matches the pinned
+  # `@playwright/test`, so the rasteriser and system fonts are the ones that
+  # made the baselines; page fonts come from `tests/site-visual/fixtures/fonts`.
+  # It runs the suite twice and then requires a clean tree: a run that wrote or
+  # changed a baseline fails here instead of passing silently.
+  site-visual:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.55.0-noble
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: trust the checkout inside the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: build the site
+        run: templates/build --site
+
+      - name: site screenshots, first run
+        run: npm run test:site-visual
+
+      - name: site screenshots, second run
+        run: npm run test:site-visual
+
+      - name: no baseline was written or changed
+        run: |
+          git status --porcelain -- tests/site-visual
+          test -z "$(git status --porcelain -- tests/site-visual)"
+
+      # The *-actual.png and *-diff.png images a failing run leaves behind.
+      - name: upload screenshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-visual-diffs
+          path: /tmp/archon-site-visual
