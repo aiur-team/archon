@@ -289,7 +289,7 @@ function spyStorage({ exists = true, fail = false } = {}) {
     calls,
     exists: async (...args) => (step("exists")(...args), exists),
     put: async (...args) => step("put")(...args),
-    signRead: (...args) => (step("signRead")(...args), "https://storage.example/signed?X-Amz-Signature=sig"),
+    signRead: async (...args) => (step("signRead")(...args), "https://storage.example/signed?X-Amz-Signature=sig"),
   };
 }
 

@@ -66,10 +66,10 @@
 
 import { getStore } from "@netlify/blobs";
 
-import { documentStorageFromEnv } from "../lib/hosted/document-storage.mjs";
 import { SessionRequiredError } from "../lib/hosted/auth-errors.mjs";
 import { openAuthStore } from "../lib/hosted/auth-store.mjs";
 import { HostedContractError, encodeArtifactBytes } from "../lib/hosted/contracts.mjs";
+import { documentStorageFromEnv } from "../lib/hosted/document-storage.mjs";
 import { identifyHosted } from "../lib/hosted/identity.mjs";
 import { publicationDependencies, readAccessiblePublication } from "../lib/hosted/publications.mjs";
 import {
@@ -237,7 +237,7 @@ async function signedContentResponse(record, storage) {
     }
     return new Response(null, {
       status: 302,
-      headers: { ...PRIVATE_HEADERS, Location: storage.signRead(id, contentSha256) },
+      headers: { ...PRIVATE_HEADERS, Location: await storage.signRead(id, contentSha256) },
     });
   } catch {
     /* Closed: no proxy fallback, and nothing from the storage error is kept. */
