@@ -295,7 +295,12 @@ test("a storage failure before publication creation leaves the code retryable", 
   assert.equal(failed.status, 503);
   const succeeded = await start(bearer(code));
   assert.equal(succeeded.status, 201);
-  assert.equal((await start(bearer(code))).status, 201);
+  const firstBody = await succeeded.json();
+  const retry = await start(bearer(code));
+  const retryBody = await retry.json();
+  assert.equal(retry.status, 201);
+  assert.equal(retryBody.publicationId, firstBody.publicationId);
+  assert.equal(retryBody.agentSecret, firstBody.agentSecret);
 });
 
 test("start without a code is unchanged: pending and ownerless", async () => {
