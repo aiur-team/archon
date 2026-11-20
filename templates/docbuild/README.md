@@ -110,11 +110,12 @@ npx --no archon-publish resume --request <requestFile> --json
 ```
 
 A person who copied the prompt while signed in to the service hands you a
-one-hour, single-use publish code instead. Set it as `ARCHON_PUBLISH_CODE` in
-the environment, never as an argument. `start` then presents it, the publication
+one-hour publish code instead. It is bound to one document; retrying the same
+start resumes that publication. Set it as `ARCHON_PUBLISH_CODE` in the
+environment, never as an argument. `start` then presents it, the publication
 starts already approved as that person, and `start` uploads at once and exits 0
-with the receipt. A refused code (expired, spent or revoked) exits 22 and is not
-retried.
+with the receipt. A refused code (expired, revoked, superseded, or used for a
+different document) exits 22 and is not retried.
 
 `status` observes once without uploading, and `cancel` cancels a publication
 that has not completed. All three take `--request <file>` rather than a token,

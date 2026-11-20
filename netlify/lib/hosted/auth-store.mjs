@@ -113,14 +113,15 @@ export const TRANSIENT_TTL_SECONDS = 15 * 60;
 
 /**
  * Publish codes: a bearer a signed-in person hands their agent so it can start
- * one publication as them with no approval step (archon#253). Keyed by the
+ * one publication as them with no approval step (archon#253). Retries are
+ * bound to that publication by the publication store. Keyed by the
  * code's hash, like a session, but under a prefix no session lookup reads, so a
  * code can never be presented as a session or exchanged for one.
  */
 export const PUBLISH_CODE_PREFIX = "publish-codes/";
 
 /**
- * One pointer per account naming the only code that account may spend. Minting
+ * One pointer per account naming the only code that account may use. Minting
  * rewrites it, which is what makes a new code invalidate the previous one.
  */
 export const PUBLISH_CODE_ACCOUNT_PREFIX = "publish-code-accounts/";
@@ -515,7 +516,6 @@ export class AuthStore {
       principal: checked,
       createdAt: isoAt(at),
       expiresAt,
-      spentAt: null,
       revokedAt: null,
       writeId: randomToken(),
     };
@@ -523,24 +523,26 @@ export class AuthStore {
       throw unavailable();
     }
     const pointer = { v: 1, codeHash: hashToken(code), expiresAt, writeId: randomToken() };
-    await this.#applyGuarded(AuthStore.publishCodeAccountKey(checked.accountId), pointer, {});
+    if (!(await this.#applyGuarded(AuthStore.publishCodeAccountKey(checked.accountId), pointer, {}))) {
+      throw unavailable();
+    }
     return { code, expiresAt };
   }
 
   /**
    * The account's live code record, with its key and ETag, or null when it has
-   * none that could still be spent.
+   * none that is still active.
    */
   async #livePublishCode(accountId) {
     const pointer = await this.#read(AuthStore.publishCodeAccountKey(accountId));
     if (pointer === null || typeof pointer.data?.codeHash !== "string") return null;
     const key = `${PUBLISH_CODE_PREFIX}${pointer.data.codeHash}`;
     const found = await this.#read(key);
-    if (found === null || found.data?.spentAt || !isLive(found.data, this.now())) return null;
+    if (found === null || !isLive(found.data, this.now())) return null;
     return { key, found };
   }
 
-  /** Whether `accountId` holds a spendable code, as `{expiresAt}`, or null. Never the code. */
+  /** Whether `accountId` holds an active code, as `{expiresAt}`, or null. Never the code. */
   async readPublishCode(accountId) {
     if (typeof accountId !== "string" || accountId === "") return null;
     const live = await this.#livePublishCode(accountId);
@@ -556,18 +558,19 @@ export class AuthStore {
   }
 
   /**
-   * Spend a publish code, at most once, returning the principal it was issued
-   * to - or null for absent, expired, spent, revoked, superseded or a lost race.
-   * One answer for all of them, so a caller cannot probe which codes existed.
+   * Resolve a publish code to the principal and request-local seed it was
+   * issued with, or null for absent, expired, revoked or superseded. The
+   * publication state machine uses the seed to derive one deterministic
+   * publication; this value is never persisted or returned by an HTTP route.
    *
    * The principal comes from the stored record, never from the code: the code
    * is only a lookup key and carries no claims.
    */
-  async spendPublishCode(code) {
+  async resolvePublishCode(code) {
     if (typeof code !== "string" || code === "") return null;
     const key = AuthStore.publishCodeKey(code);
     const found = await this.#read(key);
-    if (found === null || found.data?.spentAt || !isLive(found.data, this.now())) return null;
+    if (found === null || !isLive(found.data, this.now())) return null;
     let principal;
     try {
       principal = validatePrincipal(found.data.principal);
@@ -579,10 +582,7 @@ export class AuthStore {
     if (pointer === null || typeof pointer.data?.codeHash !== "string") return null;
     if (!constantTimeEqual(pointer.data.codeHash, hashToken(code))) return null;
 
-    const etag = requireEtag(found.etag);
-    const spent = { ...found.data, spentAt: isoAt(this.now()), writeId: randomToken() };
-    if (!(await this.#applyGuarded(key, spent, { onlyIfMatch: etag }))) return null;
-    return principal;
+    return Object.freeze({ principal, code });
   }
 }
 

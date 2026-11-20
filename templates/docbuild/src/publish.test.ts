@@ -322,7 +322,7 @@ test("start with ARCHON_PUBLISH_CODE presents it, uploads at once and exits 0 wi
 test("start reports a refused publish code as a terminal local error", async (t: TestContext) => {
   const space = workspace(t);
   const service = await fixture(t, {
-    start: () => ({ status: 401, json: wireError("invalid_capability", false, "this publish code is expired, already used or revoked") }),
+    start: () => ({ status: 401, json: wireError("invalid_capability", false, "this publish code is expired, revoked or superseded") }),
   });
   const result = await cli(
     ["start", "--file", space.file, "--title", "A test document", "--service", service.origin, "--local-test", "--json"],

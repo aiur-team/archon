@@ -276,11 +276,14 @@ and nothing to wait for. Report `result.url`.
 
 What the code can and cannot do:
 
-- It starts **one** publication as the person who copied it. It cannot read their documents,
-  reach the admin console, act as a sign-in session, or mint another code.
-- It is spent on first use and expires one hour after it was copied. Copying the prompt again
-  mints a new code and kills the old one, and the person can revoke it from their account menu.
-- An expired, spent or revoked code is refused with `invalid_capability`
+- It starts **one** publication as the person who copied it. Retrying the same start returns that
+  publication and its same operation capability, including after an ambiguous storage failure.
+  The code cannot read their documents, reach the admin console, act as a sign-in session, or mint
+  another code.
+- It is bound to the first accepted document and expires one hour after it was copied. Copying the
+  prompt again mints a new code and kills the old one, and the person can revoke it from their
+  account menu.
+- An expired, revoked, superseded or differently-bound code is refused with `invalid_capability`
   (HTTP 401, `retryable: false`, exit 22). Do not retry it, and do not quietly switch to the approval
   flow below: tell the person, and ask them to copy the prompt again.
 - Treat it as a password. Do not echo it, log it, commit it or paste it anywhere else.

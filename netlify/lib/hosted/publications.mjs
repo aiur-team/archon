@@ -56,7 +56,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes as nodeRandomBytes, timingSafeEqual } from "node:crypto";
 
 import {
   HOSTED_LIMITS,
@@ -199,6 +199,44 @@ function mintUserCode(randomBytes) {
 /** A base64url capability string, 43 characters at `SECRET_BYTES` of entropy. */
 function mintSecret(randomBytes) {
   return Buffer.from(randomBytes(SECRET_BYTES)).toString("base64url");
+}
+
+/** Derive one stable secret for the publication a publish code names. */
+function publishCodeBytes(code, purpose, size = SECRET_BYTES) {
+  return createHmac("sha256", code)
+    .update("archon.publish-code.v1\0", "utf8")
+    .update(purpose, "utf8")
+    .update("\0", "utf8")
+    .digest()
+    .subarray(0, size);
+}
+
+/** A deterministic start result can be replayed after a lost response. */
+function publishCodeStartMaterial(code) {
+  const derived = (purpose, size) => publishCodeBytes(code, purpose, size);
+  let userCodeDraw = 0;
+  return {
+    id: derived("publication-id", ID_BYTES).toString("hex"),
+    agentSecret: derived("agent-secret").toString("base64url"),
+    browserSecret: derived("browser-secret").toString("base64url"),
+    userCode: mintUserCode((size) => derived(`user-code-${userCodeDraw++}`, size)),
+  };
+}
+
+/** Existing rows can advance, but their initial code-bound identity cannot change. */
+function matchesPublishCodeStart(existing, intended) {
+  return (
+    existing.id === intended.id &&
+    existing.ownerAccountId === intended.ownerAccountId &&
+    existing.ownerEmail === intended.ownerEmail &&
+    existing.descriptor.title === intended.descriptor.title &&
+    existing.descriptor.contentSha256 === intended.descriptor.contentSha256 &&
+    existing.descriptor.contentBytes === intended.descriptor.contentBytes &&
+    existing.descriptor.artifactFormat === intended.descriptor.artifactFormat &&
+    existing.agentSecretHash === intended.agentSecretHash &&
+    existing.browserSecretHash === intended.browserSecretHash &&
+    existing.userCode === intended.userCode
+  );
 }
 
 /** The receipt C3 hands back for a completed record. */
@@ -485,9 +523,16 @@ export async function createPublication(descriptor, dependencies, { resolveOwner
   }
   const validated = validateDescriptor(descriptor);
   /* A publish code (archon#253) names its owner up front, so the record starts
-     approved and no human approval step exists for it. Resolved only after the
-     request is otherwise acceptable, because resolving spends the code. */
-  const owner = resolveOwner === null ? null : validatePrincipal(await resolveOwner());
+     approved and no human approval step exists. Its hash also gives the row a
+     stable id and stable secrets, making a repeated start the same publication
+     after a lost response or storage failure. */
+  const authorization = resolveOwner === null ? null : await resolveOwner();
+  const owner = authorization === null ? null : validatePrincipal(authorization.principal);
+  const code = authorization?.code ?? null;
+  if (code !== null && (typeof code !== "string" || code.length === 0)) {
+    throw new TypeError("publish-code authorization must carry its request-local seed");
+  }
+  const codeMaterial = code === null ? null : publishCodeStartMaterial(code);
 
   /* A 128-bit id collides with probability nobody will ever observe, so this
      loop is not really about collisions - it is about never resolving one by
@@ -499,9 +544,9 @@ export async function createPublication(descriptor, dependencies, { resolveOwner
     const createdAtMs = now();
     const createdAt = isoAt(createdAtMs);
     const pendingExpiresAt = isoAfter(createdAtMs, HOSTED_LIMITS.PENDING_TTL_SECONDS);
-    const id = Buffer.from(randomBytes(ID_BYTES)).toString("hex");
-    const agentSecret = mintSecret(randomBytes);
-    const browserSecret = mintSecret(randomBytes);
+    const id = codeMaterial?.id ?? Buffer.from(randomBytes(ID_BYTES)).toString("hex");
+    const agentSecret = codeMaterial?.agentSecret ?? mintSecret(randomBytes);
+    const browserSecret = codeMaterial?.browserSecret ?? mintSecret(randomBytes);
 
     const record = validatePublication({
       v: PUBLICATION_RECORD_VERSION,
@@ -510,7 +555,7 @@ export async function createPublication(descriptor, dependencies, { resolveOwner
       state: owner === null ? "pending" : "approved",
       agentSecretHash: sha256Hex(agentSecret),
       browserSecretHash: sha256Hex(browserSecret),
-      userCode: mintUserCode(randomBytes),
+      userCode: codeMaterial?.userCode ?? mintUserCode(randomBytes),
       createdAt,
       pendingExpiresAt,
       /* Nobody has claimed the approval yet. `start` is anonymous by
@@ -541,7 +586,29 @@ export async function createPublication(descriptor, dependencies, { resolveOwner
     });
 
     const written = await store.create(record);
-    if (written.outcome !== "created") continue;
+    if (written.outcome !== "created") {
+      if (codeMaterial === null) continue;
+      const existing = await store.read(id);
+      if (existing !== null && matchesPublishCodeStart(existing.record, record)) {
+        return validateStartResponse(
+          {
+            v: 1,
+            publicationId: existing.record.id,
+            verificationUriComplete: `${appOrigin}${HOSTED_LIMITS.AUTHORIZE_PATH}#${existing.record.id}.${codeMaterial.browserSecret}`,
+            userCode: existing.record.userCode,
+            agentSecret: codeMaterial.agentSecret,
+            expiresAt: expiresAtFor(existing.record),
+            intervalSeconds: HOSTED_LIMITS.POLL_INTERVAL_SECONDS,
+          },
+          { appOrigin, production },
+        );
+      }
+      throw fail(
+        "invalid_capability",
+        "this publish code is already bound to a different document; ask the person to copy a new prompt",
+        "authorization",
+      );
+    }
 
     return validateStartResponse(
       {

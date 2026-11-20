@@ -1,8 +1,8 @@
 /**
  * archon#253: the publish code a signed-in person copies into their agent.
  *
- * Every guard the ticket names has a test here: single use, one-hour expiry,
- * revocation, minting superseding the previous code, hashed storage, the
+ * Every guard the ticket names has a test here: one-publication binding,
+ * one-hour expiry, revocation, minting superseding the previous code, hashed storage, the
  * terminal refusal, and the three things the code must never do - read a
  * document, reach the admin surface, or stand in for a session.
  */
@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { PUBLISH_CODE_TTL_SECONDS } from "../../lib/hosted/auth-store.mjs";
+import { AuthUnavailableError } from "../../lib/hosted/auth-errors.mjs";
 import { deriveCsrfToken, SESSION_COOKIE } from "../../lib/hosted/identity.mjs";
 import { createPublicationStore } from "../../lib/hosted/publication-store.mjs";
 import { readPublication } from "../../lib/hosted/publications.mjs";
@@ -51,6 +52,7 @@ function harness({ publishEnabled = true } = {}) {
   const config = hostedConfig();
   return {
     auth,
+    provider,
     publications,
     codeRoute: createPublishCodeRoute(() => ({ config, store: auth.store, publications })),
     start: (headers = {}, descriptor = VALID_DESCRIPTOR) =>
@@ -80,13 +82,12 @@ async function assertRefused(response, code) {
 /* the store                                                           */
 /* ------------------------------------------------------------------ */
 
-test("a minted code is spent once, for the principal it was issued to", async () => {
+test("a minted code resolves to the principal it was issued to", async () => {
   const { store } = memoryAuthStore();
   const { code, expiresAt } = await store.mintPublishCode(FIXTURE_PRINCIPAL);
   assert.deepEqual(await store.readPublishCode(FIXTURE_PRINCIPAL.accountId), { expiresAt });
-  assert.equal((await store.spendPublishCode(code)).accountId, FIXTURE_PRINCIPAL.accountId);
-  assert.equal(await store.spendPublishCode(code), null, "a spent code must not spend again");
-  assert.equal(await store.readPublishCode(FIXTURE_PRINCIPAL.accountId), null);
+  assert.equal((await store.resolvePublishCode(code)).principal.accountId, FIXTURE_PRINCIPAL.accountId);
+  assert.equal((await store.resolvePublishCode(code)).principal.accountId, FIXTURE_PRINCIPAL.accountId);
 });
 
 test("a code expires one hour after it was minted", async () => {
@@ -94,7 +95,7 @@ test("a code expires one hour after it was minted", async () => {
   const { code } = await store.mintPublishCode(FIXTURE_PRINCIPAL);
   assert.equal(PUBLISH_CODE_TTL_SECONDS, 3600);
   clock.advanceSeconds(PUBLISH_CODE_TTL_SECONDS);
-  assert.equal(await store.spendPublishCode(code), null);
+  assert.equal(await store.resolvePublishCode(code), null);
   assert.equal(await store.readPublishCode(FIXTURE_PRINCIPAL.accountId), null);
 });
 
@@ -102,7 +103,7 @@ test("revoking kills the code at once", async () => {
   const { store } = memoryAuthStore();
   const { code } = await store.mintPublishCode(FIXTURE_PRINCIPAL);
   assert.equal(await store.revokePublishCode(FIXTURE_PRINCIPAL.accountId), true);
-  assert.equal(await store.spendPublishCode(code), null);
+  assert.equal(await store.resolvePublishCode(code), null);
   assert.equal(await store.revokePublishCode(FIXTURE_PRINCIPAL.accountId), false);
 });
 
@@ -111,9 +112,19 @@ test("minting a new code invalidates the previous one, and only that account's",
   const first = await store.mintPublishCode(FIXTURE_PRINCIPAL);
   const other = await store.mintPublishCode(OTHER_PRINCIPAL);
   const second = await store.mintPublishCode(FIXTURE_PRINCIPAL);
-  assert.equal(await store.spendPublishCode(first.code), null);
-  assert.equal((await store.spendPublishCode(second.code)).accountId, FIXTURE_PRINCIPAL.accountId);
-  assert.equal((await store.spendPublishCode(other.code)).accountId, OTHER_PRINCIPAL.accountId);
+  assert.equal(await store.resolvePublishCode(first.code), null);
+  assert.equal((await store.resolvePublishCode(second.code)).principal.accountId, FIXTURE_PRINCIPAL.accountId);
+  assert.equal((await store.resolvePublishCode(other.code)).principal.accountId, OTHER_PRINCIPAL.accountId);
+});
+
+test("minting fails when the account pointer write is refused", async () => {
+  const { store, blobs } = memoryAuthStore();
+  const first = await store.mintPublishCode(FIXTURE_PRINCIPAL);
+  blobs.fail("publish-code-accounts/", "refuse");
+
+  await assert.rejects(() => store.mintPublishCode(FIXTURE_PRINCIPAL), AuthUnavailableError);
+  assert.deepEqual(await store.readPublishCode(FIXTURE_PRINCIPAL.accountId), { expiresAt: first.expiresAt });
+  assert.equal((await store.resolvePublishCode(first.code)).principal.accountId, FIXTURE_PRINCIPAL.accountId);
 });
 
 test("a code is stored only as a hash, and the account only as a hash in keys", async () => {
@@ -124,7 +135,7 @@ test("a code is stored only as a hash, and the account only as a hash in keys", 
   for (const key of blobs.keys()) assert.ok(!key.includes(FIXTURE_PRINCIPAL.accountId));
 });
 
-test("spending compares the stored code hash in constant time", () => {
+test("resolving compares the stored code hash in constant time", () => {
   const source = readFileSync(new URL("../../lib/hosted/auth-store.mjs", import.meta.url), "utf8");
   assert.match(
     source,
@@ -132,11 +143,9 @@ test("spending compares the stored code hash in constant time", () => {
   );
 });
 
-test("a lost race to spend is a refusal, not a second publication", async () => {
-  const { store, blobs } = memoryAuthStore();
-  const { code } = await store.mintPublishCode(FIXTURE_PRINCIPAL);
-  blobs.fail("publish-codes/", "refuse");
-  assert.equal(await store.spendPublishCode(code), null);
+test("retry capabilities derive from the request code, not the stored digest", () => {
+  const source = readFileSync(new URL("../../lib/hosted/publications.mjs", import.meta.url), "utf8");
+  assert.match(source, /createHmac\("sha256", code\)/);
 });
 
 /* ------------------------------------------------------------------ */
@@ -220,7 +229,7 @@ test("the route mints, reports and revokes for the signed-in account only", asyn
 
   const revoked = await codeRoute(browserRequest(CODE_PATH, { method: "DELETE", cookies, csrf }));
   assert.deepEqual(await revoked.json(), { v: 1, active: false, expiresAt: null });
-  assert.equal(await auth.store.spendPublishCode(code), null);
+  assert.equal(await auth.store.resolvePublishCode(code), null);
 });
 
 /* ------------------------------------------------------------------ */
@@ -238,8 +247,55 @@ test("start with a code creates an approved publication owned by the issuer", as
   assert.equal(record.state, "approved", "no human approval step exists for a code");
   assert.equal(record.ownerAccountId, FIXTURE_PRINCIPAL.accountId);
   assert.equal(body.expiresAt, record.uploadExpiresAt);
+});
 
-  await assertRefused(await start(bearer(code)), code);
+test("retrying the same code and descriptor returns the same publication", async () => {
+  const { auth, start } = harness();
+  const { code } = await auth.store.mintPublishCode(FIXTURE_PRINCIPAL);
+
+  const first = await start(bearer(code));
+  const firstBody = await first.json();
+  const retry = await start(bearer(code));
+  const retryBody = await retry.json();
+
+  assert.equal(first.status, 201);
+  assert.equal(retry.status, 201);
+  assert.equal(retryBody.publicationId, firstBody.publicationId);
+  assert.equal(retryBody.agentSecret, firstBody.agentSecret);
+  assert.equal(retryBody.verificationUriComplete, firstBody.verificationUriComplete);
+});
+
+test("concurrent starts with one code converge on the same publication", async () => {
+  const { auth, start } = harness();
+  const { code } = await auth.store.mintPublishCode(FIXTURE_PRINCIPAL);
+  const [left, right] = await Promise.all([start(bearer(code)), start(bearer(code))]);
+  const leftBody = await left.json();
+  const rightBody = await right.json();
+
+  assert.equal(left.status, 201);
+  assert.equal(right.status, 201);
+  assert.equal(leftBody.publicationId, rightBody.publicationId);
+  assert.equal(leftBody.agentSecret, rightBody.agentSecret);
+});
+
+test("a publish code cannot bind itself to a second descriptor", async () => {
+  const { auth, start } = harness();
+  const { code } = await auth.store.mintPublishCode(FIXTURE_PRINCIPAL);
+  assert.equal((await start(bearer(code))).status, 201);
+
+  await assertRefused(await start(bearer(code), { ...VALID_DESCRIPTOR, title: "Another title" }), code);
+});
+
+test("a storage failure before publication creation leaves the code retryable", async () => {
+  const { auth, provider, start } = harness();
+  const { code } = await auth.store.mintPublishCode(FIXTURE_PRINCIPAL);
+  provider.failNextWrite({ throwsBeforeCommit: true });
+
+  const failed = await start(bearer(code));
+  assert.equal(failed.status, 503);
+  const succeeded = await start(bearer(code));
+  assert.equal(succeeded.status, 201);
+  assert.equal((await start(bearer(code))).status, 201);
 });
 
 test("start without a code is unchanged: pending and ownerless", async () => {
@@ -263,7 +319,7 @@ test("start refuses an unknown, revoked or superseded code with a terminal error
   await assertRefused(await start(bearer(old.code)), old.code);
 });
 
-test("start does not spend a code on a request it would refuse anyway", async () => {
+test("a rejected start does not bind a code to a publication", async () => {
   const disabled = harness({ publishEnabled: false });
   const { code } = await disabled.auth.store.mintPublishCode(FIXTURE_PRINCIPAL);
   assert.equal((await disabled.start(bearer(code))).status, 503);

@@ -46,7 +46,7 @@ export async function handleStart(request, resolveDependencies) {
 
     const descriptor = await jsonBody(request);
     /* No Authorization header is the anonymous flow. A bearer here can only be
-       a publish code (archon#253); one that does not spend is refused outright
+       a publish code (archon#253); one that does not resolve is refused outright
        rather than falling back to the approval flow the caller meant to skip. */
     const code = request.headers.get("authorization") === null ? null : agentSecretFrom(request);
     const dependencies = resolveDependencies();
@@ -55,15 +55,15 @@ export async function handleStart(request, resolveDependencies) {
         code === null
           ? null
           : async () => {
-              const owner = await dependencies.authStore.spendPublishCode(code);
-              if (owner === null) {
+              const authorization = await dependencies.authStore.resolvePublishCode(code);
+              if (authorization === null) {
                 throw new HostedContractError(
                   "invalid_capability",
-                  "this publish code is expired, already used or revoked; ask the person to copy the prompt again for a new one",
+                  "this publish code is expired, revoked or superseded; ask the person to copy the prompt again for a new one",
                   { field: "authorization" },
                 );
               }
-              return owner;
+              return authorization;
             },
     });
     return jsonResponse(201, started);

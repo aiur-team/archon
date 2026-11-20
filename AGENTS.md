@@ -66,10 +66,12 @@ ask to publish, and the code is a credential: use it as in section 5, and do not
     ARCHON_PUBLISH_CODE=<code> npx --no archon-publish start --file my-doc/dist/my-doc.hosted.html --title "..." --service https://archon.aiur.team --json
 
 There is no link and no approval to wait for. Exit 0 returns the receipt; report `result.url`.
-The code publishes one document as that person and does nothing else. It is spent on first use
-and expires an hour after they copied it. Exit 22 with `invalid_capability` means it was expired,
-already used or revoked. That is final, so ask them to copy the prompt again. Do not fall back to
-the approval flow unless they ask you to.
+The code publishes one document as that person and does nothing else. The first accepted start
+binds it to that document; retrying the same start resumes the same publication and returns the
+same operation capability. It expires an hour after they copied it. Exit 22 with
+`invalid_capability` means it was expired, revoked, superseded by a newer code, or presented for a
+different document. That is final, so ask them to copy the prompt again. Do not fall back to the
+approval flow unless they ask you to.
 
 **Without a code:**
 

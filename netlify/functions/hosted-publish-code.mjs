@@ -1,7 +1,7 @@
 /**
  * `/api/hosted/publish-code` - the signed-in person's publish code (archon#253).
  *
- *  - `GET` reports whether a spendable code exists and when it expires. It never
+ *  - `GET` reports whether an active code exists and when it expires. It never
  *    returns the code itself, which is shown exactly once, on mint.
  *  - `POST` mints a code, replacing any earlier one.
  *  - `DELETE` revokes the live code.
