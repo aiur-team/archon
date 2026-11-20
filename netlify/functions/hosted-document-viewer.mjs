@@ -62,6 +62,7 @@ import { getStore } from "@netlify/blobs";
 import { openAuthStore } from "../lib/hosted/auth-store.mjs";
 import { readHostedConfig } from "../lib/hosted/config.mjs";
 import { HostedContractError } from "../lib/hosted/contracts.mjs";
+import { readDocumentStorageConfig } from "../lib/hosted/document-storage.mjs";
 import { identifyHosted } from "../lib/hosted/identity.mjs";
 import { publicationDependencies, readAccessiblePublication } from "../lib/hosted/publications.mjs";
 import {
@@ -101,7 +102,7 @@ function methodNotAllowedPage() {
 }
 
 /** The route, over injected dependencies. Exported so tests need no environment. */
-export function createViewerRoute({ store, config: hostedConfig, publications }) {
+export function createViewerRoute({ store, config: hostedConfig, publications, storageOrigin = null }) {
   return async function viewerRoute(request) {
     const method = request.method === "HEAD" ? "HEAD" : "GET";
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -157,7 +158,7 @@ export function createViewerRoute({ store, config: hostedConfig, publications })
     }
 
     return htmlResponse(viewerShell(hostedConfig.renderOrigin), {
-      csp: viewerCsp(hostedConfig.renderOrigin),
+      csp: viewerCsp(hostedConfig.renderOrigin, storageOrigin),
       method,
     });
   };
@@ -178,6 +179,7 @@ export default async function viewer(request) {
       store: openAuthStore(),
       config: hostedConfig,
       publications: publicationDependencies({ env: process.env, getStore }),
+      storageOrigin: readDocumentStorageConfig(process.env)?.endpoint ?? null,
     })(request);
   } catch {
     return unavailablePage(request.method === "HEAD" ? "HEAD" : "GET");

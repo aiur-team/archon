@@ -165,13 +165,14 @@ export const VIEWER_ASSET_PATHS = Object.freeze({
  * and not a page that keeps generating a violation it cannot act on. The
  * document itself renders in the cross-origin frame and draws no image here.
  */
-export function viewerCsp(renderOrigin) {
+export function viewerCsp(renderOrigin, storageOrigin = null) {
   return [
     "default-src 'none'",
     "script-src 'self'",
     "style-src 'self'",
     "img-src 'self'",
-    "connect-src 'self'",
+    /* With object storage configured the content route redirects there. */
+    storageOrigin === null ? "connect-src 'self'" : `connect-src 'self' ${storageOrigin}`,
     `frame-src ${renderOrigin}`,
     "form-action 'none'",
     "frame-ancestors 'none'",

@@ -234,6 +234,18 @@ headers it gets. Every value below is a placeholder under a reserved documentati
    | `ARCHON_EMAIL_API_KEY` | **yes** | Optional; the provider API key |
    | `ARCHON_EMAIL_SENDER` | no | Optional; the address invite requests are sent from |
    | `ARCHON_EMAIL_RECIPIENT` | no | Optional; the admin address invite requests go to |
+   | `ARCHON_STORAGE_ENDPOINT` | no | Optional; S3-compatible API origin, e.g. `https://<account>.r2.cloudflarestorage.com`. Set all five `ARCHON_STORAGE_*` keys or none |
+   | `ARCHON_STORAGE_REGION` | no | Optional; the bucket region (`auto` on R2) |
+   | `ARCHON_STORAGE_BUCKET` | no | Optional; a **private** bucket: no public access, no anonymous listing |
+   | `ARCHON_STORAGE_ACCESS_KEY_ID` | no | Optional; key scoped to that bucket (get, put, delete, list) |
+   | `ARCHON_STORAGE_SECRET_ACCESS_KEY` | **yes** | Optional; the key's secret |
+
+   With the five `ARCHON_STORAGE_*` keys set, published bytes go to that bucket (S3, R2, B2 or MinIO; the
+   endpoint is the only difference) under `documents/<id>/<sha256>`, keeping the latest plus 3 prior versions.
+   A reader is authorised first, then redirected to a signed URL that expires after 5 minutes. Give the bucket
+   a CORS rule allowing `GET` from `HOSTED_APP_ORIGIN`, since the viewer follows that redirect. Documents
+   published before the keys were set are copied over on first read. Without the keys, bytes stay in Netlify
+   Blobs as before. Scope the secret to Functions where your plan allows it.
 
    The free plan has no per-scope environment variables, so every value here is site-wide and the client
    secret is readable by the build step. The mitigation is that no build-time code reads it: only the
