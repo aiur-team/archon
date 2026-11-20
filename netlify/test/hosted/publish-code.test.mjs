@@ -8,6 +8,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { PUBLISH_CODE_TTL_SECONDS } from "../../lib/hosted/auth-store.mjs";
@@ -121,6 +122,14 @@ test("a code is stored only as a hash, and the account only as a hash in keys", 
   const everything = JSON.stringify([...blobs.entries]);
   assert.ok(!everything.includes(code), "the raw code must not be stored");
   for (const key of blobs.keys()) assert.ok(!key.includes(FIXTURE_PRINCIPAL.accountId));
+});
+
+test("spending compares the stored code hash in constant time", () => {
+  const source = readFileSync(new URL("../../lib/hosted/auth-store.mjs", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /if \(!constantTimeEqual\(pointer\.data\.codeHash, hashToken\(code\)\)\) return null;/,
+  );
 });
 
 test("a lost race to spend is a refusal, not a second publication", async () => {
