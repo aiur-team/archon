@@ -477,13 +477,17 @@ function normalizeAccessList(allowedDomains, allowPublicMailboxes) {
  * already-complete branch in `completePublication` - because turning publishing
  * off must not strand a receipt that was already earned.
  */
-export async function createPublication(descriptor, dependencies) {
+export async function createPublication(descriptor, dependencies, { resolveOwner = null } = {}) {
   const { store, appOrigin, production, publishEnabled, now, randomBytes } =
     requireDependencies(dependencies);
   if (!publishEnabled) {
     throw fail("publishing_disabled", "hosted publishing is disabled on this deployment");
   }
   const validated = validateDescriptor(descriptor);
+  /* A publish code (archon#253) names its owner up front, so the record starts
+     approved and no human approval step exists for it. Resolved only after the
+     request is otherwise acceptable, because resolving spends the code. */
+  const owner = resolveOwner === null ? null : validatePrincipal(await resolveOwner());
 
   /* A 128-bit id collides with probability nobody will ever observe, so this
      loop is not really about collisions - it is about never resolving one by
@@ -503,7 +507,7 @@ export async function createPublication(descriptor, dependencies) {
       v: PUBLICATION_RECORD_VERSION,
       id,
       descriptor: validated,
-      state: "pending",
+      state: owner === null ? "pending" : "approved",
       agentSecretHash: sha256Hex(agentSecret),
       browserSecretHash: sha256Hex(browserSecret),
       userCode: mintUserCode(randomBytes),
@@ -527,6 +531,13 @@ export async function createPublication(descriptor, dependencies) {
       completedAt: null,
       receiptExpiresAt: null,
       html: null,
+      ...(owner === null
+        ? {}
+        : {
+            ownerAccountId: owner.accountId,
+            ownerEmail: ownerEmailOf(owner),
+            uploadExpiresAt: isoAfter(createdAtMs, HOSTED_LIMITS.UPLOAD_TTL_SECONDS),
+          }),
     });
 
     const written = await store.create(record);
@@ -544,7 +555,7 @@ export async function createPublication(descriptor, dependencies) {
         verificationUriComplete: `${appOrigin}${HOSTED_LIMITS.AUTHORIZE_PATH}#${record.id}.${browserSecret}`,
         userCode: record.userCode,
         agentSecret,
-        expiresAt: record.pendingExpiresAt,
+        expiresAt: expiresAtFor(record),
         intervalSeconds: HOSTED_LIMITS.POLL_INTERVAL_SECONDS,
       },
       { appOrigin, production },

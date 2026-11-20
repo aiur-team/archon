@@ -205,6 +205,7 @@
     .site-signin .account-trigger { max-width: 9.5rem; }
   }
   /* nav:end */
+  .publish-code-note { margin: 0.5em 0 0; font-size: 0.8em; opacity: 0.8; }
 
   main {
     width: 100%;
@@ -371,6 +372,7 @@
         <span class="account-name" id="siteAccountName"></span>
       </button>
       <div class="account-menu" id="siteAccountMenu" hidden>
+        <button type="button" id="sitePublishCodeRevoke" hidden>Revoke publish code</button>
         <form method="post" action="/api/hosted/auth/logout">
           <input type="hidden" name="csrfToken" id="siteLogoutCsrf" value="">
           <button type="submit">Log out</button>
@@ -406,6 +408,7 @@
                 <span class="copy-status" role="status" aria-live="polite" id="copyStatus"></span>
               </button>
             </div>
+            <p class="publish-code-note" id="publishCodeNote" hidden>Signed in: copying adds a publish code that lets your agent publish one document as you, and nothing else. It expires in 1 hour; revoke it from your account menu.</p>
           </div>
         </div>
       </li>
@@ -455,6 +458,28 @@
     const accountAvatar = document.getElementById("siteAccountAvatar");
     const accountInitial = document.getElementById("siteAccountInitial");
     const logoutCsrf = document.getElementById("siteLogoutCsrf");
+    const codeRevoke = document.getElementById("sitePublishCodeRevoke");
+
+    /* archon#253: a live publish code is shown in this menu with a way to kill
+       it. The copy control mints one and announces it with `archon:publishcode`;
+       this menu announces a revocation the same way, so the prompt drops it. */
+    function showPublishCode(state) {
+      const active = state !== null && state.active === true;
+      codeRevoke.hidden = !active;
+      codeRevoke.textContent = active
+        ? "Revoke publish code (until " + new Date(state.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + ")"
+        : "Revoke publish code";
+    }
+    document.addEventListener("archon:publishcode", (event) => showPublishCode(event.detail));
+    codeRevoke.addEventListener("click", async () => {
+      try {
+        const r = await fetch("/api/hosted/publish-code", { method: "DELETE", credentials: "same-origin", headers: { accept: "application/json", "x-archon-csrf": logoutCsrf.value } });
+        if (!r.ok) throw new Error("unavailable");
+        document.dispatchEvent(new CustomEvent("archon:publishcode", { detail: await r.json() }));
+        closeMenu();
+        accountBtn.focus();
+      } catch { codeRevoke.textContent = "Revoke failed — try again"; }
+    });
 
     function closeMenu() {
       accountMenu.hidden = true;
@@ -505,12 +530,18 @@
       closeMenu();
       form.hidden = true;
       account.hidden = false;
+      document.dispatchEvent(new CustomEvent("archon:session", { detail: { csrfToken: logoutCsrf.value } }));
+      fetch("/api/hosted/publish-code", { credentials: "same-origin", headers: { accept: "application/json" } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then(showPublishCode, () => showPublishCode(null));
     }
     function showSignedOut() {
       closeMenu();
       logoutCsrf.value = "";
+      showPublishCode(null);
       account.hidden = true;
       form.hidden = false;
+      document.dispatchEvent(new CustomEvent("archon:session", { detail: null }));
     }
     /* nav-script:end */
 
@@ -575,13 +606,42 @@
       } catch (error) { /* nothing more to offer */ }
     }
 
-    btn.addEventListener("click", function () {
-      var text = line.textContent;
+    function copy() {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(confirm, selectLine);
+        navigator.clipboard.writeText(line.textContent).then(confirm, selectLine);
       } else {
         selectLine();
       }
+    }
+
+    /* archon#253: signed in, Copy mints a single-use publish code and appends
+       it, so the agent can publish as this person with no approval step.
+       Signed out, the line is never touched. */
+    var PROMPT = line.textContent;
+    var note = document.getElementById("publishCodeNote");
+    var csrf = null;
+    document.addEventListener("archon:session", function (event) {
+      csrf = event.detail ? event.detail.csrfToken : null;
+      if (note) note.hidden = !csrf;
+      line.textContent = PROMPT;
+    });
+    document.addEventListener("archon:publishcode", function (event) {
+      if (!event.detail || event.detail.active !== true) line.textContent = PROMPT;
+    });
+
+    btn.addEventListener("click", function () {
+      if (!csrf) { copy(); return; }
+      fetch("/api/hosted/publish-code", { method: "POST", credentials: "same-origin", headers: { accept: "application/json", "x-archon-csrf": csrf } })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("unavailable")); })
+        .then(function (minted) {
+          line.textContent = PROMPT + " Publish it as me: ARCHON_PUBLISH_CODE=" + minted.code;
+          document.dispatchEvent(new CustomEvent("archon:publishcode", { detail: { active: true, expiresAt: minted.expiresAt } }));
+          copy();
+        }, function () {
+          line.textContent = PROMPT;
+          if (note) note.textContent = "Could not create a publish code, so the prompt was copied without one.";
+          copy();
+        });
     });
   })();
 </script>

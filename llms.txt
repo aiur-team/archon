@@ -12,3 +12,8 @@
 ## The prompt a person uses
 
     Turn my artifact into an Archon doc: https://archon.aiur.team
+
+A person who is signed in copies the same line with a publish code on the end
+(`Publish it as me: ARCHON_PUBLISH_CODE=…`). That asks you to publish, and the
+code lets `archon-publish start` publish one document as them with no approval
+link. See AGENTS.md section 5.

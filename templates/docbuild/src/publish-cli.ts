@@ -46,6 +46,7 @@ import {
   startPublication,
   STATE_DIR_ENV,
   SERVICE_ORIGIN_ENV,
+  PUBLISH_CODE_ENV,
   validateTimeoutSeconds,
   type PublicationState,
   type Receipt,
@@ -95,7 +96,9 @@ Exit codes
   22  Local input, request-state or protocol error. Nothing was published.
   23  A retryable service or network condition. Try the same command again.
 
-A human approves the publication in a browser. This command never signs in,
+A human approves the publication in a browser, unless ${PUBLISH_CODE_ENV} holds
+the publish code they copied while signed in: then start uploads at once and
+exits 0 with the receipt. A refused code exits 22; ask them for a new one. This command never signs in,
 never sees a GitHub credential or a browser cookie, and never stores an account
 login — only a capability for the single publication it started.
 `;
@@ -347,11 +350,26 @@ async function runStart(options: Options): Promise<number> {
   );
   const stateDir = options.flags.get("--state-dir") ?? defaultStateDir(process.env);
 
+  /* An empty value is unset, like the service origin, so a stray
+     `export ARCHON_PUBLISH_CODE=` falls back to the approval flow. */
+  const publishCode = process.env[PUBLISH_CODE_ENV] || undefined;
+
   note(`publishing ${stripControls(basename(file))} to ${serviceOrigin}`);
   const { state, requestFile } = await startPublication(
-    { file, title, serviceOrigin, localTest: options.localTest, stateDir },
+    { file, title, serviceOrigin, localTest: options.localTest, stateDir, ...(publishCode === undefined ? {} : { publishCode }) },
     defaultDeps(),
   );
+
+  if (publishCode !== undefined) {
+    /* The code made the person's consent up front, so the publication is
+       already approved: upload now and report the receipt like `resume`. */
+    note(`publish code accepted; uploading to ${serviceOrigin}`);
+    const outcome = await resumePublication(state, defaultDeps(), PUBLISH_CONTRACT.RESUME_TIMEOUT_DEFAULT_SECONDS);
+    return reportEnvelope(options, state, requestFile, outcome.envelope, {
+      timedOut: outcome.timedOut,
+      windowClosed: outcome.windowClosed,
+    });
+  }
 
   const nextAction = `Ask the human to open ${state.verificationUrl}, confirm the pairing code ${state.userCode}, sign in and approve. Then run: archon-publish resume --request ${stripControls(requestFile)}`;
   /* Exactly the eight fields C5 fixes for this command, and no others. The

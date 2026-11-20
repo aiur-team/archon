@@ -360,6 +360,14 @@ export const RELEASED_SERVICE_ORIGIN: string | null = null;
 export const SERVICE_ORIGIN_ENV = "ARCHON_PUBLISH_SERVICE";
 
 /**
+ * The publish code a signed-in person copied with the splash prompt
+ * (archon#253). Read from the environment so it never appears in `ps` output;
+ * when set, `start` presents it as the bearer and the publication starts
+ * approved, owned by that person, with no approval link.
+ */
+export const PUBLISH_CODE_ENV = "ARCHON_PUBLISH_CODE";
+
+/**
  * Validate one service origin, returning its canonical serialization.
  *
  * `URL.origin` is the comparison every later check performs, so the accepted
@@ -1469,6 +1477,8 @@ export interface StartInput {
   readonly serviceOrigin: string;
   readonly localTest: boolean;
   readonly stateDir: string;
+  /** A publish code from `ARCHON_PUBLISH_CODE`, presented as the start bearer. */
+  readonly publishCode?: string;
 }
 
 export interface StartResult {
@@ -1494,6 +1504,7 @@ export async function startPublication(input: StartInput, deps: PublishDeps): Pr
     path: "/api/hosted/publications",
     method: "POST",
     json: descriptor,
+    ...(input.publishCode === undefined ? {} : { bearer: input.publishCode }),
   });
   if (response.status !== 201) {
     if (response.status === 200) {
