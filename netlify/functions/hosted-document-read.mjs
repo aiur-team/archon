@@ -51,6 +51,17 @@
  * exact inverse of the decode AHU-004 committed, byte-order mark included. An
  * owner's download hashes to the digest they approved; anything else would make
  * the digest in the metadata a number about a different document.
+ *
+ * ## When document storage is configured
+ *
+ * With `ARCHON_STORAGE_*` set, the content route does not proxy the bytes. It
+ * runs the identical authorisation above, and only then mints a short-lived
+ * signed URL (`document-storage.mjs`) and answers 302 to it, so the
+ * private bucket serves the bytes directly. The URL goes in `Location` to this
+ * one entitled caller and nowhere else: it is not logged, not stored, and not
+ * part of any error. A storage fault is a 503, never a fallback to proxying.
+ * A record completed before storage was configured is copied into storage on
+ * its first authorised read, which is the migration path off Netlify Blobs.
  */
 
 import { getStore } from "@netlify/blobs";
@@ -58,6 +69,7 @@ import { getStore } from "@netlify/blobs";
 import { SessionRequiredError } from "../lib/hosted/auth-errors.mjs";
 import { openAuthStore } from "../lib/hosted/auth-store.mjs";
 import { HostedContractError, encodeArtifactBytes } from "../lib/hosted/contracts.mjs";
+import { documentStorageFromEnv } from "../lib/hosted/document-storage.mjs";
 import { identifyHosted } from "../lib/hosted/identity.mjs";
 import { publicationDependencies, readAccessiblePublication } from "../lib/hosted/publications.mjs";
 import {
@@ -127,7 +139,7 @@ async function readForRequest(request, { store, publications, pattern }) {
 const DISCLOSABLE_CODES = Object.freeze(["unavailable", "email_unverified"]);
 
 /** The two routes, over injected dependencies. */
-export function createDocumentReadRoutes({ store, publications }) {
+export function createDocumentReadRoutes({ store, publications, storage = null }) {
   return async function documentRead(request) {
     try {
       if (request.method !== "GET" && request.method !== "HEAD") {
@@ -147,7 +159,10 @@ export function createDocumentReadRoutes({ store, publications }) {
         pattern: content ? CONTENT_PATTERN : METADATA_PATTERN,
       });
 
-      const response = content ? rawContentResponse(record) : metadataResponse(record);
+      let response;
+      if (!content) response = metadataResponse(record);
+      else if (storage === null) response = rawContentResponse(record);
+      else response = await signedContentResponse(record, storage);
       return request.method === "HEAD" ? withoutBody(response) : response;
     } catch (error) {
       return privateErrorResponse(error, request);
@@ -210,6 +225,29 @@ function rawContentResponse(record) {
 }
 
 /**
+ * A redirect to the bytes in object storage. Called only with a record the
+ * reader was just authorised for; this is the only place a read URL is minted.
+ */
+async function signedContentResponse(record, storage) {
+  const { id } = record;
+  const { contentSha256 } = record.descriptor;
+  try {
+    if (!(await storage.exists(id, contentSha256))) {
+      await storage.put(id, contentSha256, encodeArtifactBytes(record.html));
+    }
+    return new Response(null, {
+      status: 302,
+      headers: { ...PRIVATE_HEADERS, Location: await storage.signRead(id, contentSha256) },
+    });
+  } catch {
+    /* Closed: no proxy fallback, and nothing from the storage error is kept. */
+    throw new HostedContractError("unavailable", "document storage is unavailable", {
+      field: "document",
+    });
+  }
+}
+
+/**
  * The Netlify entry point: the same routes, wired to the real provider.
  *
  * The catch covers the two things that happen before the routes exist -- opening
@@ -224,6 +262,7 @@ export default async function documentRead(request) {
     return await createDocumentReadRoutes({
       store: openAuthStore(),
       publications: publicationDependencies({ env: process.env, getStore }),
+      storage: documentStorageFromEnv(process.env),
     })(request);
   } catch (error) {
     return privateErrorResponse(error, request);

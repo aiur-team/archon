@@ -28,7 +28,8 @@
 
 import { getStore } from "@netlify/blobs";
 
-import { HostedContractError } from "../lib/hosted/contracts.mjs";
+import { HostedContractError, encodeArtifactBytes } from "../lib/hosted/contracts.mjs";
+import { documentStorageFromEnv } from "../lib/hosted/document-storage.mjs";
 import { readArtifactBody } from "../lib/hosted/artifact-body.mjs";
 import {
   completePublication,
@@ -110,7 +111,7 @@ async function envelopeAfterCommit(capability, dependencies) {
  * The transport rejections come first, so a wrong method on a misconfigured
  * deploy is still reported as a wrong method.
  */
-export async function handleArtifact(request, resolveDependencies) {
+export async function handleArtifact(request, resolveDependencies, resolveStorage = () => null) {
   try {
     const wrongMethod = methodRejection(request, "PUT");
     if (wrongMethod !== null) return wrongMethod;
@@ -120,6 +121,7 @@ export async function handleArtifact(request, resolveDependencies) {
     const publicationId = publicationIdFrom(request, "artifact");
     const agentSecret = agentSecretFrom(request);
     const dependencies = resolveDependencies();
+    const storage = resolveStorage();
 
     /* The preflight authenticates the bearer and reports the state without
        touching storage for a write and without exposing a private field: the
@@ -150,6 +152,15 @@ export async function handleArtifact(request, resolveDependencies) {
       { publicationId, agentSecret, html, contentSha256, contentBytes },
       dependencies,
     );
+    /* After the commit, so storage never holds bytes no record approved. A
+       fault here is a 503 and the caller's retry (an identical 200) re-puts. */
+    if (storage !== null) {
+      try {
+        await storage.put(publicationId, contentSha256, encodeArtifactBytes(html));
+      } catch {
+        throw new HostedContractError("unavailable", "document storage is unavailable");
+      }
+    }
 
     /* C3 asks for the status shape, and the receipt deadline that shape carries
        is only known to the record - so the envelope is re-read rather than
@@ -167,6 +178,10 @@ export async function handleArtifact(request, resolveDependencies) {
 
 /** The Netlify entry point: the same handler, wired to the real provider. */
 export default (request) =>
-  handleArtifact(request, () => publicationDependencies({ env: process.env, getStore }));
+  handleArtifact(
+    request,
+    () => publicationDependencies({ env: process.env, getStore }),
+    () => documentStorageFromEnv(process.env),
+  );
 
 export const config = { path: "/api/hosted/publications/:publicationId/artifact" };
